@@ -1,0 +1,215 @@
+.composer {
+  position: relative;
+  z-index: 4;
+  flex: 0 0 auto;
+  padding: 10px clamp(12px, 3vw, 28px) calc(12px + env(safe-area-inset-bottom));
+  background: var(--surface);
+  box-shadow: var(--shadow-composer);
+}
+
+.attachment {
+  display: flex;
+  max-width: 520px;
+  min-height: 52px;
+  align-items: center;
+  gap: 10px;
+  margin: 0 auto 8px;
+  padding: 4px 4px 4px 6px;
+  border-radius: var(--r-md);
+  background: var(--surface-muted);
+  font-size: 12px;
+}
+
+.attachment img {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border-radius: var(--r-sm);
+  object-fit: cover;
+  outline: 1px solid rgb(0 0 0 / 0.1);
+  outline-offset: -1px;
+}
+
+.attachment span {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.remove {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--danger);
+  background: transparent;
+  cursor: pointer;
+}
+
+.inputRow {
+  display: flex;
+  width: min(100%, 780px);
+  min-height: 60px;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 0 auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgb(20 28 26 / 0.1);
+  transition-property: box-shadow, border-color;
+  transition-duration: 150ms;
+}
+
+.inputRow:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 16%, transparent), 0 3px 12px rgb(20 28 26 / 0.09);
+}
+
+.inputRow[data-error="true"] {
+  border-color: var(--danger);
+}
+
+.inputRow textarea {
+  width: 100%;
+  min-height: 52px;
+  max-height: 120px;
+  flex: 1;
+  resize: none;
+  padding: 10px 7px;
+  overflow-y: auto;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.inputRow textarea::placeholder {
+  color: color-mix(in oklch, var(--ink-muted) 82%, transparent);
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.fileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.iconButton,
+.sendButton,
+.cancelButton,
+.pendingButton {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition-property: transform, background-color, color;
+  transition-duration: 140ms;
+}
+
+.iconButton {
+  color: var(--ink-muted);
+  background: var(--surface-muted);
+}
+
+.sendButton {
+  color: #fff8f6;
+  background: var(--accent);
+}
+
+.cancelButton {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pendingButton {
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.metaRow {
+  display: flex;
+  width: min(100%, 780px);
+  min-height: 19px;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 2px auto 0;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.error {
+  color: var(--danger);
+}
+
+.count {
+  margin-left: auto;
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.spinning {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (hover: hover) {
+  .iconButton:hover {
+    color: var(--ink);
+    background: var(--surface-pressed);
+  }
+
+  .sendButton:hover {
+    background: var(--accent-hover);
+  }
+}
+
+@media (max-width: 640px) {
+  .composer {
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-left: max(8px, env(safe-area-inset-left));
+  }
+
+  .inputRow {
+    gap: 4px;
+  }
+
+  .inputRow textarea {
+    padding-right: 3px;
+  }
+
+  .iconButton,
+  .sendButton,
+  .cancelButton {
+    width: 40px;
+    height: 40px;
+  }
+
+  .pendingButton {
+    width: 40px;
+    height: 40px;
+  }
+}

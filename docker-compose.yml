@@ -1,0 +1,179 @@
+name: shopping-agent
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - shopping_agent
+
+  opensearch:
+    image: opensearchproject/opensearch:2.17.1
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      plugins.security.disabled: "true"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:${OPENSEARCH_PORT:-9200}:9200"
+      - "127.0.0.1:${OPENSEARCH_METRICS_PORT:-9600}:9600"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl --silent --fail 'http://localhost:9200/_cluster/health?wait_for_status=yellow' >/dev/null || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - shopping_agent
+
+  opensearch-init:
+    profiles: ["bootstrap"]
+    image: curlimages/curl:8.10.1
+    restart: "no"
+    environment:
+      OPENSEARCH_URL: http://opensearch:9200
+      OPENSEARCH_CATEGORY_INDEX: "${OPENSEARCH_CATEGORY_INDEX:-shopping_agent_category_kb}"
+      OPENSEARCH_SEARCH_PIPELINE: "${OPENSEARCH_SEARCH_PIPELINE:-shopping-agent-hybrid-pipeline}"
+    volumes:
+      - ./docker/opensearch:/config:ro
+    entrypoint: ["/bin/sh", "/config/bootstrap.sh"]
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    networks:
+      - shopping_agent
+
+  backend:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    restart: unless-stopped
+    environment:
+      APP_ENV: "${APP_ENV:-development}"
+      AGENT_MODE: "${AGENT_MODE:-auto}"
+      SANDBOX_MODE: "${SANDBOX_MODE:-false}"
+      ALLOW_FIXTURE_FALLBACK: "${ALLOW_FIXTURE_FALLBACK:-false}"
+      ALLOW_RULES_FALLBACK: "${ALLOW_RULES_FALLBACK:-true}"
+      STORE_BACKEND: "${STORE_BACKEND:-redis}"
+      STORE_REDIS_URL: "${COMPOSE_STORE_REDIS_URL:-redis://redis:6379/2}"
+      OPENSEARCH_URL: "${COMPOSE_OPENSEARCH_URL:-http://opensearch:9200}"
+      OPENSEARCH_USERNAME: "${OPENSEARCH_USERNAME:-}"
+      OPENSEARCH_PASSWORD: "${OPENSEARCH_PASSWORD:-}"
+      OPENSEARCH_CATEGORY_INDEX: "${OPENSEARCH_CATEGORY_INDEX:-shopping_agent_category_kb}"
+      OPENSEARCH_SEARCH_PIPELINE: "${OPENSEARCH_SEARCH_PIPELINE:-shopping-agent-hybrid-pipeline}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      LLM_MAIN: "${LLM_MAIN:-qwen3-30b-a3b-instruct}"
+      LLM_JUDGE: "${LLM_JUDGE:-qwen-max}"
+      AMAZON_API_ENDPOINT: "${AMAZON_API_ENDPOINT:-}"
+      AMAZON_API_KEY: "${AMAZON_API_KEY:-}"
+      SHOPEE_API_ENDPOINT: "${SHOPEE_API_ENDPOINT:-}"
+      SHOPEE_API_KEY: "${SHOPEE_API_KEY:-}"
+      ALIEXPRESS_API_ENDPOINT: "${ALIEXPRESS_API_ENDPOINT:-}"
+      ALIEXPRESS_API_KEY: "${ALIEXPRESS_API_KEY:-}"
+      EBAY_API_ENDPOINT: "${EBAY_API_ENDPOINT:-}"
+      EBAY_API_KEY: "${EBAY_API_KEY:-}"
+      TAVILY_API_KEY: "${TAVILY_API_KEY:-}"
+      ANN_BACKEND: "${ANN_BACKEND:-disabled}"
+      ANN_INDEX_PATH: "${COMPOSE_ANN_INDEX_PATH:-/app/data/item_index.faiss}"
+      TOWER_USER_ENDPOINT: "${TOWER_USER_ENDPOINT:-}"
+      TOWER_QUERY_ENDPOINT: "${TOWER_QUERY_ENDPOINT:-}"
+      TOWER_ITEM_ENDPOINT: "${TOWER_ITEM_ENDPOINT:-}"
+      COMPRESS_KEEP_RECENT: "${COMPRESS_KEEP_RECENT:-3}"
+      COMPRESS_MAX_TOKENS: "${COMPRESS_MAX_TOKENS:-12000}"
+      RUBRIC_HIGH_SCORE: "${RUBRIC_HIGH_SCORE:-70}"
+      PROVIDER_TIMEOUT_SECONDS: "${PROVIDER_TIMEOUT_SECONDS:-15}"
+      TASK_TIMEOUT_SECONDS: "${TASK_TIMEOUT_SECONDS:-180}"
+      MAX_CONCURRENT_TASKS: "${MAX_CONCURRENT_TASKS:-8}"
+      TASK_RETENTION_SECONDS: "${TASK_RETENTION_SECONDS:-86400}"
+      PREFERENCE_TTL_SECONDS: "${PREFERENCE_TTL_SECONDS:-31536000}"
+      UPLOAD_MAX_BYTES: "${UPLOAD_MAX_BYTES:-8388608}"
+      FX_RATES_JSON: "${FX_RATES_JSON:-}"
+      FX_RATE_SOURCE: "${FX_RATE_SOURCE:-}"
+      FX_RATES_AS_OF: "${FX_RATES_AS_OF:-}"
+      TRACE_LOG_DIR: /app/data/traces
+      OUTPUT_ROOT: /app/output
+      UPLOAD_ROOT: /app/uploaded
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}"
+      WS_PING_INTERVAL: "${WS_PING_INTERVAL:-20}"
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - shopping_agent_output:/app/output
+      - shopping_agent_uploaded:/app/uploaded
+      - shopping_agent_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+      opensearch:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,urllib.request; data=json.load(urllib.request.urlopen('http://localhost:8000/api/readiness', timeout=3)); raise SystemExit(0 if data.get('task_ready') else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks:
+      - shopping_agent
+
+  frontend:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - shopping_agent
+
+volumes:
+  redis_data:
+  opensearch_data:
+  shopping_agent_output:
+  shopping_agent_uploaded:
+  shopping_agent_data:
+
+networks:
+  shopping_agent:
+    driver: bridge

@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import json
+
+from app.schemas import (
+    FileLink,
+    ItemPickerOutput,
+    LandedCost,
+    ProviderMetadata,
+    ShoppingSummaryOutput,
+)
+from app.utils.thread_ctx import get_session_dir, get_thread_id
+
+
+def _rate_label(value: str) -> str:
+    return {
+        "reference-table": "内置参考汇率表",
+        "configured": "自定义汇率配置",
+        "unspecified": "未标注来源",
+    }.get(value, value)
+
+
+def _date_label(value: str) -> str:
+    return "未标注日期" if value == "unspecified" else value
+
+
+async def shopping_summary(
+    picks: ItemPickerOutput,
+    comparison: list[LandedCost],
+    providers: dict[str, ProviderMetadata] | None = None,
+    rate_source: str = "unspecified",
+    rates_as_of: str = "unspecified",
+    excluded_currencies: list[str] | None = None,
+    shipping_basis: str = "estimated; verify at checkout",
+) -> ShoppingSummaryOutput:
+    """Create the terminal result and persist Markdown and JSON reports."""
+
+    thread_id = get_thread_id()
+    directory = get_session_dir()
+    provider_details = providers or {}
+    sources = {item.source for item in comparison}
+    sources.update(metadata.source for metadata in provider_details.values())
+    if sources == {"fixture"}:
+        provider_mode = "sandbox"
+    elif "fixture" in sources:
+        provider_mode = "mixed"
+    else:
+        provider_mode = "live"
+    excluded_notice = "部分候选因缺少汇率已排除；" if excluded_currencies else ""
+    calculation_notice = (
+        f"汇率来源：{_rate_label(rate_source)}（{_date_label(rates_as_of)}）；{excluded_notice}"
+        f"运费、税费与时效{shipping_basis}，购买前请以平台结算页为准。"
+    )
+    if picks.recommendations:
+        lines = ["我按到手价、约束和评价筛选了以下选择："]
+        for item in picks.recommendations:
+            lines.append(f"{item.rank}. {item.title}：{item.reason}")
+        final_answer = "\n".join(lines)
+    elif comparison:
+        final_answer = "当前候选都不满足预算或材质约束。建议提高预算或放宽一项条件。"
+    else:
+        final_answer = "已启用平台没有返回可比较的候选商品。请调整关键词后重试。"
+
+    markdown_lines = [
+        "# Shopping Agent 购物研究报告",
+        "",
+        final_answer,
+        "",
+        f"> {calculation_notice}",
+        "",
+        "## 到手价比较",
+        "",
+        "| 平台 | 商品 | 商品价(CNY) | 运费 | 关税 | 到手价 | 时效 | 来源 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for item in comparison:
+        markdown_lines.append(
+            f"| {item.platform} | {item.title} | {item.price_cny:.2f} | "
+            f"{item.shipping_cny:.2f} | {item.duty_cny:.2f} | {item.landed_cny:.2f} | "
+            f"{item.eta_days}天 | {item.source} |"
+        )
+    if provider_details:
+        markdown_lines.extend(
+            [
+                "",
+                "## 数据提供方",
+                "",
+                "| 平台 | 状态 | 数据类型 | 说明 |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for name, metadata in provider_details.items():
+            markdown_lines.append(
+                f"| {name} | {metadata.status} | {metadata.source} | "
+                f"{metadata.fallback_reason or '-'} |"
+            )
+    markdown_path = directory / "shopping-report.md"
+    json_path = directory / "shopping-report.json"
+    markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
+
+    result = ShoppingSummaryOutput(
+        thread_id=thread_id,
+        final_answer=final_answer,
+        recommendations=picks.recommendations,
+        comparison=comparison,
+        files=[
+            FileLink(name=markdown_path.name, url=f"/api/files/{thread_id}/{markdown_path.name}"),
+            FileLink(name=json_path.name, url=f"/api/files/{thread_id}/{json_path.name}"),
+        ],
+        provider_mode=provider_mode,
+        providers=provider_details,
+        calculation_notice=calculation_notice,
+    )
+    json_path.write_text(
+        json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return result

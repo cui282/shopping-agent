@@ -1,0 +1,90 @@
+.notice {
+  display: grid;
+  min-height: 42px;
+  flex: 0 0 auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 10px clamp(16px, 3vw, 28px);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-muted);
+  background: var(--surface-muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.notice[data-state="warning"] {
+  color: color-mix(in oklch, var(--warning) 68%, var(--ink));
+  background: var(--warning-soft);
+}
+
+.notice[data-state="error"] {
+  color: color-mix(in oklch, var(--danger) 78%, var(--ink));
+  background: var(--danger-soft);
+}
+
+.notice > svg {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.notice > div {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.notice strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 670;
+}
+
+.notice span,
+.notice li {
+  overflow-wrap: anywhere;
+}
+
+.notice ul {
+  display: grid;
+  gap: 2px;
+  margin: 5px 0 0;
+  padding-left: 17px;
+}
+
+.notice button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in oklch, currentColor 28%, var(--line));
+  border-radius: var(--r-md);
+  color: currentColor;
+  background: color-mix(in oklch, var(--surface) 76%, transparent);
+  font-size: 11px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.spinning {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 640px) {
+  .notice {
+    grid-template-columns: auto minmax(0, 1fr);
+    padding: 9px 12px;
+  }
+
+  .notice button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}

@@ -1,0 +1,152 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Noto Sans SC", sans-serif;
+  color: #27302f;
+  color: oklch(0.22 0.012 250);
+  background: #f5f8f7;
+  background: oklch(0.975 0.004 165);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+
+  --canvas: #f5f8f7;
+  --canvas: oklch(0.975 0.004 165);
+  --surface: #ffffff;
+  --surface: oklch(1 0 0);
+  --surface-muted: #edf2f0;
+  --surface-muted: oklch(0.955 0.006 165);
+  --surface-pressed: #e7eeeb;
+  --ink: #27302f;
+  --ink: oklch(0.22 0.012 250);
+  --ink-muted: #707977;
+  --ink-muted: oklch(0.52 0.012 250);
+  --line: #d9e0de;
+  --line: oklch(0.89 0.008 165);
+  --accent: #dc5540;
+  --accent: oklch(0.62 0.19 30);
+  --accent-hover: #c44435;
+  --accent-hover: oklch(0.56 0.19 30);
+  --accent-soft: #fbe6e1;
+  --accent-soft: oklch(0.94 0.035 30);
+  --success: #2e9369;
+  --success: oklch(0.58 0.13 155);
+  --success-soft: #dff3e9;
+  --warning: #bf8d2e;
+  --warning: oklch(0.72 0.13 80);
+  --warning-soft: #fbf1d9;
+  --info: #447ac0;
+  --info: oklch(0.59 0.13 245);
+  --info-soft: #e3edf9;
+  --danger: #c94037;
+  --danger: oklch(0.56 0.19 25);
+  --danger-soft: #f9e2df;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-pill: 999px;
+  --shadow-card: 0 1px 3px rgb(20 28 26 / 0.12), 0 8px 24px rgb(20 28 26 / 0.06);
+  --shadow-composer: 0 -8px 24px rgb(20 28 26 / 0.06);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+html {
+  background: var(--canvas);
+}
+
+body {
+  min-height: 100dvh;
+  overflow: hidden;
+  line-height: 1.72;
+  letter-spacing: 0;
+}
+
+button,
+textarea,
+input {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button,
+a {
+  touch-action: manipulation;
+}
+
+button {
+  color: inherit;
+}
+
+button:active,
+a:active {
+  transform: scale(0.96);
+}
+
+button:focus-visible,
+a:focus-visible,
+textarea:focus-visible,
+input:focus-visible {
+  outline: 3px solid color-mix(in oklch, var(--accent) 34%, transparent);
+  outline-offset: 2px;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+a {
+  color: inherit;
+}
+
+img {
+  display: block;
+  max-width: 100%;
+}
+
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 8px;
+  z-index: 1000;
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  color: white;
+  background: var(--accent);
+  transform: translateY(-160%);
+  transition: transform 150ms var(--ease-out);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
