@@ -1,4 +1,10 @@
 import type { MonitorEvent, TaskStatus } from "../types/api";
+import {
+  providerNameLabel,
+  providerReasonLabel,
+  providerSourceLabel,
+  providerStatusLabel,
+} from "./trust";
 
 export const currencyCny = new Intl.NumberFormat("zh-CN", {
   style: "currency",
@@ -36,7 +42,7 @@ export function statusLabel(status: TaskStatus): string {
   return labels[status];
 }
 
-export function eventMeta(event: MonitorEvent): { label: string; detail: string } {
+export function eventMeta(event: MonitorEvent): { label: string; detail: string; note?: string } {
   const data = event.data as Record<string, unknown>;
   const tool = typeof data.tool_name === "string" ? data.tool_name : "";
   const stage = typeof data.step === "string" ? data.step : "";
@@ -51,6 +57,39 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string 
     shopping_summary: "建议汇总",
   };
   const toolLabel = toolLabels[tool] ?? tool.replaceAll("_", " ");
+  if (event.event === "fork") {
+    const platform = typeof data.platform === "string" ? data.platform : "";
+    const demand = data.demand && typeof data.demand === "object" ? (data.demand as Record<string, unknown>) : {};
+    const query = typeof demand.query === "string" ? demand.query : "";
+    return {
+      label: platform ? `并行检索 · ${providerNameLabel(platform)}` : "并行检索",
+      detail: query ? `需求：${query}` : event.message,
+    };
+  }
+  if (event.event === "tool_end") {
+    const duration = typeof data.duration_ms === "number" ? `${data.duration_ms} 毫秒` : "耗时未记录";
+    const source =
+      data.source === "live" || data.source === "curated" || data.source === "fixture" || data.source === "computed"
+        ? providerSourceLabel(data.source)
+        : "来源未记录";
+    const status =
+      data.status === "ok" || data.status === "degraded" || data.status === "unavailable"
+        ? providerStatusLabel(data.status)
+        : "状态未记录";
+    const outcomeLabels = { success: "成功", degraded: "降级", failure: "失败" } as const;
+    const outcome =
+      data.outcome === "success" || data.outcome === "degraded" || data.outcome === "failure"
+        ? outcomeLabels[data.outcome]
+        : "结果未记录";
+    const provider = typeof data.provider === "string" ? data.provider : "";
+    const fallback = typeof data.fallback_reason === "string" ? providerReasonLabel(data.fallback_reason) : "";
+    const note = [provider ? `数据提供方：${provider}` : "", fallback].filter(Boolean).join(" · ");
+    return {
+      label: tool ? `${toolLabel}${outcome === "失败" ? "失败" : outcome === "降级" ? "已降级" : "已完成"}` : "处理已完成",
+      detail: `${duration} · ${source} · ${status} · ${outcome}`,
+      note: note || undefined,
+    };
+  }
   const labels: Record<MonitorEvent["event"], string> = {
     session_created: "会话已建立",
     assistant_call: stage === "thinking" ? "正在分析需求" : "分析需求",

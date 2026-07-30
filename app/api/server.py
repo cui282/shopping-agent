@@ -34,11 +34,15 @@ from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.store import PreferenceStore, build_preference_store
 from app.schemas import (
+    EventName,
     HealthResponse,
+    MonitorEvent,
     ProviderCapability,
     ReadinessResponse,
+    ShoppingSummaryOutput,
     TaskRequest,
     TaskSnapshot,
+    TaskSnapshotMessage,
     TaskStarted,
     UploadResponse,
 )
@@ -50,24 +54,31 @@ load_dotenv()
 logger = logging.getLogger("shopping_agent.api")
 
 
+class SnapshotPersistenceError(OSError):
+    pass
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _persist_snapshot(snapshot: TaskSnapshot) -> None:
-    directory = session_dir(snapshot.thread_id)
-    destination = directory / "task.json"
-    temporary = directory / f".task-{uuid.uuid4().hex}.tmp"
+    temporary: Path | None = None
     try:
+        directory = session_dir(snapshot.thread_id)
+        destination = directory / "task.json"
+        temporary = directory / f".task-{uuid.uuid4().hex}.tmp"
         temporary.write_text(
             json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         temporary.replace(destination)
-    except OSError:
+    except OSError as exc:
         logger.exception("failed to persist task snapshot", extra={"thread_id": snapshot.thread_id})
-        with suppress(OSError):
-            temporary.unlink()
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink()
+        raise SnapshotPersistenceError(str(exc)) from exc
 
 
 def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
@@ -82,12 +93,26 @@ def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
         logger.exception("failed to load task snapshot", extra={"thread_id": thread_id})
         return None
     if snapshot.status == "running" and thread_id not in records:
+        timestamp = _now()
+        message = "研究服务已重启，这次任务未能继续，请重新提交"
+        sequence = snapshot.events[-1].sequence + 1 if snapshot.events else 1
+        interrupted = MonitorEvent(
+            event_id=f"evt-{uuid.uuid4().hex}",
+            thread_id=thread_id,
+            run_id=snapshot.run_id,
+            sequence=sequence,
+            event="error",
+            message=message,
+            data={"thread_id": thread_id, "code": "task_interrupted"},
+            timestamp=timestamp,
+        )
         snapshot = snapshot.model_copy(
             update={
                 "status": "error",
-                "updated_at": _now(),
+                "updated_at": timestamp,
+                "events": [*snapshot.events, interrupted],
                 "error_code": "task_interrupted",
-                "error": "研究服务已重启，这次任务未能继续，请重新提交",
+                "error": message,
             }
         )
         _persist_snapshot(snapshot)
@@ -155,19 +180,77 @@ async def request_id_middleware(request: Request, call_next):
     return response
 
 
-def _update_snapshot(thread_id: str, run_id: str, **changes: Any) -> None:
+def _record_event(
+    thread_id: str,
+    event: EventName,
+    message: str,
+    data: dict[str, Any],
+    event_id: str,
+    timestamp: str,
+    emitted_run_id: str | None,
+) -> MonitorEvent:
     record = records.get(thread_id)
-    if record is None or record.run_id != run_id:
-        return
-    record.snapshot = record.snapshot.model_copy(update={**changes, "updated_at": _now()})
-    _persist_snapshot(record.snapshot)
+    if record is None:
+        raise RuntimeError(f"cannot record an event for unknown task {thread_id}")
+    if emitted_run_id is not None and emitted_run_id != record.run_id:
+        raise RuntimeError(f"cannot record an event from a superseded run for {thread_id}")
+    if record.snapshot.status != "running":
+        raise RuntimeError(f"cannot record an event for terminal task {thread_id}")
+
+    sequence = record.snapshot.events[-1].sequence + 1 if record.snapshot.events else 1
+    envelope = MonitorEvent(
+        event_id=event_id,
+        thread_id=thread_id,
+        run_id=record.run_id,
+        sequence=sequence,
+        event=event,
+        message=message,
+        data=data,
+        timestamp=timestamp,
+    )
+    changes: dict[str, Any] = {
+        "events": [*record.snapshot.events, envelope],
+        "updated_at": timestamp,
+    }
+    if event == "task_result":
+        changes.update(
+            status="completed",
+            result=ShoppingSummaryOutput.model_validate(data),
+            error_code=None,
+            error=None,
+        )
+    elif event == "task_cancelled":
+        changes.update(status="cancelled", result=None, error_code=None, error=None)
+    elif event == "error":
+        changes.update(
+            status="error",
+            result=None,
+            error_code=str(data.get("code") or "task_failed"),
+            error=message,
+        )
+
+    snapshot = record.snapshot.model_copy(update=changes)
+    _persist_snapshot(snapshot)
+    record.snapshot = snapshot
+    return envelope
+
+
+monitor.set_event_recorder(_record_event)
 
 
 def _task_lock(thread_id: str) -> asyncio.Lock:
     return task_locks.setdefault(thread_id, asyncio.Lock())
 
 
-async def _execute(
+def _snapshot_message(thread_id: str) -> dict[str, Any]:
+    record = records.get(thread_id)
+    snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
+    if snapshot is None:
+        raise RuntimeError(f"cannot bootstrap an unknown task {thread_id}")
+    return TaskSnapshotMessage(snapshot=snapshot).model_dump(mode="json")
+
+
+async def _execute_task(
     request: TaskRequest,
     run_id: str,
     directory: Path,
@@ -177,7 +260,7 @@ async def _execute(
     assert thread_id is not None
     try:
         async with task_slots:
-            with thread_scope(thread_id, directory):
+            with thread_scope(thread_id, directory, run_id):
                 await monitor.emit(
                     thread_id,
                     "session_created",
@@ -190,7 +273,6 @@ async def _execute(
                     run_agent(request, monitor, preference_store, reference_images),
                     timeout=get_settings().task_timeout_seconds,
                 )
-                _update_snapshot(thread_id, run_id, status="completed", result=result)
                 await monitor.emit(
                     thread_id,
                     "task_result",
@@ -199,73 +281,80 @@ async def _execute(
     except asyncio.CancelledError:
         record = records.get(thread_id)
         if record is not None and record.run_id == run_id and record.snapshot.status == "running":
-            _update_snapshot(thread_id, run_id, status="cancelled")
-            await monitor.emit(thread_id, "task_cancelled", data={"thread_id": thread_id})
+            await monitor.emit(
+                thread_id,
+                "task_cancelled",
+                data={"thread_id": thread_id},
+                run_id=run_id,
+            )
         raise
     except asyncio.TimeoutError:
         message = "研究任务超过运行时限，请缩小范围后重试"
-        _update_snapshot(
-            thread_id,
-            run_id,
-            status="error",
-            error_code="task_timeout",
-            error=message,
-        )
         await monitor.emit(
             thread_id,
             "error",
             message=message,
             data={"thread_id": thread_id, "code": "task_timeout"},
+            run_id=run_id,
         )
     except ProvidersUnavailableError:
         message = "已启用的商品平台暂时均不可用，请稍后重试"
-        _update_snapshot(
-            thread_id,
-            run_id,
-            status="error",
-            error_code="providers_unavailable",
-            error=message,
-        )
         await monitor.emit(
             thread_id,
             "error",
             message=message,
             data={"thread_id": thread_id, "code": "providers_unavailable"},
+            run_id=run_id,
         )
     except MissingExchangeRatesError:
         message = "候选商品币种缺少可用汇率，请配置 FX_RATES_JSON 后重试"
-        _update_snapshot(
-            thread_id,
-            run_id,
-            status="error",
-            error_code="fx_rates_unavailable",
-            error=message,
-        )
         await monitor.emit(
             thread_id,
             "error",
             message=message,
             data={"thread_id": thread_id, "code": "fx_rates_unavailable"},
+            run_id=run_id,
         )
+    except SnapshotPersistenceError:
+        raise
     except Exception as exc:
         logger.exception(
             "shopping task failed",
             extra={"thread_id": thread_id, "error_type": type(exc).__name__},
         )
         message = "研究任务执行失败，请稍后重试或检查服务配置"
-        _update_snapshot(
-            thread_id,
-            run_id,
-            status="error",
-            error_code="task_failed",
-            error=message,
-        )
         await monitor.emit(
             thread_id,
             "error",
             message=message,
             data={"thread_id": thread_id, "code": "task_failed"},
+            run_id=run_id,
         )
+
+
+async def _execute(
+    request: TaskRequest,
+    run_id: str,
+    directory: Path,
+    reference_images: list[dict[str, Any]],
+) -> None:
+    thread_id = request.thread_id
+    assert thread_id is not None
+    try:
+        await _execute_task(request, run_id, directory, reference_images)
+    except SnapshotPersistenceError:
+        logger.exception(
+            "task timeline persistence failed; releasing worker ownership",
+            extra={"thread_id": thread_id},
+        )
+        record = records.get(thread_id)
+        if record is not None and record.run_id == run_id:
+            records.pop(thread_id, None)
+            await manager.close_active(
+                thread_id,
+                code=1011,
+                reason="timeline persistence failed",
+            )
 
 
 def _readiness_response() -> ReadinessResponse:
@@ -325,15 +414,17 @@ async def create_task(request: TaskRequest) -> TaskStarted:
     async with _task_lock(thread_id):
         previous = records.get(thread_id)
         if previous is not None and not previous.task.done():
+            records.pop(thread_id, None)
             previous.task.cancel()
             with suppress(asyncio.CancelledError):
                 await previous.task
-        await manager.clear(thread_id)
+        await manager.clear(thread_id, close_active=True)
 
         created_at = _now()
         run_id = uuid.uuid4().hex
         snapshot = TaskSnapshot(
             thread_id=thread_id,
+            run_id=run_id,
             status="running",
             query=request.query,
             user_id=request.user_id,
@@ -341,23 +432,24 @@ async def create_task(request: TaskRequest) -> TaskStarted:
             updated_at=created_at,
         )
         directory = session_dir(thread_id)
+        _persist_snapshot(snapshot)
         task = asyncio.create_task(
             _execute(request, run_id, directory, reference_images),
             name=f"shopping-agent:{thread_id}",
         )
         records[thread_id] = TaskRecord(run_id=run_id, snapshot=snapshot, task=task)
-        _persist_snapshot(snapshot)
     return TaskStarted(thread_id=thread_id)
 
 
 @app.get("/api/task/{thread_id}", response_model=TaskSnapshot)
 async def get_task(thread_id: str) -> TaskSnapshot:
-    record = records.get(thread_id)
-    if record is not None:
-        return record.snapshot
-    persisted = _load_snapshot(thread_id)
-    if persisted is not None:
-        return persisted
+    async with _task_lock(thread_id):
+        record = records.get(thread_id)
+        if record is not None:
+            return record.snapshot
+        persisted = _load_snapshot(thread_id)
+        if persisted is not None:
+            return persisted
     raise HTTPException(status_code=404, detail="task not found")
 
 
@@ -408,10 +500,20 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
         record.task.cancel()
         with suppress(asyncio.CancelledError):
             await record.task
-        if record.snapshot.status == "running":
-            _update_snapshot(thread_id, record.run_id, status="cancelled")
-            await monitor.emit(thread_id, "task_cancelled", data={"thread_id": thread_id})
-        return {"status": record.snapshot.status, "thread_id": thread_id}
+        current = records.get(thread_id)
+        if current is None or current.run_id != record.run_id:
+            persisted = _load_snapshot(thread_id)
+            if persisted is None:
+                raise HTTPException(status_code=500, detail="task state unavailable")
+            return {"status": persisted.status, "thread_id": thread_id}
+        if current.snapshot.status == "running":
+            await monitor.emit(
+                thread_id,
+                "task_cancelled",
+                data={"thread_id": thread_id},
+                run_id=current.run_id,
+            )
+        return {"status": current.snapshot.status, "thread_id": thread_id}
 
 
 @app.websocket("/ws/{thread_id}")
@@ -424,7 +526,11 @@ async def task_socket(websocket: WebSocket, thread_id: str) -> None:
         if record is None and _load_snapshot(thread_id) is None:
             await websocket.close(code=1008, reason="task not found")
             return
-        connected = await manager.connect(thread_id, websocket)
+        connected = await manager.connect(
+            thread_id,
+            websocket,
+            bootstrap=lambda: _snapshot_message(thread_id),
+        )
     if not connected:
         return
     try:

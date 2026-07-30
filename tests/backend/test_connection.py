@@ -41,6 +41,19 @@ class GatedAcceptWebSocket(FakeWebSocket):
         self.accepted = True
 
 
+class GatedFirstSendWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_send_started = asyncio.Event()
+        self.release_first_send = asyncio.Event()
+
+    async def send_json(self, payload: dict[str, Any]) -> None:
+        if not self.sent:
+            self.first_send_started.set()
+            await self.release_first_send.wait()
+        self.sent.append(payload)
+
+
 @pytest.mark.asyncio
 async def test_events_are_buffered_replayed_and_continue_in_order() -> None:
     connections = ConnectionManager()
@@ -133,3 +146,33 @@ async def test_discard_invalidates_connection_that_is_still_being_accepted() -> 
     assert await connecting is False
     assert websocket.closed
     assert "thread-a" not in connections.active
+
+
+@pytest.mark.asyncio
+async def test_durable_bootstrap_precedes_a_concurrent_live_event_without_truncation() -> None:
+    connections = ConnectionManager(max_events=1)
+    first = {"type": "monitor_event", "event_id": "evt-1", "sequence": 1}
+    second = {"type": "monitor_event", "event_id": "evt-2", "sequence": 2}
+    live = {"type": "monitor_event", "event_id": "evt-3", "sequence": 3}
+    snapshot = {
+        "type": "task_snapshot",
+        "snapshot": {"events": [first, second]},
+    }
+    websocket = GatedFirstSendWebSocket()
+
+    connecting = asyncio.create_task(
+        connections.connect(  # type: ignore[arg-type]
+            "thread-a",
+            websocket,
+            bootstrap=lambda: snapshot,
+        )
+    )
+    await websocket.first_send_started.wait()
+    publishing = asyncio.create_task(connections.send_to_thread("thread-a", live))
+    assert not publishing.done()
+
+    websocket.release_first_send.set()
+    assert await connecting is True
+    await publishing
+
+    assert websocket.sent == [snapshot, first, second, live]

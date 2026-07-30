@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
@@ -40,8 +40,71 @@ class TaskStarted(StrictModel):
     thread_id: str
 
 
+class ProviderMetadata(StrictModel):
+    source: ProviderSource
+    provider: str
+    status: Literal["ok", "degraded", "unavailable"] = "ok"
+    fallback_reason: str | None = None
+
+
+class MarketplaceDemand(StrictModel):
+    platform: Platform
+    query: str = Field(min_length=1, max_length=4000)
+
+
+class ForkEventData(StrictModel):
+    sub_thread_id: str = Field(pattern=r"^sub-[0-9a-f]{8}$")
+    platform: Platform
+    demand: MarketplaceDemand
+
+    @model_validator(mode="after")
+    def demand_matches_platform(self) -> ForkEventData:
+        if self.demand.platform != self.platform:
+            raise ValueError("fork platform must match demand platform")
+        return self
+
+
+class SessionCreatedEventData(StrictModel):
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    reference_images: list[dict[str, Any]]
+
+
+class ToolStartEventData(StrictModel):
+    tool_name: str = Field(min_length=1)
+    args: dict[str, Any]
+
+
+class ToolEndEventData(StrictModel):
+    tool_name: str = Field(min_length=1)
+    duration_ms: int = Field(ge=0)
+    outcome: Literal["success", "degraded", "failure"]
+    source: ProviderSource
+    provider: str = Field(min_length=1)
+    status: Literal["ok", "degraded", "unavailable"]
+    fallback_reason: str | None = None
+
+    @model_validator(mode="after")
+    def outcome_matches_status(self) -> ToolEndEventData:
+        expected = {"success": "ok", "degraded": "degraded", "failure": "unavailable"}
+        if self.status != expected[self.outcome]:
+            raise ValueError("tool outcome must match provider status")
+        return self
+
+
+class TaskCancelledEventData(StrictModel):
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+
+
+class ErrorEventData(TaskCancelledEventData):
+    code: str = Field(min_length=1)
+
+
 class MonitorEvent(StrictModel):
     type: Literal["monitor_event"] = "monitor_event"
+    event_id: str = Field(pattern=r"^evt-[0-9a-f]{32}$")
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    run_id: str = Field(default="legacy", pattern=r"^(?:legacy|[0-9a-f]{32})$")
+    sequence: int = Field(ge=1)
     event: EventName
     message: str
     data: dict[str, Any] = Field(default_factory=dict)
@@ -49,12 +112,28 @@ class MonitorEvent(StrictModel):
         default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
 
-
-class ProviderMetadata(StrictModel):
-    source: ProviderSource
-    provider: str
-    status: Literal["ok", "degraded", "unavailable"] = "ok"
-    fallback_reason: str | None = None
+    @model_validator(mode="before")
+    @classmethod
+    def validate_typed_event_data(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        event = value.get("event")
+        models = {
+            "session_created": SessionCreatedEventData,
+            "tool_start": ToolStartEventData,
+            "tool_end": ToolEndEventData,
+            "fork": ForkEventData,
+            "task_cancelled": TaskCancelledEventData,
+            "error": ErrorEventData,
+        }
+        model = models.get(event)
+        if event == "task_result":
+            validated = ShoppingSummaryOutput.model_validate(value.get("data", {}))
+            return {**value, "data": validated.model_dump(mode="json")}
+        if model is None:
+            return value
+        validated = model.model_validate(value.get("data", {}))
+        return {**value, "data": validated.model_dump(mode="json")}
 
 
 class ShoppingPlan(StrictModel):
@@ -197,14 +276,24 @@ class ShoppingSummaryOutput(StrictModel):
 
 class TaskSnapshot(StrictModel):
     thread_id: str
+    run_id: str = Field(default="legacy", pattern=r"^(?:legacy|[0-9a-f]{32})$")
     status: Literal["running", "completed", "cancelled", "error"]
     query: str
     user_id: str
     created_at: str
     updated_at: str
+    events: list[MonitorEvent] = Field(default_factory=list)
     result: ShoppingSummaryOutput | None = None
     error_code: str | None = None
     error: str | None = None
+
+
+class TaskSnapshotMessage(StrictModel):
+    type: Literal["task_snapshot"] = "task_snapshot"
+    snapshot: TaskSnapshot
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
 
 
 class UploadResponse(StrictModel):

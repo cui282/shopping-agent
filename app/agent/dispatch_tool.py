@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from app.api.monitor import Monitor
+from app.schemas import ForkEventData
 from app.utils.thread_ctx import get_session_dir, get_thread_id, thread_scope
 
 T = TypeVar("T")
@@ -23,14 +24,27 @@ async def dispatch_tool(
 
     async def run_branch(demand: dict[str, Any], index: int) -> T:
         sub_thread_id = f"sub-{uuid.uuid4().hex[:8]}"
+        platform = demand.get("platform")
+        event_data = ForkEventData(
+            sub_thread_id=sub_thread_id,
+            platform=platform,
+            demand=demand,
+        )
         await monitor.emit(
             parent_thread_id,
             "fork",
-            message=f"并行分支 {index + 1} 已启动",
-            data={"sub_thread_id": sub_thread_id, "demand": demand},
+            message=f"并行分支 {index + 1} 已启动：{event_data.platform}",
+            data=event_data.model_dump(mode="json"),
         )
         with thread_scope(sub_thread_id, directory):
             return await worker(demand)
 
     tasks = [asyncio.create_task(run_branch(demand, index)) for index, demand in enumerate(demands)]
-    return await asyncio.gather(*tasks)
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise

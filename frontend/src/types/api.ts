@@ -31,13 +31,53 @@ export type MonitorEventName =
   | "task_cancelled"
   | "error";
 
-export interface MonitorEvent<T = Record<string, unknown>> {
+export interface MarketplaceDemand {
+  platform: Marketplace;
+  query: string;
+}
+
+export interface ForkEventData {
+  sub_thread_id: string;
+  platform: Marketplace;
+  demand: MarketplaceDemand;
+}
+
+export interface ToolEndEventData {
+  tool_name: string;
+  duration_ms: number;
+  outcome: "success" | "degraded" | "failure";
+  source: ProviderSource;
+  provider: string;
+  status: "ok" | "degraded" | "unavailable";
+  fallback_reason: string | null;
+}
+
+export interface MonitorEventDataMap {
+  session_created: { thread_id: string; reference_images: Record<string, unknown>[] };
+  assistant_call: Record<string, unknown>;
+  tool_start: { tool_name: string; args: Record<string, unknown> };
+  tool_end: ToolEndEventData;
+  fork: ForkEventData;
+  task_result: TaskResultData;
+  task_cancelled: { thread_id: string };
+  error: { thread_id: string; code: string };
+}
+
+interface MonitorEventEnvelope<K extends MonitorEventName> {
   type: "monitor_event";
-  event: MonitorEventName;
+  event_id: string;
+  thread_id: string;
+  run_id: string;
+  sequence: number;
+  event: K;
   message: string;
-  data: T;
+  data: MonitorEventDataMap[K];
   timestamp: string;
 }
+
+export type MonitorEvent<K extends MonitorEventName = MonitorEventName> = K extends MonitorEventName
+  ? MonitorEventEnvelope<K>
+  : never;
 
 export interface Recommendation {
   item_id: string;
@@ -108,16 +148,22 @@ export interface TaskStartResponse {
 
 export interface TaskSnapshot {
   thread_id: string;
-  status: string;
-  query?: string;
-  events?: MonitorEvent[];
-  result?: TaskResultData | null;
-  final_answer?: string;
-  recommendations?: Recommendation[];
-  comparison?: ComparisonItem[];
-  files?: GeneratedFile[];
-  provider_mode?: string;
-  error?: string | null;
+  run_id: string;
+  status: "running" | "completed" | "cancelled" | "error";
+  query: string;
+  user_id: string;
+  created_at: string;
+  updated_at: string;
+  events: MonitorEvent[];
+  result: TaskResultData | null;
+  error_code: string | null;
+  error: string | null;
+}
+
+export interface TaskSnapshotMessage {
+  type: "task_snapshot";
+  snapshot: TaskSnapshot;
+  timestamp: string;
 }
 
 export interface UploadResponse {

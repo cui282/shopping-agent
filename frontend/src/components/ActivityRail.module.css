@@ -127,6 +127,7 @@
   min-width: 20px;
   height: 20px;
   place-items: center;
+  padding: 0 5px;
   border-radius: var(--r-sm);
   color: var(--ink-muted);
   background: var(--surface-muted);
@@ -140,6 +141,11 @@
   padding: 0 6px 0 0;
   overflow-y: auto;
   list-style: none;
+}
+
+.eventList:focus-visible {
+  outline: 3px solid color-mix(in oklch, var(--accent) 34%, transparent);
+  outline-offset: 2px;
 }
 
 .eventList li {
@@ -164,6 +170,16 @@
 .eventList li[data-event="task_result"] .eventIcon {
   color: var(--success);
   background: var(--success-soft);
+}
+
+.eventList li[data-event="tool_end"][data-outcome="degraded"] .eventIcon {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.eventList li[data-event="tool_end"][data-outcome="failure"] .eventIcon {
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .eventList li[data-event="error"] .eventIcon {
@@ -194,6 +210,11 @@
   font-size: 10px;
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.eventText .eventNote {
+  color: var(--ink);
+  font-size: 9px;
 }
 
 .eventList time {
@@ -321,7 +342,7 @@
 @media (max-width: 900px) {
   .rail {
     min-height: 100%;
-    grid-template-rows: auto auto minmax(260px, 1fr) auto;
+    grid-template-rows: auto auto minmax(160px, 1fr) auto;
   }
 
   .closeButton {

@@ -17,6 +17,7 @@ from app.schemas import (
     Platform,
     ShoppingSummaryOutput,
     TaskRequest,
+    ToolEndEventData,
 )
 from app.tools import (
     category_insight,
@@ -55,19 +56,65 @@ async def _call_tool(
         data={"tool_name": name, "args": args},
     )
     started = time.perf_counter()
-    result = await call()
-    data: dict[str, Any] = {
-        "tool_name": name,
-        "duration_ms": round((time.perf_counter() - started) * 1000),
-    }
+    try:
+        result = await call()
+    except Exception as exc:
+        failed = ToolEndEventData(
+            tool_name=name,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            outcome="failure",
+            source="computed",
+            provider=name,
+            status="unavailable",
+            fallback_reason=type(exc).__name__,
+        )
+        await monitor.emit(
+            thread_id,
+            "tool_end",
+            message=f"{name} 工具调用失败",
+            data=failed.model_dump(mode="json"),
+        )
+        raise
+
     provider = getattr(result, "provider", None)
     if provider is not None:
-        data.update(provider.model_dump(mode="json"))
+        metadata = provider.model_dump(mode="json")
+        provider_status = metadata["status"]
+        outcome = (
+            "degraded"
+            if provider_status == "degraded"
+            else "failure"
+            if provider_status == "unavailable"
+            else "success"
+        )
+        source = metadata["source"]
+        provider_name = metadata["provider"]
+        fallback_reason = metadata["fallback_reason"]
+    else:
+        result_source = getattr(result, "source", "computed")
+        source = (
+            result_source
+            if result_source in {"live", "curated", "fixture", "computed"}
+            else "computed"
+        )
+        provider_name = name
+        provider_status = "ok"
+        outcome = "success"
+        fallback_reason = None
+    completed = ToolEndEventData(
+        tool_name=name,
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        outcome=outcome,
+        source=source,
+        provider=provider_name,
+        status=provider_status,
+        fallback_reason=fallback_reason,
+    )
     await monitor.emit(
         thread_id,
         "tool_end",
         message=f"{name} 工具调用完成",
-        data=data,
+        data=completed.model_dump(mode="json"),
     )
     return result
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -40,7 +40,12 @@ function progressIndex(state: AgentState): number {
 function EventIcon({ event }: { event: MonitorEvent }) {
   if (event.event === "fork") return <GitFork size={14} aria-hidden="true" />;
   if (event.event === "error") return <AlertCircle size={14} aria-hidden="true" />;
-  if (event.event === "task_result" || event.event === "tool_end") return <Check size={14} aria-hidden="true" />;
+  if (event.event === "tool_end" && event.data.outcome !== "success") {
+    return <AlertCircle size={14} aria-hidden="true" />;
+  }
+  if (event.event === "task_result" || event.event === "tool_end") {
+    return <Check size={14} aria-hidden="true" />;
+  }
   return <ChevronRight size={14} aria-hidden="true" />;
 }
 
@@ -56,6 +61,7 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
   const [preferenceStatus, setPreferenceStatus] = useState<"loading" | "ready" | "error">("loading");
   const [confirmClear, setConfirmClear] = useState(false);
   const eventListRef = useRef<HTMLOListElement>(null);
+  const followTimelineRef = useRef(true);
   const preferenceRequestRef = useRef<AbortController | null>(null);
   const progress = progressIndex(state);
   const refreshKey = state.status === "completed" ? state.threadId : null;
@@ -84,12 +90,17 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
   }, [userId, refreshKey]);
 
   useEffect(() => {
+    followTimelineRef.current = true;
     const list = eventListRef.current;
     if (list) list.scrollTop = list.scrollHeight;
+  }, [state.threadId, state.runId]);
+
+  useEffect(() => {
+    const list = eventListRef.current;
+    if (list && followTimelineRef.current) list.scrollTop = list.scrollHeight;
   }, [state.events.length]);
 
-  const visibleEvents = useMemo(() => state.events.slice(-18), [state.events]);
-  const latestEvent = visibleEvents.at(-1);
+  const latestEvent = state.events.at(-1);
 
   const clear = async () => {
     try {
@@ -148,18 +159,32 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
           <h3 id="event-heading">进度记录</h3>
           <span>{state.events.length}</span>
         </div>
-        {visibleEvents.length ? (
-          <ol ref={eventListRef} className={styles.eventList}>
-            {visibleEvents.map((event, index) => {
+        {state.events.length ? (
+          <ol
+            ref={eventListRef}
+            className={styles.eventList}
+            aria-label="完整研究活动历史"
+            tabIndex={0}
+            onScroll={(event) => {
+              const list = event.currentTarget;
+              followTimelineRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+            }}
+          >
+            {state.events.map((event) => {
               const meta = eventMeta(event);
               return (
-                <li key={`${event.timestamp}-${index}`} data-event={event.event}>
+                <li
+                  key={event.event_id}
+                  data-event={event.event}
+                  data-outcome={event.event === "tool_end" ? event.data.outcome : undefined}
+                >
                   <span className={styles.eventIcon}>
                     <EventIcon event={event} />
                   </span>
                   <span className={styles.eventText}>
                     <strong>{meta.label}</strong>
                     <small>{meta.detail}</small>
+                    {meta.note && <small className={styles.eventNote}>{meta.note}</small>}
                   </span>
                   <time dateTime={event.timestamp}>
                     {new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(event.timestamp))}

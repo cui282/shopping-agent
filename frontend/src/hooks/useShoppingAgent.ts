@@ -9,6 +9,7 @@ import type {
   TaskRequest,
   TaskResultData,
   TaskSnapshot,
+  TaskSnapshotMessage,
   TaskStatus,
 } from "../types/api";
 import { socketCloseDecision } from "../utils/socketLifecycle";
@@ -22,6 +23,7 @@ export type ServiceStatus = "checking" | "available" | "unavailable";
 
 export interface AgentState {
   threadId: string | null;
+  runId: string | null;
   query: string;
   status: TaskStatus;
   connection: ConnectionStatus;
@@ -37,6 +39,7 @@ export interface AgentState {
 
 export const initialAgentState: AgentState = {
   threadId: null,
+  runId: null,
   query: "",
   status: "idle",
   connection: "idle",
@@ -50,11 +53,43 @@ export const initialAgentState: AgentState = {
   serviceError: null,
 };
 
-function eventFingerprint(event: MonitorEvent): string {
-  const data = event.data as Record<string, unknown>;
-  const tool = typeof data.tool_name === "string" ? data.tool_name : "";
-  const thread = typeof data.thread_id === "string" ? data.thread_id : "";
-  return [event.event, event.timestamp, tool, thread, event.message].join("|");
+function mergeEvents(...timelines: MonitorEvent[][]): MonitorEvent[] {
+  const merged = new Map<string, MonitorEvent>();
+  for (const timeline of timelines) {
+    for (const event of timeline) {
+      if (!merged.has(event.event_id)) merged.set(event.event_id, event);
+    }
+  }
+  return [...merged.values()].sort(
+    (left, right) => left.sequence - right.sequence || left.event_id.localeCompare(right.event_id),
+  );
+}
+
+function lastTimelineEvent(
+  events: MonitorEvent[],
+  predicate: (event: MonitorEvent) => boolean,
+): MonitorEvent | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (predicate(events[index])) return events[index];
+  }
+  return undefined;
+}
+
+function terminalState(events: MonitorEvent[]): TaskStatus | null {
+  const terminal = lastTimelineEvent(events, (event) => TERMINAL_EVENTS.has(event.event));
+  if (terminal?.event === "task_result") return "completed";
+  if (terminal?.event === "task_cancelled") return "cancelled";
+  if (terminal?.event === "error") return "error";
+  return null;
+}
+
+function timelineResult(events: MonitorEvent[]): TaskResultData | null {
+  const result = lastTimelineEvent(events, (event) => event.event === "task_result");
+  return result ? (result.data as TaskResultData) : null;
+}
+
+function timelineError(events: MonitorEvent[]): string | null {
+  return lastTimelineEvent(events, (event) => event.event === "error")?.message ?? null;
 }
 
 type Action =
@@ -97,6 +132,7 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         status: "starting",
         connection: "idle",
         threadId: null,
+        runId: null,
         events: [],
         result: null,
         error: null,
@@ -111,25 +147,20 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         status: state.status === "connecting" && action.connection === "connected" ? "running" : state.status,
       };
     case "event": {
-      const event = action.event;
-      const fingerprint = eventFingerprint(event);
-      if (state.events.some((existing) => eventFingerprint(existing) === fingerprint)) return state;
-      const result = event.event === "task_result" ? (event.data as unknown as TaskResultData) : state.result;
-      const nextStatus: TaskStatus =
-        event.event === "task_result"
-          ? "completed"
-          : event.event === "task_cancelled"
-            ? "cancelled"
-            : event.event === "error"
-              ? "error"
-              : "running";
-      const message = event.event === "error" ? event.message || "研究流程未能完成" : state.error;
+      if (state.threadId && action.event.thread_id !== state.threadId) return state;
+      if (state.runId && action.event.run_id !== state.runId) return state;
+      const events = mergeEvents(state.events, [action.event]);
+      const terminal = terminalState(events);
+      const result = timelineResult(events) ?? state.result;
+      const nextStatus = terminal ?? (["completed", "cancelled", "error"].includes(state.status) ? state.status : "running");
       return {
         ...state,
-        events: [...state.events, event],
+        threadId: state.threadId ?? action.event.thread_id,
+        runId: state.runId ?? action.event.run_id,
+        events,
         status: nextStatus,
         result,
-        error: message,
+        error: terminal === "error" ? timelineError(events) ?? "研究流程未能完成" : state.error,
         providerMode: result ? normalizeProviderMode(result.provider_mode) : state.providerMode,
       };
     }
@@ -139,18 +170,27 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
       return { ...state, status: "error", connection: "disconnected", error: action.message };
     case "snapshot": {
       const snapshot = action.snapshot;
-      const result = snapshot.result ?? null;
+      const preserveCurrentEvents =
+        action.preserveEvents &&
+        state.threadId === snapshot.thread_id &&
+        state.runId === snapshot.run_id;
+      const events = preserveCurrentEvents
+        ? mergeEvents(snapshot.events ?? [], state.events)
+        : mergeEvents(snapshot.events ?? []);
+      const result = snapshot.result ?? timelineResult(events) ?? (preserveCurrentEvents ? state.result : null);
       const normalized = normalizeSnapshotStatus(snapshot.status, Boolean(result));
+      const status = (preserveCurrentEvents ? terminalState(events) : null) ?? normalized;
       return {
         ...state,
         threadId: snapshot.thread_id,
-        query: snapshot.query ?? action.fallbackQuery ?? state.query,
-        status: normalized,
-        connection: normalized === "running" ? state.connection : "idle",
-        events: snapshot.events ?? (action.preserveEvents ? state.events : []),
+        runId: snapshot.run_id,
+        query: snapshot.query || action.fallbackQuery || state.query,
+        status,
+        connection: status === "running" ? state.connection : "idle",
+        events,
         result,
-        providerMode: normalizeProviderMode(result?.provider_mode ?? snapshot.provider_mode),
-        error: snapshot.error ?? null,
+        providerMode: normalizeProviderMode(result?.provider_mode),
+        error: snapshot.error ?? timelineError(events),
       };
     }
     case "reset":
@@ -176,17 +216,30 @@ function normalizeSnapshotStatus(status: string, hasResult: boolean): TaskStatus
   return "idle";
 }
 
-function parseMonitorEvent(raw: string): MonitorEvent | null {
+export function parseSocketMessage(raw: string): MonitorEvent | TaskSnapshotMessage | null {
   try {
-    const value = JSON.parse(raw) as Partial<MonitorEvent>;
-    if (value.type !== "monitor_event" || !value.event || !value.timestamp) return null;
-    return {
-      type: "monitor_event",
-      event: value.event,
-      message: value.message ?? "",
-      data: value.data ?? {},
-      timestamp: value.timestamp,
-    } as MonitorEvent;
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    if (
+      value.type === "task_snapshot" &&
+      value.snapshot &&
+      typeof value.snapshot === "object" &&
+      typeof (value.snapshot as Record<string, unknown>).run_id === "string" &&
+      value.timestamp
+    ) {
+      return value as unknown as TaskSnapshotMessage;
+    }
+    if (
+      value.type !== "monitor_event" ||
+      typeof value.event_id !== "string" ||
+      typeof value.thread_id !== "string" ||
+      typeof value.run_id !== "string" ||
+      typeof value.sequence !== "number" ||
+      typeof value.event !== "string" ||
+      typeof value.timestamp !== "string"
+    ) {
+      return null;
+    }
+    return value as unknown as MonitorEvent;
   } catch {
     return null;
   }
@@ -209,6 +262,29 @@ export async function runSnapshotSync(options: SnapshotSyncOptions): Promise<voi
   } catch {
     // The WebSocket error remains primary; a missing snapshot should not replace it.
   }
+}
+
+interface SnapshotRecoveryOptions extends SnapshotSyncOptions {
+  wait: () => Promise<void>;
+}
+
+export async function runSnapshotRecovery(
+  options: SnapshotRecoveryOptions,
+): Promise<TaskSnapshot | null> {
+  while (options.isCurrent()) {
+    try {
+      const snapshot = await options.request(options.threadId, options.signal);
+      if (!options.isCurrent()) return null;
+      options.apply(snapshot, options.fallbackQuery);
+      if (normalizeSnapshotStatus(snapshot.status, Boolean(snapshot.result)) !== "running") {
+        return snapshot;
+      }
+    } catch {
+      if (!options.isCurrent()) return null;
+    }
+    await options.wait();
+  }
+  return null;
 }
 
 export function useShoppingAgent() {
@@ -245,6 +321,8 @@ export function useShoppingAgent() {
     reconnectTimerRef.current = null;
     heartbeatTimerRef.current = null;
     stableTimerRef.current = null;
+    snapshotSyncRequestRef.current?.abort();
+    snapshotSyncRequestRef.current = null;
     const socket = socketRef.current;
     socketRef.current = null;
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client reset");
@@ -273,6 +351,44 @@ export function useShoppingAgent() {
         apply: (snapshot, query) =>
           dispatch({ type: "snapshot", snapshot, fallbackQuery: query, preserveEvents: true }),
       });
+    } finally {
+      if (snapshotSyncRequestRef.current === controller) snapshotSyncRequestRef.current = null;
+    }
+  }, []);
+
+  const recoverSnapshot = useCallback(async (threadId: string, fallbackQuery?: string) => {
+    snapshotSyncRequestRef.current?.abort();
+    const controller = new AbortController();
+    snapshotSyncRequestRef.current = controller;
+    const intent = taskIntentRef.current;
+    const isCurrent = () =>
+      snapshotSyncRequestRef.current === controller &&
+      !disposedRef.current &&
+      taskIntentRef.current.generation === intent.generation &&
+      taskIntentRef.current.threadId === threadId;
+    try {
+      const terminal = await runSnapshotRecovery({
+        threadId,
+        fallbackQuery,
+        signal: controller.signal,
+        request: (requestedThreadId, signal) => api.taskSnapshot(requestedThreadId, { signal }),
+        isCurrent,
+        apply: (snapshot, query) =>
+          dispatch({ type: "snapshot", snapshot, fallbackQuery: query, preserveEvents: true }),
+        wait: () =>
+          new Promise<void>((resolve) => {
+            let timeout: number | null = null;
+            const finish = () => {
+              if (timeout != null) window.clearTimeout(timeout);
+              controller.signal.removeEventListener("abort", finish);
+              resolve();
+            };
+            timeout = window.setTimeout(finish, 2_000);
+            controller.signal.addEventListener("abort", finish, { once: true });
+            if (controller.signal.aborted) finish();
+          }),
+      });
+      if (terminal && isCurrent()) terminalRef.current = true;
     } finally {
       if (snapshotSyncRequestRef.current === controller) snapshotSyncRequestRef.current = null;
     }
@@ -313,10 +429,23 @@ export function useShoppingAgent() {
         if (generation !== socketGenerationRef.current || socketRef.current !== socket) return;
         if (typeof message.data !== "string") return;
         if (message.data === "pong") return;
-        const event = parseMonitorEvent(message.data);
-        if (!event) return;
-        dispatch({ type: "event", event });
-        if (TERMINAL_EVENTS.has(event.event)) {
+        const payload = parseSocketMessage(message.data);
+        if (!payload) return;
+        if (payload.type === "task_snapshot") {
+          dispatch({ type: "snapshot", snapshot: payload.snapshot, fallbackQuery, preserveEvents: true });
+          const snapshotStatus = normalizeSnapshotStatus(payload.snapshot.status, Boolean(payload.snapshot.result));
+          if (["completed", "cancelled", "error"].includes(snapshotStatus)) {
+            terminalRef.current = true;
+            if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
+            heartbeatTimerRef.current = null;
+            window.setTimeout(() => {
+              if (generation === socketGenerationRef.current) socket.close(1000, "task complete");
+            }, 80);
+          }
+          return;
+        }
+        dispatch({ type: "event", event: payload });
+        if (TERMINAL_EVENTS.has(payload.event)) {
           terminalRef.current = true;
           if (heartbeatTimerRef.current != null) window.clearInterval(heartbeatTimerRef.current);
           heartbeatTimerRef.current = null;
@@ -349,7 +478,7 @@ export function useShoppingAgent() {
         }
         if (decision === "sync") {
           dispatch({ type: "connection", connection: "disconnected" });
-          void syncSnapshot(threadId, fallbackQuery);
+          void recoverSnapshot(threadId, fallbackQuery);
           return;
         }
         reconnectCountRef.current += 1;
@@ -358,7 +487,7 @@ export function useShoppingAgent() {
         reconnectTimerRef.current = window.setTimeout(() => openSocket(threadId, fallbackQuery), delay);
       };
     },
-    [syncSnapshot],
+    [recoverSnapshot],
   );
 
   const startTask = useCallback(
@@ -417,6 +546,7 @@ export function useShoppingAgent() {
         replaceTaskIntent(state.threadId);
         closeSocket();
         dispatch({ type: "cancelled" });
+        await syncSnapshot(state.threadId, state.query);
       } else {
         await syncSnapshot(state.threadId, state.query);
       }
