@@ -20,7 +20,7 @@ dependencies = [
 production = [
   "faiss-cpu>=1.8,<2",
   "opensearch-py>=2.6,<4",
-  "redis>=5,<7",
+  "redis>=5,<9",
 ]
 test = [
   "httpx2>=2.7,<3",
