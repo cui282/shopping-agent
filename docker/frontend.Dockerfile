@@ -8,7 +8,7 @@ RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 COPY frontend/ ./
 RUN npm run build
 
-FROM nginx:1.27-alpine AS runtime
+FROM nginx:1.31-alpine AS runtime
 
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
