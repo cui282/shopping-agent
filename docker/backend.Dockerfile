@@ -1,4 +1,4 @@
-FROM ghcr.io/astral-sh/uv:0.11.7 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.0 AS uv
 
 FROM python:3.10-slim AS runtime
 
