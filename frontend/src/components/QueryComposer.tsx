@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ImagePlus, LoaderCircle, Send, Square, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import type { UploadResponse } from "../types/api";
+import { prepareShoppingQuery, queryCharacterCount, QUERY_MAX_LENGTH } from "../utils/queryContract";
 import styles from "./QueryComposer.module.css";
 
 interface UploadedImage {
@@ -109,9 +110,9 @@ export default function QueryComposer({
   };
 
   const submit = () => {
-    const trimmed = value.trim();
-    if (trimmed.length < 4) {
-      setError("请至少描述 4 个字，例如品类、预算或用途");
+    const prepared = prepareShoppingQuery(value);
+    if (prepared.error) {
+      setError(prepared.error);
       textareaRef.current?.focus();
       return;
     }
@@ -140,7 +141,12 @@ export default function QueryComposer({
         </div>
       )}
       <div className={styles.inputRow} data-error={Boolean(error)}>
+        <label className={styles.visuallyHidden} htmlFor={errorId}>
+          购物需求
+        </label>
         <textarea
+          id={errorId}
+          name="shopping-query"
           ref={textareaRef}
           value={value}
           onChange={(event) => onChange(event.target.value)}
@@ -151,11 +157,9 @@ export default function QueryComposer({
             }
           }}
           placeholder="商品、预算、用途与条件"
-          aria-label="购物需求"
-          aria-describedby={error || disabledReason ? errorId : undefined}
+          aria-describedby={error || disabledReason ? `${errorId}-message` : undefined}
           aria-invalid={Boolean(error)}
           disabled={busy}
-          maxLength={800}
         />
         <div className={styles.actions}>
           {allowImageUpload && (
@@ -206,10 +210,10 @@ export default function QueryComposer({
         </div>
       </div>
       <div className={styles.metaRow}>
-        <span id={errorId} className={styles.error} aria-live="polite">
+        <span id={`${errorId}-message`} className={styles.error} role="status" aria-live="polite">
           {error ?? disabledReason ?? ""}
         </span>
-        <span className={styles.count}>{value.length}/800</span>
+        <span className={styles.count}>{queryCharacterCount(value)}/{QUERY_MAX_LENGTH}</span>
       </div>
     </div>
   );

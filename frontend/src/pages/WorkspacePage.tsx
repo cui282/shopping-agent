@@ -11,6 +11,7 @@ import StatusBar from "../components/StatusBar";
 import { useSessionHistory } from "../hooks/useSessionHistory";
 import { useShoppingAgent } from "../hooks/useShoppingAgent";
 import type { SessionHistoryItem } from "../types/api";
+import { prepareShoppingQuery } from "../utils/queryContract";
 import { getAnonymousUserId } from "../utils/anonymousUser";
 import { taskDisabledReason } from "../utils/trust";
 import styles from "./WorkspacePage.module.css";
@@ -53,7 +54,9 @@ export default function WorkspacePage() {
   };
 
   const submit = async (uploadIds: string[]) => {
-    const query = draft.trim();
+    const prepared = prepareShoppingQuery(draft);
+    if (!prepared.query) return;
+    const query = prepared.query;
     const threadId = await startTask({ query, user_id: userId, upload_ids: uploadIds, thread_id: null });
     if (!threadId) return;
     upsert({
@@ -139,7 +142,7 @@ export default function WorkspacePage() {
               onViewChange={setResultView}
               onUseStarter={(query) => {
                 setDraft(query);
-                window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="购物需求"]')?.focus(), 0);
+                window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('textarea[name="shopping-query"]')?.focus(), 0);
               }}
               onReset={newResearch}
             />

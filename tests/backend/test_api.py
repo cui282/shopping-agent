@@ -39,6 +39,27 @@ def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient)
     }
 
 
+@pytest.mark.parametrize("query", ["a", "商" * 4000, f" \t{'商' * 4000}\n"])
+def test_task_accepts_query_length_boundaries(client: TestClient, query: str) -> None:
+    response = client.post(
+        "/api/task",
+        json={"query": query, "user_id": "query-boundary-user", "upload_ids": []},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["thread_id"]
+
+
+@pytest.mark.parametrize("query", ["", " \t\n", "商" * 4001])
+def test_task_rejects_invalid_query_lengths(client: TestClient, query: str) -> None:
+    response = client.post(
+        "/api/task",
+        json={"query": query, "user_id": "invalid-query-user", "upload_ids": []},
+    )
+
+    assert response.status_code == 422
+
+
 def test_unconfigured_live_runtime_rejects_tasks(client: TestClient, monkeypatch) -> None:
     monkeypatch.setenv("SANDBOX_MODE", "false")
 
@@ -272,24 +293,30 @@ def test_active_task_delete_cancels_worker_and_removes_record(
 
 
 def test_arbitrary_product_query_drives_sandbox_comparison(client: TestClient) -> None:
+    query = "找一款天文望远镜，适合城市观星，预算 3000 元"
     started = client.post(
         "/api/task",
         json={
-            "query": "找一个5000元左右的手机，适合中老年人使用",
-            "user_id": "phone-query-user",
+            "query": query,
+            "user_id": "arbitrary-query-user",
             "upload_ids": [],
         },
     )
+    assert started.status_code == 202
     thread_id = started.json()["thread_id"]
     with client.websocket_connect(f"/ws/{thread_id}") as websocket:
         while websocket.receive_json().get("event") != "task_result":
             pass
 
-    recommendations = client.get(f"/api/task/{thread_id}").json()["result"]["recommendations"]
+    snapshot = client.get(f"/api/task/{thread_id}").json()
+    recommendations = snapshot["result"]["recommendations"]
 
+    assert snapshot["status"] == "completed"
+    assert snapshot["query"] == query
+    assert snapshot["result"]["provider_mode"] == "sandbox"
     assert recommendations
-    assert all("手机" in item["title"] for item in recommendations)
-    assert all("手机" in unquote_plus(item["product_url"]) for item in recommendations)
+    assert all("天文望远镜" in item["title"] for item in recommendations)
+    assert all("天文望远镜" in unquote_plus(item["product_url"]) for item in recommendations)
 
 
 def test_completed_snapshot_survives_in_memory_record_cleanup(client: TestClient) -> None:

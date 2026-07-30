@@ -56,7 +56,8 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
 }
 ```
 
-- `query`: 1 to 4000 characters.
+- `query`: 1 to 4000 characters after trimming leading and trailing whitespace; empty or
+  whitespace-only values are rejected.
 - `thread_id`: optional, 1 to 80 ASCII letters, digits, `_`, or `-`.
 - `user_id`: required, 1 to 120 ASCII letters, digits, `_`, or `-`.
 - `upload_ids`: at most 8 server-issued IDs. Upload does not imply image analysis support.

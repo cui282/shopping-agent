@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
@@ -28,6 +28,11 @@ class TaskRequest(StrictModel):
     thread_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,80}$")
     user_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
     upload_ids: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def normalize_query(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
 
 
 class TaskStarted(StrictModel):

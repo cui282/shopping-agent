@@ -23,6 +23,27 @@ describe("URL handling", () => {
 });
 
 describe("request lifecycle", () => {
+  it("submits a legal 4000-character shopping query to the asynchronous task endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "started", thread_id: "thread-long-query" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const query = "商".repeat(4000);
+
+    await api.startTask({ query, thread_id: null, user_id: "browser-user", upload_ids: [] });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/task$/),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ query, thread_id: null, user_id: "browser-user", upload_ids: [] }),
+      }),
+    );
+  });
+
   it("deletes a stored research task", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ status: "deleted", thread_id: "thread-1" }), {
