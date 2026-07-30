@@ -1,0 +1,132 @@
+.page {
+  min-height: 100dvh;
+  padding: 24px max(24px, env(safe-area-inset-left)) 60px;
+  background: var(--canvas);
+}
+
+.page header {
+  display: flex;
+  width: min(100%, 800px);
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 auto;
+}
+
+.page header a,
+.primaryLink {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  border-radius: var(--r-md);
+  color: var(--ink);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgb(20 28 26 / 0.12);
+  font-size: 13px;
+  font-weight: 620;
+  text-decoration: none;
+}
+
+.page article {
+  width: min(100%, 680px);
+  margin: 72px auto 0;
+}
+
+.page article > span {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.page h1,
+.notFound h1 {
+  margin: 7px 0 22px;
+  font-size: 28px;
+  font-weight: 690;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
+.page article p {
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.82;
+  text-wrap: pretty;
+}
+
+.page .updated {
+  margin-top: 40px;
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.notFound {
+  display: flex;
+  min-height: 100dvh;
+  align-items: flex-start;
+  justify-content: center;
+  flex-direction: column;
+  padding: clamp(24px, 8vw, 96px);
+  background: var(--canvas);
+}
+
+.notFound > :first-child {
+  position: absolute;
+  top: 24px;
+  left: clamp(24px, 8vw, 96px);
+}
+
+.errorCode {
+  margin-bottom: -22px;
+  color: var(--line);
+  font-size: 160px;
+  font-weight: 780;
+  line-height: 0.9;
+  font-variant-numeric: tabular-nums;
+}
+
+.notFound > svg {
+  color: var(--accent);
+}
+
+.notFound h1 {
+  margin-bottom: 7px;
+}
+
+.notFound p {
+  max-width: 48ch;
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 14px;
+}
+
+.primaryLink {
+  margin-top: 24px;
+  color: #fff8f6;
+  background: var(--accent);
+}
+
+@media (max-width: 520px) {
+  .page {
+    padding: 16px 14px 48px;
+  }
+
+  .page header {
+    align-items: flex-start;
+  }
+
+  .page article {
+    margin-top: 52px;
+  }
+
+  .page h1,
+  .notFound h1 {
+    font-size: 24px;
+  }
+
+  .errorCode {
+    font-size: 104px;
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "description": "Normalize and combine Shopping Agent BM25 and kNN category scores",
+  "phase_results_processors": [
+    {
+      "normalization-processor": {
+        "normalization": {
+          "technique": "min_max"
+        },
+        "combination": {
+          "technique": "arithmetic_mean",
+          "parameters": {
+            "weights": [0.45, 0.55]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,187 @@
+.app {
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+.shell {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-columns: 232px minmax(0, 1fr) 320px;
+}
+
+.sessionPane,
+.mainPane,
+.activityPane {
+  min-width: 0;
+  min-height: 0;
+}
+
+.sessionPane {
+  border-right: 1px solid var(--line);
+}
+
+.mainPane {
+  display: flex;
+  flex-direction: column;
+  outline: 0;
+  background: var(--surface);
+}
+
+.activityPane {
+  border-left: 1px solid var(--line);
+}
+
+.workspaceHeader {
+  display: flex;
+  min-height: 72px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 10px clamp(16px, 3vw, 28px);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.titleBlock {
+  min-width: 0;
+}
+
+.titleBlock > span {
+  display: block;
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.titleBlock h1 {
+  max-width: min(52vw, 720px);
+  margin: 2px 0 0;
+  font-size: 16px;
+  font-weight: 670;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.headerActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.openActivity {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--ink-muted);
+  background: var(--surface-muted);
+  cursor: pointer;
+  transition-property: transform, color, background-color;
+  transition-duration: 140ms;
+}
+
+.scrollArea {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+@media (max-width: 1199px) and (min-width: 901px) {
+  .shell {
+    grid-template-columns: 220px minmax(0, 1fr) 300px;
+  }
+
+  .shell[data-activity-open="false"] {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .shell[data-activity-open="false"] .activityPane {
+    display: none;
+  }
+}
+
+@media (max-width: 1100px) and (min-width: 901px) {
+  .shell,
+  .shell[data-activity-open="false"] {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .activityPane {
+    position: fixed;
+    z-index: 8;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 300px;
+    box-shadow: -10px 0 28px rgb(20 28 26 / 0.12);
+  }
+
+  .shell[data-activity-open="false"] .activityPane {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .shell {
+    height: calc(100% - 64px);
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .sessionPane,
+  .mainPane,
+  .activityPane {
+    display: none;
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .shell[data-mobile-view="sessions"] .sessionPane,
+  .shell[data-mobile-view="workspace"] .mainPane,
+  .shell[data-mobile-view="activity"] .activityPane {
+    display: flex;
+  }
+
+  .sessionPane > *,
+  .activityPane > * {
+    width: 100%;
+  }
+
+  .sessionPane,
+  .activityPane {
+    border: 0;
+  }
+
+  .workspaceHeader {
+    min-height: 72px;
+    padding: 8px 12px;
+  }
+
+  .titleBlock h1 {
+    max-width: calc(100vw - 108px);
+    font-size: 14px;
+  }
+
+  .openActivity {
+    display: none;
+  }
+}
+
+@media (max-width: 420px) {
+  .workspaceHeader {
+    gap: 8px;
+  }
+
+  .titleBlock h1 {
+    max-width: calc(100vw - 96px);
+  }
+}

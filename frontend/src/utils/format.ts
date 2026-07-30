@@ -1,0 +1,95 @@
+import type { MonitorEvent, TaskStatus } from "../types/api";
+
+export const currencyCny = new Intl.NumberFormat("zh-CN", {
+  style: "currency",
+  currency: "CNY",
+  maximumFractionDigits: 0,
+});
+
+export function formatCount(value: number | null | undefined): string {
+  if (value == null) return "暂无";
+  if (value >= 10_000) return `${(value / 10_000).toFixed(value >= 100_000 ? 0 : 1)}万`;
+  return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+export function formatRelativeTime(iso: string): string {
+  const date = new Date(iso);
+  const delta = Date.now() - date.getTime();
+  const minutes = Math.floor(delta / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(date);
+}
+
+export function statusLabel(status: TaskStatus): string {
+  const labels: Record<TaskStatus, string> = {
+    idle: "等待研究",
+    starting: "正在启动",
+    connecting: "正在连接",
+    running: "研究中",
+    completed: "已完成",
+    cancelled: "已取消",
+    error: "需要处理",
+  };
+  return labels[status];
+}
+
+export function eventMeta(event: MonitorEvent): { label: string; detail: string } {
+  const data = event.data as Record<string, unknown>;
+  const tool = typeof data.tool_name === "string" ? data.tool_name : "";
+  const stage = typeof data.step === "string" ? data.step : "";
+  const toolLabels: Record<string, string> = {
+    planner: "需求规划",
+    category_insight: "类目洞察",
+    web_search: "网页检索",
+    item_search: "商品检索",
+    price_compare: "价格换算",
+    shipping_calc: "运税估算",
+    item_picker: "候选筛选",
+    shopping_summary: "建议汇总",
+  };
+  const toolLabel = toolLabels[tool] ?? tool.replaceAll("_", " ");
+  const labels: Record<MonitorEvent["event"], string> = {
+    session_created: "会话已建立",
+    assistant_call: stage === "thinking" ? "正在分析需求" : "分析需求",
+    tool_start: tool ? `开始${toolLabel}` : "开始处理",
+    tool_end: tool ? `${toolLabel}已完成` : "处理已完成",
+    fork: "并行检索",
+    task_result: "推荐已生成",
+    task_cancelled: "研究已取消",
+    error: "流程中断",
+  };
+  const detail = event.message || labels[event.event];
+  return { label: labels[event.event], detail };
+}
+
+export function flattenPreferences(value: unknown): string[] {
+  if (value == null) return [];
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return [String(value)];
+  }
+  if (Array.isArray(value)) return value.flatMap(flattenPreferences);
+  if (typeof value === "object") {
+    const fieldLabels: Record<string, string> = {
+      categories: "品类",
+      category: "品类",
+      materials: "材质",
+      material_preferences: "材质",
+      styles: "风格",
+      style_preferences: "风格",
+      hard_constraints: "硬性条件",
+      soft_preferences: "偏好",
+      avoid: "避开",
+      destination: "收货地",
+      budget_cny: "预算",
+    };
+    return Object.entries(value as Record<string, unknown>).flatMap(([key, item]) => {
+      const values = flattenPreferences(item);
+      const label = fieldLabels[key] ?? key.replaceAll("_", " ");
+      return values.map((entry) => `${label}：${entry}`);
+    });
+  }
+  return [];
+}

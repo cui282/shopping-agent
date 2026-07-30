@@ -1,0 +1,38 @@
+{
+  "settings": {
+    "index.knn": true,
+    "analysis": {
+      "analyzer": {
+        "shopping_agent_zh": {
+          "type": "standard"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "card_id": {"type": "keyword"},
+      "category": {"type": "text", "analyzer": "shopping_agent_zh"},
+      "card_type": {"type": "keyword"},
+      "summary": {"type": "text", "analyzer": "shopping_agent_zh"},
+      "raw_evidence": {"type": "text", "index": false},
+      "last_updated": {"type": "date"},
+      "confidence": {"type": "float"},
+      "structured": {"type": "object", "enabled": false},
+      "embedding": {
+        "type": "knn_vector",
+        "dimension": 1024,
+        "method": {
+          "name": "hnsw",
+          "space_type": "cosinesimil",
+          "engine": "faiss",
+          "parameters": {
+            "ef_construction": 128,
+            "m": 24
+          }
+        }
+      }
+    }
+  }
+}

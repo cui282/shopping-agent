@@ -1,0 +1,253 @@
+.rail {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  color: var(--ink);
+  background: var(--surface-muted);
+}
+
+.header {
+  padding: 18px 16px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.newButton {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 18px;
+  border: 0;
+  border-radius: var(--r-md);
+  color: #fff8f6;
+  background: var(--accent);
+  box-shadow: 0 2px 8px rgb(163 57 38 / 0.18);
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+  transition-property: transform, background-color;
+  transition-duration: 150ms;
+}
+
+.history {
+  min-height: 0;
+  flex: 1;
+  padding: 16px 8px;
+  overflow-y: auto;
+}
+
+.sectionLabel {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px 8px;
+  color: var(--ink-muted);
+}
+
+.sectionLabel h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.45;
+}
+
+.empty {
+  margin: 8px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.list {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sessionRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  align-items: center;
+  border-radius: var(--r-md);
+  transition: background-color 140ms, box-shadow 140ms;
+}
+
+.sessionRow[data-active="true"] {
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgb(20 28 26 / 0.1);
+}
+
+.session {
+  display: grid;
+  width: 100%;
+  min-height: 64px;
+  gap: 7px;
+  padding: 9px 9px 8px;
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--ink);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition-property: transform, background-color;
+  transition-duration: 140ms;
+}
+
+.session:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.query {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 580;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.deleteButton {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--r-md);
+  color: var(--ink-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.deleteButton:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.deleteButton:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.spinner {
+  animation: spin 900ms linear infinite;
+}
+
+.historyError {
+  margin: 8px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+
+.statusDot,
+.providerDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--ink-muted);
+}
+
+.statusDot[data-status="running"],
+.statusDot[data-status="connecting"],
+.statusDot[data-status="starting"] {
+  background: var(--info);
+}
+
+.statusDot[data-status="completed"] {
+  background: var(--success);
+}
+
+.statusDot[data-status="error"] {
+  background: var(--danger);
+}
+
+.footer {
+  padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--line);
+}
+
+.provider {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.provider[data-mode="mixed"] .providerDot {
+  background: var(--warning);
+}
+
+.provider[data-mode="sandbox"] .providerDot {
+  background: var(--warning);
+}
+
+.provider[data-mode="live"] .providerDot {
+  background: var(--success);
+}
+
+.provider[data-mode="unverified"] .providerDot {
+  background: var(--ink-muted);
+}
+
+.footerLinks {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 3px;
+  color: var(--ink-muted);
+  font-size: 10px;
+}
+
+.footerLinks a {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+@media (hover: hover) {
+  .newButton:hover {
+    background: var(--accent-hover);
+  }
+
+  .sessionRow:hover:not([data-active="true"]) {
+    background: color-mix(in oklch, var(--surface) 64%, transparent);
+  }
+
+  .deleteButton:hover:not(:disabled) {
+    color: var(--danger);
+    background: color-mix(in oklch, var(--danger) 10%, transparent);
+  }
+
+  .footerLinks a:hover {
+    color: var(--ink);
+  }
+}
