@@ -25,6 +25,22 @@
   line-height: 1.45;
 }
 
+.modeBadge {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in oklch, var(--accent) 34%, var(--line));
+  border-radius: var(--r-pill);
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 11px;
+  font-weight: 720;
+  line-height: 1.45;
+  vertical-align: middle;
+}
+
 .starterIntro h2,
 .terminalState h2 {
   margin: 8px 0;
@@ -577,6 +593,71 @@
   overflow-wrap: anywhere;
 }
 
+.identityList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.identityList > li {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.identityList > li > p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.identityEvidenceLine {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding-left: 10px;
+  border-left: 2px solid var(--success);
+}
+
+.identityEvidenceLine strong {
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.identityEvidenceLine[data-decision="alternative_candidate"] {
+  border-color: var(--warning);
+}
+
+.identityEvidenceLine[data-decision="alternative_candidate"] strong {
+  color: var(--warning);
+}
+
+.identityEvidenceLine span,
+.identityEvidenceLine small,
+.identityEmpty {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.identityEvidenceLine small {
+  color: var(--ink-muted);
+}
+
+.identityEmpty {
+  margin: 0;
+}
+
 .productGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -767,6 +848,15 @@
   overflow-wrap: anywhere;
   font-size: 10px;
   font-weight: 620;
+  line-height: 1.5;
+}
+
+.evidence dd small {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 450;
   line-height: 1.5;
 }
 
@@ -1050,6 +1140,11 @@
     align-items: flex-start;
     flex-direction: column;
     gap: 14px;
+  }
+
+  .modeBadge {
+    margin-left: 0;
+    margin-top: 6px;
   }
 
   .segmented {

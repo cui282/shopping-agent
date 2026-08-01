@@ -8,6 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
 DataMode = Literal["live", "sandbox", "mixed"]
+ResearchMode = Literal["product_research", "exact_offer_comparison"]
+IdentityEvidenceBasis = Literal[
+    "identifier", "material_variant_attributes", "insufficient", "not_required"
+]
 ResultKind = Literal["live", "sandbox", "partial"]
 ProviderFailureReason = Literal[
     "not_configured",
@@ -80,6 +84,15 @@ class ProductIdentity(StrictModel):
     mpn: str | None = None
     brand: str | None = None
     model: str | None = None
+
+
+class IdentityEvidence(StrictModel):
+    decision: Literal["matching_offer", "alternative_candidate", "not_required"] = "not_required"
+    basis: IdentityEvidenceBasis = "not_required"
+    matched_fields: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    conflicting_fields: list[str] = Field(default_factory=list)
+    explanation: str = "Product Research 不要求跨平台同款证明。"
 
 
 class OfferProvenance(StrictModel):
@@ -277,6 +290,7 @@ class RememberedPreference(StrictModel):
 
 
 class ShoppingPlan(StrictModel):
+    mode: ResearchMode = "product_research"
     budget_cny: float | None = None
     category: str
     material_preferences: list[str] = Field(default_factory=list)
@@ -388,6 +402,7 @@ class PricePoint(StrictModel):
     retrieved_at: str | None = None
     provenance: OfferProvenance | None = None
     link_kind: OfferLinkKind | None = None
+    identity_evidence: IdentityEvidence | None = None
 
     @model_validator(mode="after")
     def normalize_marketplace(self) -> PricePoint:
@@ -453,6 +468,17 @@ class UnverifiedCandidate(LandedCost):
     constraint_evaluations: list[ConstraintEvaluation] = Field(min_length=1)
 
 
+class AlternativeCandidate(LandedCost):
+    reason: str = Field(min_length=1)
+    identity_evidence: IdentityEvidence = Field(
+        default_factory=lambda: IdentityEvidence(
+            decision="alternative_candidate",
+            basis="insufficient",
+            explanation="缺少足够的 Identity Evidence，不能证明是目标 Product Variant。",
+        )
+    )
+
+
 class ShippingCalcOutput(StrictModel):
     destination: str
     items: list[LandedCost]
@@ -465,10 +491,14 @@ class Recommendation(LandedCost):
     rank: int
     constraint_evaluations: list[ConstraintEvaluation]
     score_breakdown: RankingScoreBreakdown
+    offer_kind: Literal["matching_offer", "research_candidate"] = "research_candidate"
 
 
 class ItemPickerOutput(StrictModel):
+    mode: ResearchMode = "product_research"
     recommendations: list[Recommendation]
+    matching_offers: list[LandedCost] = Field(default_factory=list)
+    alternative_candidates: list[AlternativeCandidate] = Field(default_factory=list)
     unverified_candidates: list[UnverifiedCandidate] = Field(default_factory=list)
     exclusions: list[ConstraintExclusion] = Field(default_factory=list)
     working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
@@ -486,8 +516,11 @@ class FileLink(StrictModel):
 class ShoppingSummaryOutput(StrictModel):
     thread_id: str
     final_answer: str
+    mode: ResearchMode = "product_research"
     recommendations: list[Recommendation]
     comparison: list[LandedCost]
+    matching_offers: list[LandedCost] = Field(default_factory=list)
+    alternative_candidates: list[AlternativeCandidate] = Field(default_factory=list)
     files: list[FileLink]
     provider_mode: Literal["live", "mixed", "sandbox"]
     providers: dict[str, ProviderMetadata] = Field(default_factory=dict)
@@ -506,6 +539,8 @@ class ShoppingSummaryOutput(StrictModel):
 
     @model_validator(mode="after")
     def normalize_result_contract(self) -> ShoppingSummaryOutput:
+        if not self.matching_offers:
+            self.matching_offers = list(self.comparison)
         evidence_sources = {item.source for item in [*self.recommendations, *self.comparison]} | {
             metadata.source for metadata in self.providers.values()
         }

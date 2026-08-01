@@ -6,14 +6,14 @@ import QueryComposer from "./QueryComposer";
 
 afterEach(cleanup);
 
-function renderComposer(value: string, onSubmit = vi.fn()) {
+function renderComposer(value: string, onSubmit = vi.fn(), allowImageUpload = false) {
   render(
     <QueryComposer
       value={value}
       busy={false}
       canCancel={false}
       disabledReason={null}
-      allowImageUpload={false}
+      allowImageUpload={allowImageUpload}
       attachmentResetKey={0}
       onChange={vi.fn()}
       onSubmit={onSubmit}
@@ -50,5 +50,14 @@ describe("QueryComposer submission", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "购物需求" }));
     expect(screen.getByRole("status").textContent).toBe("请输入商品研究需求");
+  });
+
+  it("gates the reference image input on image analysis readiness", () => {
+    renderComposer("找望远镜");
+    expect(screen.queryByRole("button", { name: "上传商品参考图" })).toBeNull();
+
+    cleanup();
+    renderComposer("找望远镜", vi.fn(), true);
+    expect(screen.getByRole("button", { name: "上传商品参考图" })).toBeTruthy();
   });
 });

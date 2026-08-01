@@ -39,6 +39,15 @@ async def test_planner_builds_explicit_ranking_profile() -> None:
 
 
 @pytest.mark.asyncio
+async def test_planner_normalizes_product_research_and_exact_offer_modes() -> None:
+    product_research = await planner("比较不同产品的降噪耳机，重点看舒适度")
+    exact_comparison = await planner("比价同款降噪耳机，只比较相同型号")
+
+    assert product_research.mode == "product_research"
+    assert exact_comparison.mode == "exact_offer_comparison"
+
+
+@pytest.mark.asyncio
 async def test_planner_normalizes_mainland_addresses_and_preserves_unsupported_destinations() -> (
     None
 ):

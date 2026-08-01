@@ -13,9 +13,11 @@ import {
 import { resolveApiUrl, safeExternalUrl } from "../api/client";
 import type { AgentState } from "../hooks/useShoppingAgent";
 import type {
+  AlternativeCandidate,
   ConstraintEvaluation,
   CalculationExclusion,
   ConstraintExclusion,
+  IdentityEvidence,
   RankingDimension,
   RankingProfile,
   Recommendation,
@@ -90,6 +92,28 @@ const defaultRankingProfile: RankingProfile = {
   priority_order: ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
   explicit: false,
 };
+
+function researchModeLabel(mode: string | undefined): string {
+  return mode === "exact_offer_comparison" ? "Exact Offer Comparison" : "Product Research";
+}
+
+function identityEvidenceLabel(evidence: IdentityEvidence | null | undefined): string {
+  if (!evidence || evidence.decision === "not_required") {
+    return "Product Research：无需同款证明";
+  }
+  if (evidence.decision === "matching_offer") {
+    if (evidence.basis === "identifier") {
+      const identifier = evidence.matched_fields.some((field) => field === "identity.gtin")
+        ? "GTIN"
+        : evidence.matched_fields.some((field) => field === "identity.mpn")
+          ? "MPN"
+          : "跨平台 identifier";
+      return `${identifier} 已验证同款`;
+    }
+    return "关键属性已验证同款";
+  }
+  return "Identity Evidence 不足，列为替代候选";
+}
 
 function availabilityLabel(value: string | null): string {
   if (!value) return "未提供";
@@ -201,6 +225,15 @@ function ProductCard({ product }: { product: Recommendation }) {
           </div>
         </dl>
         <dl className={styles.evidence} aria-label={`${product.title} 商品证据`}>
+          <div className={styles.evidenceWide}>
+            <dt>Identity Evidence</dt>
+            <dd>
+              <strong>{identityEvidenceLabel(product.identity_evidence)}</strong>
+              {product.identity_evidence?.explanation && (
+                <small>{product.identity_evidence.explanation}</small>
+              )}
+            </dd>
+          </div>
           <div>
             <dt>抓取时间</dt>
             <dd>
@@ -445,6 +478,83 @@ function ProviderDisclosure({ state }: { state: AgentState }) {
   );
 }
 
+function IdentityEvidenceLine({ evidence }: { evidence: IdentityEvidence | null | undefined }) {
+  if (!evidence) return null;
+  const details = [
+    evidence.matched_fields.length
+      ? `已匹配：${evidence.matched_fields.join("、")}`
+      : null,
+    evidence.missing_fields.length
+      ? `缺少：${evidence.missing_fields.join("、")}`
+      : null,
+    evidence.conflicting_fields.length
+      ? `冲突：${evidence.conflicting_fields.join("、")}`
+      : null,
+  ].filter(Boolean);
+  return (
+    <div className={styles.identityEvidenceLine} data-decision={evidence.decision}>
+      <strong>{identityEvidenceLabel(evidence)}</strong>
+      <span>{evidence.explanation}</span>
+      {details.length > 0 && <small>{details.join("；")}</small>}
+    </div>
+  );
+}
+
+function MatchingOffers({ state }: { state: AgentState }) {
+  const result = state.result;
+  if (!result || result.mode !== "exact_offer_comparison") return null;
+  const offers = result.matching_offers ?? [];
+  return (
+    <section className={styles.decisionSection} aria-labelledby="matching-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="matching-heading">Matching Offer</h3>
+        <span>{offers.length ? `${offers.length} 个已证明同款` : "暂无已证明同款"}</span>
+      </div>
+      {offers.length ? (
+        <ul className={styles.identityList}>
+          {offers.map((offer) => (
+            <li key={`${offer.platform}-${offer.item_id}`}>
+              <div className={styles.decisionItemHeader}>
+                <strong>{offer.title}</strong>
+                <span>{offer.platform.toUpperCase()}</span>
+              </div>
+              <IdentityEvidenceLine evidence={offer.identity_evidence} />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className={styles.identityEmpty}>
+          没有可由跨平台 identifier 或全部关键属性证明为同一 Product Variant 的 offer。
+        </p>
+      )}
+    </section>
+  );
+}
+
+function AlternativeCandidates({ candidates }: { candidates: AlternativeCandidate[] }) {
+  if (!candidates.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="alternative-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="alternative-heading">Alternative Candidate</h3>
+        <span>Identity Evidence 不足，不参与正式排名</span>
+      </div>
+      <ul className={styles.identityList}>
+        {candidates.map((candidate) => (
+          <li key={`${candidate.platform}-${candidate.item_id}`}>
+            <div className={styles.decisionItemHeader}>
+              <strong>{candidate.title}</strong>
+              <span>{candidate.platform.toUpperCase()} · ¥{candidate.landed_cny.toFixed(0)}</span>
+            </div>
+            <p>{candidate.reason}</p>
+            <IdentityEvidenceLine evidence={candidate.identity_evidence} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function EvaluationLine({ evaluation }: { evaluation: ConstraintEvaluation }) {
   return (
     <li data-status={evaluation.status}>
@@ -575,16 +685,28 @@ function DecisionTransparency({ state }: { state: AgentState }) {
   const calculationExclusions = result.calculation_exclusions ?? [];
   const suggestions = result.relaxation_suggestions ?? [];
   const isNoMatch = result.match_status === "no_match" || result.recommendations.length === 0;
+  const hasExactIdentityMatch = result.matching_offers.length > 0;
+  const exactIdentityNoMatch = result.mode === "exact_offer_comparison" && !hasExactIdentityMatch;
 
   return (
     <div className={styles.decisionTransparency}>
       {isNoMatch && (
         <section className={styles.noMatch} role="status" aria-label="无匹配结果">
-          <strong>没有满足全部硬性条件的候选</strong>
-          <span>这是成功的 No-Match Result；平台数据可用，但没有证据充分且满足约束的推荐。</span>
+          <strong>
+            {exactIdentityNoMatch
+              ? "没有 Identity Evidence 充分的 Matching Offer"
+              : "没有满足全部硬性条件的候选"}
+          </strong>
+          <span>
+            {exactIdentityNoMatch
+              ? "这是成功的 No-Match Result；相似商品已列为 Alternative Candidate，不参与正式排名。"
+              : "这是成功的 No-Match Result；平台数据可用，但没有证据充分且满足约束的推荐。"}
+          </span>
         </section>
       )}
       <CalculationExclusions exclusions={calculationExclusions} />
+      <MatchingOffers state={state} />
+      <AlternativeCandidates candidates={result.alternative_candidates ?? []} />
       <WorkingAssumptions assumptions={assumptions} />
       <UnverifiedCandidates candidates={unverified} />
       <Exclusions exclusions={exclusions} />
@@ -691,6 +813,7 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
               result?.result_kind ?? "live",
             )}
           </span>
+          <span className={styles.modeBadge}>{researchModeLabel(result?.mode)}</span>
           <h2 id="result-heading">购物建议</h2>
         </div>
         <div className={styles.segmented} role="tablist" aria-label="结果视图">
@@ -762,7 +885,11 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
               ))}
             </div>
           ) : (
-            <p className={styles.noComparison}>研究已完成，但没有商品同时满足硬性条件。</p>
+            <p className={styles.noComparison}>
+              {result?.mode === "exact_offer_comparison" && result.matching_offers.length === 0
+                ? "研究已完成，但没有 Identity Evidence 充分的 Matching Offer。"
+                : "研究已完成，但没有商品同时满足硬性条件。"}
+            </p>
           )
         ) : (
           <Comparison state={state} />

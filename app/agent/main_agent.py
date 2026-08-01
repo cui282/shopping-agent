@@ -352,7 +352,7 @@ async def run_agent(
         {"recommendation_count": len(picks.recommendations)},
         lambda: shopping_summary(
             picks,
-            shipping.items,
+            picks.matching_offers,
             providers=providers,
             rate_source=prices.rate_source,
             rates_as_of=prices.rates_as_of,

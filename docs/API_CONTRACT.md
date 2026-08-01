@@ -266,8 +266,11 @@ Uploaded references and user preferences are not task-owned and are therefore no
 {
   "thread_id": "thread-7b8cb4a9c23f",
   "final_answer": "...",
+  "mode": "exact_offer_comparison",
   "recommendations": [],
   "comparison": [],
+  "matching_offers": [],
+  "alternative_candidates": [],
   "files": [
     {"name": "shopping-report.md", "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.md"}
   ],
@@ -334,6 +337,22 @@ successful result with usable marketplace data but no candidate that is both ful
 compliant with every Hard Constraint. It must not be converted into a provider error. A `no_match`
 result may contain `unverified_candidates` and `exclusions` for transparent follow-up.
 
+`mode` is the normalized research intent and is one of:
+
+- `product_research`: different Product Variants may be compared and ranked using the existing
+  Hard Constraint and deterministic Ranking Profile rules. Every normalized offer is exposed in
+  `matching_offers`/`comparison` with `identity_evidence.decision=not_required`.
+- `exact_offer_comparison`: only offers that pass the deterministic identity matcher are exposed in
+  `matching_offers`/`comparison` and can proceed to Hard Constraint eligibility and ranking. The
+  normalized `ShoppingPlan` carries the same mode before marketplace search; the terminal result
+  repeats it so clients never infer the mode from free text.
+
+In `exact_offer_comparison`, identity eligibility is evaluated before Hard Constraints, landed-cost
+ranking, or any lowest-price conclusion. `matching_offers` is the complete identity-proven set;
+`recommendations` is the subset that also satisfies every Hard Constraint and is then ranked by the
+deterministic `ranking_profile`. `alternative_candidates` is never included in `comparison`, formal
+ranking, or minimum-price conclusions.
+
 Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or
 `unavailable`. `failure_reason` is nullable and uses the stable provider failure codes above.
 
@@ -386,6 +405,53 @@ gateway does not supply one. A generated `item_id` is never represented as offer
 values are `null`. `variant_attributes` contains only supplied scalar attributes that distinguish
 the Product Variant; an empty object means none were supplied. `attributes` is retained as a legacy
 general-purpose field, but clients must not use it to invent missing identity.
+
+Every result offer also has `identity_evidence` (nullable on lower-level PricePoint values, and
+present on result rows):
+
+```json
+{
+  "decision": "matching_offer",
+  "basis": "identifier",
+  "matched_fields": ["identity.gtin", "capacity", "regional_version", "bundle", "condition"],
+  "missing_fields": [],
+  "conflicting_fields": [],
+  "explanation": "identity.gtin 跨平台一致，且没有发现冲突的关键属性。"
+}
+```
+
+The deterministic matcher first compares a normalized GTIN (including gateway UPC/EAN aliases) or
+MPN when both offers provide the same cross-platform identifier. A conflicting material variant
+attribute still rejects the match. If no authoritative identifier is present, brand and model plus
+every material `variant_attributes` key supplied by either offer must be present and equal after
+deterministic normalization; a missing or conflicting capacity, regional version, bundle, condition,
+or other supplied variant attribute is insufficient. A marketplace-local `offer_id` or generated
+`item_id` never proves cross-platform identity. Title similarity, image similarity, and LLM or image
+analysis clues cannot create `Identity Evidence` or change eligibility.
+
+An exact-mode row that fails identity eligibility is an `Alternative Candidate` with the same
+normalized landed-cost fields plus `reason` and non-matching `identity_evidence`:
+
+```json
+{
+  "item_id": "fixture-ebay-variant-2",
+  "title": "Similar title, different regional version",
+  "landed_cny": 704.20,
+  "reason": "Alternative Candidate：关键 Product Variant 属性不一致，不能证明是同款。",
+  "identity_evidence": {
+    "decision": "alternative_candidate",
+    "basis": "insufficient",
+    "matched_fields": ["identity.brand", "identity.model"],
+    "missing_fields": [],
+    "conflicting_fields": ["regional_version"],
+    "explanation": "关键 Product Variant 属性不一致，不能证明是同款。"
+  }
+}
+```
+
+`Recommendation.offer_kind` is `matching_offer` in exact mode and `research_candidate` in Product
+Research. The UI and generated report expose the mode, identity evidence, matching offers, and
+alternative candidates separately.
 
 `availability` and `retrieved_at` are nullable. Valid timezone-aware retrieval timestamps are
 normalized to UTC; an old timestamp is preserved so the UI can disclose it, while an invalid,
@@ -464,7 +530,11 @@ Product Evidence, eligibility, and the deterministic outcome remain outside the 
 }
 ```
 
-The `image_analysis` readiness capability is currently false. Clients must hide or disable image-based research even though storage is available for future integrations.
+The `image_analysis` readiness capability is currently false. Clients must hide or disable image-based research even though storage is available for future integrations. When readiness reports
+`capabilities.image_analysis=true`, clients may show the reference-image input. Image analysis may
+return an identity clue for display or query assistance, but it cannot populate authoritative
+identifiers, create `Identity Evidence`, or make an offer a Matching Offer; the same deterministic
+matcher remains the sole exact-mode eligibility gate.
 
 `GET /api/files/{thread_id}/{name}` serves only report files listed in the completed result. Paths outside a task directory and internal task state files are rejected.
 

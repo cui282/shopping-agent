@@ -93,10 +93,26 @@ async def shopping_summary(
         f"运费、税费与时效均为估算（{shipping_basis}）；这不是 checkout guarantee，"
         "购买前请以平台结算页为准。"
     )
+    mode_label = (
+        "Exact Offer Comparison" if picks.mode == "exact_offer_comparison" else "Product Research"
+    )
     if picks.recommendations:
-        lines = [f"我按{ranking_basis}、硬性约束和可核验证据筛选了以下选择："]
+        if picks.mode == "exact_offer_comparison":
+            lines = [
+                (
+                    f"{mode_label} 只保留 Identity Evidence 证明同款的 Matching Offer，"
+                    f"按{ranking_basis}和硬性约束筛选："
+                )
+            ]
+        else:
+            lines = [f"{mode_label} 按{ranking_basis}、硬性约束和可核验证据筛选了以下选择："]
         for item in picks.recommendations:
             lines.append(f"{item.rank}. {item.title}：{item.reason}")
+        if picks.alternative_candidates:
+            lines.append(
+                f"另有 {len(picks.alternative_candidates)} 个 Alternative Candidate，"
+                "因 Identity Evidence 不足未参与正式排名。"
+            )
         if unavailable:
             lines.append(
                 "部分平台不可用："
@@ -112,6 +128,12 @@ async def shopping_summary(
             f"当前没有可验证的推荐；{len(picks.unverified_candidates)} 个候选缺少硬性条件证据。"
             "补充商品材质或规格证据后再判断。"
         )
+    elif picks.alternative_candidates and not picks.matching_offers:
+        final_answer = (
+            f"{mode_label} 没有 Identity Evidence 充分的 Matching Offer；"
+            f"{len(picks.alternative_candidates)} 个相似商品已单列为 Alternative Candidate，"
+            "未参与正式排名或最低价结论。"
+        )
     elif picks.exclusions or comparison:
         final_answer = "当前没有满足全部硬性条件的候选。可以查看排除原因，并在确认后放宽条件。"
     elif calculation_exclusions:
@@ -124,9 +146,11 @@ async def shopping_summary(
         "",
         final_answer,
         "",
+        f"## Research Mode\n\n{mode_label}（{picks.mode}）",
+        "",
         f"> {calculation_notice}",
         "",
-        "## 到手价比较",
+        "## Matching Offer / 到手价比较",
         "",
         "| 平台 | 商品 | 商品价(原币) | 商品价(CNY) | 运费估算 | 关税估算 | 到手价 | 时效估算 | 来源 |",
         "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
@@ -153,6 +177,19 @@ async def shopping_summary(
             f"- {item.title}（{item.item_id}）：{item.reason_code}，{item.reason}"
             for item in calculation_exclusions
         )
+    if picks.alternative_candidates:
+        markdown_lines.extend(["", "## Alternative Candidate", ""])
+        for candidate in picks.alternative_candidates:
+            evidence = candidate.identity_evidence
+            markdown_lines.append(
+                f"- {candidate.title}（{candidate.platform}）：{candidate.reason}"
+            )
+            markdown_lines.append(
+                f"  - Identity Evidence：{evidence.basis}；"
+                f"matched={', '.join(evidence.matched_fields) or '-'}；"
+                f"missing={', '.join(evidence.missing_fields) or '-'}；"
+                f"conflicting={', '.join(evidence.conflicting_fields) or '-'}"
+            )
     if picks.working_assumptions:
         markdown_lines.extend(["", "## 工作假设", ""])
         markdown_lines.extend(
@@ -203,6 +240,9 @@ async def shopping_summary(
         final_answer=final_answer,
         recommendations=picks.recommendations,
         comparison=comparison,
+        mode=picks.mode,
+        matching_offers=picks.matching_offers,
+        alternative_candidates=picks.alternative_candidates,
         files=[
             FileLink(name=markdown_path.name, url=f"/api/files/{thread_id}/{markdown_path.name}"),
             FileLink(name=json_path.name, url=f"/api/files/{thread_id}/{json_path.name}"),

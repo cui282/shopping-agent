@@ -70,6 +70,20 @@ _RANKING_KEYWORDS: dict[RankingDimension, tuple[str, ...]] = {
     ),
 }
 _RANKING_MARKERS = ("优先", "首先", "第一", "其次", "然后", "再看", "更看重", "看重", "重视", "按")
+_EXACT_MODE_MARKERS = (
+    "同款",
+    "同一款",
+    "相同款",
+    "同型号",
+    "同一型号",
+    "相同型号",
+    "同一产品",
+    "相同产品",
+    "只比价",
+    "只比较同",
+    "exact offer",
+    "exact comparison",
+)
 _DESTINATION_PATTERN = re.compile(
     r"(?:寄到|送到|配送到|配送至|寄往|送往|发往|目的地(?:是|为)?|"
     r"收货地(?:址)?(?:是|为)?|配送地址(?:是|为)?|送货地址(?:是|为)?)[：:\s]*"
@@ -198,6 +212,15 @@ def _ranking_profile(query: str) -> RankingProfile:
     return RankingProfile(priority_order=ordered, explicit=True)
 
 
+def _research_mode(query: str) -> str:
+    normalized = query.casefold()
+    return (
+        "exact_offer_comparison"
+        if any(marker in normalized for marker in _EXACT_MODE_MARKERS)
+        else "product_research"
+    )
+
+
 async def planner(query: str) -> ShoppingPlan:
     """Turn free-form Chinese shopping intent into explicit constraints."""
 
@@ -297,6 +320,7 @@ async def planner(query: str) -> ShoppingPlan:
         destination = normalize_destination(destination_match.group(1))
 
     return ShoppingPlan(
+        mode=_research_mode(query),
         budget_cny=budget,
         category=category,
         material_preferences=material_preferences,

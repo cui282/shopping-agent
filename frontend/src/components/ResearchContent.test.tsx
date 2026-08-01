@@ -4,9 +4,11 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAgentState } from "../hooks/useShoppingAgent";
 import type {
+  AlternativeCandidate,
   CalculationExclusion,
   ConstraintExclusion,
   HardConstraint,
+  IdentityEvidence,
   ProviderMetadata,
   Recommendation,
   TaskResultData,
@@ -80,6 +82,43 @@ const evidenceRecommendation: Recommendation = {
     delivery_time_days: 12,
     delivery_time_score: 1,
   },
+  offer_kind: "research_candidate",
+  identity_evidence: {
+    decision: "not_required",
+    basis: "not_required",
+    matched_fields: [],
+    missing_fields: [],
+    conflicting_fields: [],
+    explanation: "Product Research 不要求跨平台同款证明。",
+  },
+};
+
+const alternativeEvidence: IdentityEvidence = {
+  decision: "alternative_candidate",
+  basis: "insufficient",
+  matched_fields: [],
+  missing_fields: ["identity.gtin", "identity.mpn", "identity.brand", "identity.model"],
+  conflicting_fields: [],
+  explanation: "只有标题相似，缺少可验证的跨平台身份或完整规格证据。",
+};
+
+const alternativeCandidate: AlternativeCandidate = {
+  ...evidenceRecommendation,
+  reason: "身份信息不足，保留为替代候选。",
+  identity_evidence: alternativeEvidence,
+};
+
+const matchingOffer: Recommendation = {
+  ...evidenceRecommendation,
+  offer_kind: "matching_offer",
+  identity_evidence: {
+    decision: "matching_offer",
+    basis: "identifier",
+    matched_fields: ["identity.gtin"],
+    missing_fields: [],
+    conflicting_fields: [],
+    explanation: "GTIN 跨平台一致，且没有发现冲突的关键属性。",
+  },
 };
 
 function renderCompletedResult(
@@ -94,8 +133,11 @@ function renderCompletedResult(
         result: {
           thread_id: "thread-evidence",
           final_answer: "已按可核验证据整理结果。",
+          mode: "product_research",
           recommendations: recommendation ? [recommendation] : [],
           comparison: [],
+          matching_offers: [],
+          alternative_candidates: [],
           files: [],
           provider_mode: "live",
           providers: {},
@@ -321,5 +363,34 @@ describe("Product Evidence", () => {
     expect(screen.getByRole("heading", { name: "工作假设" })).toBeTruthy();
     expect(screen.getByText((_, element) => element?.textContent === "颜色：不设限")).toBeTruthy();
     expect(screen.getByText("当前任务未自动放宽。")).toBeTruthy();
+  });
+
+  it("labels exact comparison mode, matching offers, alternatives, and identity evidence", () => {
+    renderCompletedResult(matchingOffer, {
+      mode: "exact_offer_comparison",
+      matching_offers: [matchingOffer],
+      comparison: [matchingOffer],
+      alternative_candidates: [alternativeCandidate],
+    });
+
+    expect(screen.getByText("Exact Offer Comparison")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Matching Offer" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Alternative Candidate" })).toBeTruthy();
+    expect(screen.getAllByText("GTIN 已验证同款").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("只有标题相似，缺少可验证的跨平台身份或完整规格证据。")).toBeTruthy();
+  });
+
+  it("explains an exact-mode identity no-match separately from hard constraints", () => {
+    renderCompletedResult(null, {
+      mode: "exact_offer_comparison",
+      matching_offers: [],
+      comparison: [],
+      alternative_candidates: [alternativeCandidate],
+      match_status: "no_match",
+    });
+
+    expect(screen.getByText("没有 Identity Evidence 充分的 Matching Offer")).toBeTruthy();
+    expect(screen.getByText("研究已完成，但没有 Identity Evidence 充分的 Matching Offer。")).toBeTruthy();
+    expect(screen.queryByText("没有满足全部硬性条件的候选")).toBeNull();
   });
 });

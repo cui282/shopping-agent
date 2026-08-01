@@ -57,8 +57,11 @@ describe("agentReducer", () => {
     const result: TaskResultData = {
       thread_id: "thread-42",
       final_answer: "已找到两款候选",
+      mode: "product_research",
       recommendations: [],
       comparison: [],
+      matching_offers: [],
+      alternative_candidates: [],
       files: [],
       provider_mode: "sandbox",
       providers: {},
@@ -150,8 +153,11 @@ describe("agentReducer", () => {
         ? {
             thread_id: "thread-timeline",
             final_answer: "done",
+            mode: "product_research",
             recommendations: [],
             comparison: [],
+            matching_offers: [],
+            alternative_candidates: [],
             files: [],
             provider_mode: "sandbox",
             providers: {},

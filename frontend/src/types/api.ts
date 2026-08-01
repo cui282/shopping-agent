@@ -3,6 +3,7 @@ export type Marketplace = "amazon" | "shopee" | "aliexpress" | "ebay" | string;
 export type ProviderSource = "live" | "curated" | "fixture" | "computed";
 export type DataMode = "live" | "sandbox" | "mixed";
 export type ProviderMode = DataMode | "unverified";
+export type ResearchMode = "product_research" | "exact_offer_comparison";
 export type ResultKind = "live" | "sandbox" | "partial";
 export type ProviderFailureReason =
   | "not_configured"
@@ -97,6 +98,15 @@ export interface ProductIdentity {
   model: string | null;
 }
 
+export interface IdentityEvidence {
+  decision: "matching_offer" | "alternative_candidate" | "not_required";
+  basis: "identifier" | "material_variant_attributes" | "insufficient" | "not_required";
+  matched_fields: string[];
+  missing_fields: string[];
+  conflicting_fields: string[];
+  explanation: string;
+}
+
 export interface OfferProvenance {
   kind: "marketplace_gateway" | "sandbox_fixture";
   provider: string | null;
@@ -117,6 +127,7 @@ export interface ProductEvidence {
   retrieved_at: string | null;
   provenance: OfferProvenance | null;
   source: ProviderSource;
+  identity_evidence: IdentityEvidence | null;
 }
 
 export interface ProviderMetadata {
@@ -226,6 +237,8 @@ export interface Recommendation extends ProductEvidence {
   rank: number;
   constraint_evaluations: ConstraintEvaluation[];
   score_breakdown: RankingScoreBreakdown;
+  offer_kind: "matching_offer" | "research_candidate";
+  identity_evidence: IdentityEvidence;
 }
 
 export interface UnverifiedCandidate extends ProductEvidence {
@@ -247,6 +260,27 @@ export interface UnverifiedCandidate extends ProductEvidence {
   delivery_estimate: EstimateDisclosure;
   reason: string;
   constraint_evaluations: ConstraintEvaluation[];
+}
+
+export interface AlternativeCandidate extends ProductEvidence {
+  image_url: string | null;
+  price: number;
+  currency: string;
+  price_cny: number;
+  shipping_cny: number;
+  duty_cny: number;
+  landed_cny: number;
+  eta_days: number;
+  rating: number | null;
+  sales: number | null;
+  attributes: Record<string, string | number | boolean | null>;
+  note: string | null;
+  duty_tier: "免征" | "标准" | "高税";
+  shipping_estimate: EstimateDisclosure;
+  duty_estimate: EstimateDisclosure;
+  delivery_estimate: EstimateDisclosure;
+  reason: string;
+  identity_evidence: IdentityEvidence;
 }
 
 export interface ConstraintExclusion {
@@ -288,8 +322,11 @@ export interface GeneratedFile {
 export interface TaskResultData {
   thread_id: string;
   final_answer: string;
+  mode: ResearchMode;
   recommendations: Recommendation[];
   comparison: ComparisonItem[];
+  matching_offers: ComparisonItem[];
+  alternative_candidates: AlternativeCandidate[];
   files: GeneratedFile[];
   provider_mode: Exclude<ProviderMode, "unverified">;
   providers: Record<string, ProviderMetadata>;

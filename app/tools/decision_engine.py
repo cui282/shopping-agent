@@ -6,11 +6,13 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.schemas import (
+    AlternativeCandidate,
     ConstraintEvaluation,
     ConstraintEvidence,
     ConstraintExclusion,
     ConstraintRelaxationSuggestion,
     HardConstraint,
+    IdentityEvidence,
     ItemPickerOutput,
     LandedCost,
     RankingDimension,
@@ -22,6 +24,7 @@ from app.schemas import (
     UnverifiedCandidate,
     WorkingAssumption,
 )
+from app.tools.identity_matcher import classify_exact_offers
 
 _NUMERIC_VALUE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*([a-zA-Z]+|公斤|克|毫升|厘米|英寸|寸|小时)?")
 
@@ -380,11 +383,29 @@ def decision_engine(
 
     remembered = _remembered_model(remembered_preferences)
     assumptions = intent.working_assumptions or _default_assumptions()
+    if intent.mode == "exact_offer_comparison":
+        classification = classify_exact_offers(normalized_offers)
+        matching_offers = classification.matching_offers
+        alternative_candidates = classification.alternative_candidates
+    else:
+        matching_offers = [
+            offer.model_copy(
+                update={
+                    "identity_evidence": IdentityEvidence(
+                        decision="not_required",
+                        basis="not_required",
+                        explanation="Product Research 可以比较不同 Product Variant，不要求同款证明。",
+                    )
+                }
+            )
+            for offer in normalized_offers
+        ]
+        alternative_candidates: list[AlternativeCandidate] = []
     recommendations: list[tuple[LandedCost, list[ConstraintEvaluation]]] = []
     unverified: list[UnverifiedCandidate] = []
     exclusions: list[ConstraintExclusion] = []
 
-    for offer in normalized_offers:
+    for offer in matching_offers:
         evaluations = [
             evaluate_constraint(offer, constraint) for constraint in intent.hard_constraints
         ]
@@ -443,11 +464,19 @@ def decision_engine(
             rank=rank,
             constraint_evaluations=evaluations,
             score_breakdown=breakdown,
+            offer_kind=(
+                "matching_offer"
+                if intent.mode == "exact_offer_comparison"
+                else "research_candidate"
+            ),
         )
         for rank, (offer, evaluations, breakdown) in enumerate(scored[:limit], start=1)
     ]
     return ItemPickerOutput(
+        mode=intent.mode,
         recommendations=picks,
+        matching_offers=matching_offers,
+        alternative_candidates=alternative_candidates,
         unverified_candidates=unverified,
         exclusions=exclusions,
         working_assumptions=assumptions,
