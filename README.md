@@ -141,13 +141,14 @@ SHOPEE_API_KEY=replace-me
 
 Shopping Agent 向每个 endpoint 发送 `GET` 请求，查询参数为 `query` 和 `top_k`，并同时发送 `Authorization: Bearer <key>` 与 `X-API-Key: <key>`。密钥只由后端读取，不应进入 Vite 环境变量或浏览器代码。
 
-网关可返回顶层数组，也可用 `items`、`products` 或 `data` 包装：
+网关可返回顶层数组，也可用 `items`、`products`、`results`、`offers` 或 `data` 包装；
+`data` 也可再包一层这些集合字段：
 
 ```json
 {
   "items": [
     {
-      "item_id": "provider-item-id",
+      "offer_id": "provider-offer-id",
       "title": "商品标题",
       "price": 129.99,
       "currency": "USD",
@@ -155,13 +156,34 @@ Shopping Agent 向每个 endpoint 发送 `GET` 请求，查询参数为 `query` 
       "sales": 2384,
       "image_url": "https://cdn.example.com/item.jpg",
       "product_url": "https://shop.example.com/item",
-      "attributes": {"weight_kg": 0.24, "material": "织物"}
+      "link_kind": "product_detail",
+      "availability": "in_stock",
+      "retrieved_at": "2026-07-30T10:00:00Z",
+      "identity": {
+        "gtin": "4006381333931",
+        "brand": "Acme",
+        "model": "X1"
+      },
+      "variant_attributes": {"capacity": "256 GB", "condition": "new"},
+      "provenance": {
+        "provider": "licensed-marketplace-feed",
+        "source": "upstream-catalog"
+      }
     }
   ]
 }
 ```
 
-必需字段是标题、价格和币种。适配器支持常见字段别名；缺少 ID 时会根据平台、标题和链接生成稳定标识。其他缺失字段保留为 `null`。
+必需字段是标题、非负有限价格和币种。适配器支持书面 API 契约中的 wrapper 与字段
+别名。缺少平台 offer ID 时，`offer_id` 保持 `null`；系统可另行生成仅供内部列表使用的
+`item_id`，但不会把它当作跨平台身份或真实 offer 标识。其他未知可选字段保留为
+`null`，不会交给模型补全。
+
+Marketplace Gateway adapter 负责上游平台的 OAuth/鉴权、签名、地区参数、分页、限流和
+原始字段映射。Shopping Agent 只接收 normalized offer。Product Detail Link 必须是 gateway
+随具体 offer 返回的安全 HTTP(S) URL；搜索页必须使用 `marketplace_search`，Sandbox 结果
+也只提供这种链接。完整字段、alias、provenance 与时间戳规则见
+[API 契约](docs/API_CONTRACT.md#marketplace-gateway-search-contract)。
 
 ### 模型与中间件
 

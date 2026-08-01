@@ -5,7 +5,7 @@ from urllib.parse import unquote_plus
 import pytest
 
 from app.memory.injector import merge_preference_records
-from app.schemas import Candidate
+from app.schemas import Candidate, OfferProvenance, ProductIdentity
 from app.tools.category_insight import category_insight
 from app.tools.item_picker import item_picker
 from app.tools.item_search import _parse_live_item, item_search
@@ -121,6 +121,17 @@ async def test_price_shipping_and_picker_preserve_product_fields() -> None:
         image_url="https://example.com/image.jpg",
         product_url="https://example.com/item",
         attributes={"weight_kg": 0.34, "material": "织物"},
+        offer_id="provider-offer-one",
+        identity=ProductIdentity(gtin="4006381333931", mpn="ACME-X1", brand="Acme", model="X1"),
+        variant_attributes={"capacity": "256 GB", "condition": "new"},
+        availability="in_stock",
+        retrieved_at="2026-07-30T10:00:00Z",
+        provenance=OfferProvenance(
+            kind="marketplace_gateway",
+            provider="licensed-feed",
+            upstream_source="provider-catalog",
+        ),
+        link_kind="product_detail",
         source="live",
     )
     prices = await price_compare([candidate])
@@ -134,6 +145,13 @@ async def test_price_shipping_and_picker_preserve_product_fields() -> None:
     picks = await item_picker(shipping, plan)
     assert picks.recommendations[0].item_id == "one"
     assert picks.recommendations[0].rank == 1
+    assert picks.recommendations[0].offer_id == "provider-offer-one"
+    assert picks.recommendations[0].identity == candidate.identity
+    assert picks.recommendations[0].variant_attributes == candidate.variant_attributes
+    assert picks.recommendations[0].availability == "in_stock"
+    assert picks.recommendations[0].retrieved_at == "2026-07-30T10:00:00Z"
+    assert picks.recommendations[0].provenance == candidate.provenance
+    assert picks.recommendations[0].link_kind == "product_detail"
 
 
 @pytest.mark.asyncio

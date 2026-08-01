@@ -275,11 +275,80 @@ Uploaded references and user preferences are not task-owned and are therefore no
 
 Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or `unavailable`.
 
-Every recommendation includes `item_id`, `platform`, `title`, `image_url`, `product_url`, original price and currency, normalized `price_cny`, `shipping_cny`, `duty_cny`, `landed_cny`, `eta_days`, `rating`, `sales`, `attributes`, `source`, `reason`, and `rank`. Unknown optional values are `null`, never fabricated by a live adapter.
+Every recommendation and comparison row carries the same normalized offer evidence before adding
+calculated price, shipping, duty, and ranking fields:
 
-For fixture-backed recommendations, `product_url` is an official marketplace search URL for the
-extracted product subject, not a product-detail claim. Live adapters should return the exact
-upstream product-detail URL whenever the provider supplies one.
+```json
+{
+  "item_id": "candidate-17c0f4d5d0f4b92f99f0",
+  "platform": "ebay",
+  "marketplace": "ebay",
+  "offer_id": null,
+  "title": "Acme X1 256 GB",
+  "price": 129.99,
+  "currency": "USD",
+  "rating": null,
+  "sales": null,
+  "image_url": null,
+  "product_url": "https://shop.example/search?q=acme+x1",
+  "link_kind": "marketplace_search",
+  "attributes": {},
+  "identity": {
+    "gtin": "4006381333931",
+    "mpn": null,
+    "brand": "Acme",
+    "model": "X1"
+  },
+  "variant_attributes": {
+    "capacity": "256 GB",
+    "condition": "new"
+  },
+  "availability": "in_stock",
+  "retrieved_at": "2026-07-30T10:00:00Z",
+  "provenance": {
+    "kind": "marketplace_gateway",
+    "provider": "licensed-ebay-feed",
+    "upstream_source": "ebay-buy-browse"
+  },
+  "source": "live"
+}
+```
+
+`price` and `currency` are the original gateway or fixture amount and currency. `price_cny` is a
+separate calculated field. `item_id` remains the stable internal candidate key for additive
+compatibility; `offer_id` is the marketplace's actual offer identifier and remains `null` when the
+gateway does not supply one. A generated `item_id` is never represented as offer Identity Evidence.
+`marketplace` is the normalized contract name for the existing `platform` field and must equal it.
+
+`identity` holds cross-platform identity evidence. Missing `gtin`, `mpn`, `brand`, and `model`
+values are `null`. `variant_attributes` contains only supplied scalar attributes that distinguish
+the Product Variant; an empty object means none were supplied. `attributes` is retained as a legacy
+general-purpose field, but clients must not use it to invent missing identity.
+
+`availability` and `retrieved_at` are nullable. Valid timezone-aware retrieval timestamps are
+normalized to UTC; an old timestamp is preserved so the UI can disclose it, while an invalid,
+timezone-less, or absent timestamp becomes `null`. The service does not replace it with the current
+time. `provenance.kind` is `marketplace_gateway` or `sandbox_fixture`; `provider` identifies the
+gateway/feed or deterministic fixture catalog and is `null` when the gateway does not supply a
+trusted provider name. `upstream_source` is nullable. When both provenance values are unknown,
+`provenance` itself is `null`.
+
+`product_url` is retained for additive compatibility, while `link_kind` supplies its authoritative
+meaning:
+
+- `product_detail`: a concrete Product Detail Link supplied on that gateway offer.
+- `marketplace_search`: a Marketplace Search Link supplied by a gateway or the sandbox catalog.
+- `null`: no trusted, typed link is available; clients must omit the link.
+
+Only absolute HTTP(S) URLs with a hostname and no embedded credentials are accepted. Unsafe or
+malformed values become `null`; the service never constructs a detail URL from marketplace and
+offer identifiers. Sandbox Results use only `marketplace_search`. A live result may also contain a
+search link, and clients label links from `link_kind`, never by guessing from `source`.
+
+Recommendation-only fields are `reason` and `rank`. Both recommendations and comparison rows also
+include normalized `price_cny`, `shipping_cny`, `duty_cny`, `landed_cny`, `eta_days`, `duty_tier`,
+and nullable estimation `note`. Unknown optional Product Evidence remains `null` and is never
+filled by Agent Interpretation.
 
 ## Upload and files
 
@@ -315,6 +384,48 @@ The `image_analysis` readiness capability is currently false. Clients must hide 
 `SANDBOX_MODE=true` enables deterministic fixture data for local end-to-end testing. Production rejects both sandbox mode and fixture fallback. In live mode, each marketplace is enabled only when both its endpoint and key are present. Missing or failed gateways never become live results; outside production, fixture fallback requires the separate `ALLOW_FIXTURE_FALLBACK=true` setting and is always disclosed.
 
 `AGENT_MODE=auto` selects the model-assisted advisory step when model credentials are complete and otherwise uses rules. `AGENT_MODE=llm` with no credentials is unavailable unless `ALLOW_RULES_FALLBACK=true`.
+
+### Marketplace Gateway search contract
+
+Shopping Agent calls each configured gateway with `GET`, query parameters `query` and `top_k`, and
+both `Authorization: Bearer <key>` and `X-API-Key: <key>` for compatibility. The Marketplace Gateway
+adapter owns provider-specific OAuth or API-key exchange, request signing, region/site parameters,
+pagination across upstream provider pages, rate limits, and mapping provider fields into this
+normalized contract. Shopping Agent does not receive marketplace credentials and does not contain
+Amazon-, eBay-, AliExpress-, or Shopee-specific signing logic.
+
+The gateway response may be a top-level array, or an object using `items`, `products`, `results`,
+`offers`, or `data`. `data` may itself be an array or an object using any of those collection keys.
+For legacy compatibility, a collection wrapper may itself contain another supported collection
+wrapper, such as `items: {"items": [...]}` or `products: {"products": [...]}`.
+Provider, provenance, and retrieval-time metadata may appear on the top-level or nested `data`
+wrapper; item-level values take precedence where supported.
+
+Supported offer aliases are:
+
+| Normalized field | Accepted gateway fields |
+| --- | --- |
+| `offer_id` | `offer_id`, `item_id`, `id`, `product_id`, `sku` |
+| `title` | `title`, `name`, `product_name` |
+| `price` | `price`, `current_price`, `sale_price` |
+| `currency` | `currency`, `currency_code` |
+| `rating` | `rating`, `score` |
+| `sales` | `sales`, `sold`, `sales_count` |
+| `image_url` | `image_url`, `image`, `thumbnail` |
+| Product Detail Link | `product_url`, `detail_url`, `item_web_url`, `url`, `link` |
+| Marketplace Search Link | `search_url`, `marketplace_search_url` |
+| link kind | `link_kind`, `url_kind` |
+| retrieval time | `retrieved_at`, `observed_at`, `fetched_at` |
+| availability | `availability`, `availability_status`, `stock_status`, `in_stock` |
+| GTIN | `identity.gtin/ean/upc/isbn` or the corresponding top-level field |
+| MPN/brand/model | nested under `identity` or the corresponding top-level field |
+| critical variant attributes | `identity.variant_attributes`, `identity.variant`, `variant_attributes`, `variant`, or legacy `attributes` |
+
+Title, non-negative finite price, and currency are required for a usable offer. An item that
+explicitly claims a marketplace different from the branch is rejected. Missing optional fields,
+invalid optional numbers, unsafe URLs, and invalid timestamps are normalized to `null` rather than
+failing the complete gateway response. Gateway output remains Product Evidence; the LLM boundary
+cannot create or alter any of these fields.
 
 ## HTTP conventions
 

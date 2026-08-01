@@ -2,6 +2,36 @@ export type Marketplace = "amazon" | "shopee" | "aliexpress" | "ebay" | string;
 
 export type ProviderSource = "live" | "curated" | "fixture" | "computed";
 export type ProviderMode = "live" | "mixed" | "sandbox" | "unverified";
+export type OfferLinkKind = "product_detail" | "marketplace_search";
+
+export interface ProductIdentity {
+  gtin: string | null;
+  mpn: string | null;
+  brand: string | null;
+  model: string | null;
+}
+
+export interface OfferProvenance {
+  kind: "marketplace_gateway" | "sandbox_fixture";
+  provider: string | null;
+  upstream_source: string | null;
+}
+
+export interface ProductEvidence {
+  item_id: string;
+  platform: Marketplace;
+  marketplace: Marketplace;
+  offer_id: string | null;
+  title: string;
+  product_url: string | null;
+  link_kind: OfferLinkKind | null;
+  identity: ProductIdentity;
+  variant_attributes: Record<string, string | number | boolean | null>;
+  availability: string | null;
+  retrieved_at: string | null;
+  provenance: OfferProvenance | null;
+  source: ProviderSource;
+}
 
 export interface ProviderMetadata {
   source: ProviderSource;
@@ -79,12 +109,8 @@ export type MonitorEvent<K extends MonitorEventName = MonitorEventName> = K exte
   ? MonitorEventEnvelope<K>
   : never;
 
-export interface Recommendation {
-  item_id: string;
-  platform: Marketplace;
-  title: string;
+export interface Recommendation extends ProductEvidence {
   image_url: string | null;
-  product_url: string | null;
   price: number;
   currency: string;
   price_cny: number;
@@ -95,26 +121,23 @@ export interface Recommendation {
   rating: number | null;
   sales: number | null;
   attributes: Record<string, string | number | boolean | null>;
-  source: ProviderSource;
   note: string | null;
   duty_tier: "免征" | "标准" | "高税";
   reason: string;
   rank: number;
 }
 
-export interface ComparisonItem {
-  item_id: string;
-  platform: Marketplace;
-  title: string;
+export interface ComparisonItem extends ProductEvidence {
+  price: number;
   price_cny: number;
   shipping_cny?: number;
   duty_cny?: number;
   landed_cny?: number;
   eta_days?: number;
   rating?: number | null;
-  currency?: string;
+  currency: string;
   price_local?: number;
-  source: ProviderSource;
+  attributes: Record<string, string | number | boolean | null>;
   note?: string | null;
 }
 

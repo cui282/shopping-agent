@@ -196,10 +196,28 @@ def test_task_lifecycle_and_buffered_websocket_replay(client: TestClient) -> Non
     for recommendation in payload["result"]["recommendations"]:
         assert recommendation["landed_cny"] >= recommendation["price_cny"]
         assert recommendation["source"] == "fixture"
+        assert recommendation["marketplace"] == recommendation["platform"]
+        assert recommendation["offer_id"] is None
+        assert recommendation["identity"] == {
+            "gtin": None,
+            "mpn": None,
+            "brand": None,
+            "model": None,
+        }
+        assert isinstance(recommendation["variant_attributes"], dict)
+        assert recommendation["availability"] is None
+        assert recommendation["retrieved_at"] is None
+        assert recommendation["provenance"]["kind"] == "sandbox_fixture"
+        assert recommendation["link_kind"] == "marketplace_search"
+        assert recommendation["product_url"].startswith(("http://", "https://"))
+    assert events[-1]["data"]["recommendations"] == payload["result"]["recommendations"]
 
     report = client.get(f"/api/files/{thread_id}/shopping-report.md")
     assert report.status_code == 200
     assert "到手价比较" in report.text
+    json_report = client.get(f"/api/files/{thread_id}/shopping-report.json")
+    assert json_report.status_code == 200
+    assert json_report.json()["recommendations"] == payload["result"]["recommendations"]
 
     preferences = client.get("/api/preferences/api-user").json()["preferences"]
     assert "不含皮革" in preferences["material_preferences"]

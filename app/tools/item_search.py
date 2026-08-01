@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import os
-from typing import Any
 from urllib.parse import quote_plus
 
 import httpx
 
 from app.config import get_settings
-from app.schemas import Candidate, ItemSearchOutput, Platform, ProviderMetadata
+from app.schemas import Candidate, ItemSearchOutput, OfferProvenance, Platform, ProviderMetadata
+from app.tools.marketplace_gateway import normalize_gateway_response
 from app.tools.query_parser import extract_budget_cny, extract_product_subject
 
 _PLATFORM_CONFIG = {
@@ -159,80 +158,22 @@ def _fixture_candidates(query: str, platform: Platform, top_k: int) -> list[Cand
                 image_url=images[index],
                 product_url=f"{info['search']}{quote_plus(subject)}",
                 attributes={**attributes, "sandbox": True},
+                variant_attributes=attributes,
+                provenance=OfferProvenance(
+                    kind="sandbox_fixture",
+                    provider=f"{platform}-sandbox",
+                    upstream_source="deterministic-fixture-catalog",
+                ),
+                link_kind="marketplace_search",
                 source="fixture",
             )
         )
     return items[:top_k]
 
 
-def _first(payload: dict[str, Any], *keys: str) -> Any:
-    for key in keys:
-        value = payload.get(key)
-        if value is not None:
-            return value
-    return None
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (OverflowError, TypeError, ValueError):
-        return None
-
-
-def _safe_http_url(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    stripped = value.strip()
-    if stripped.startswith(("https://", "http://")):
-        return stripped
-    return None
-
-
-def _parse_live_item(raw: dict[str, Any], platform: Platform) -> Candidate | None:
-    title = _first(raw, "title", "name", "product_name")
-    price = _first(raw, "price", "current_price", "sale_price")
-    currency = _first(raw, "currency", "currency_code")
-    if title is None or price is None or currency is None:
-        return None
-    try:
-        numeric_price = float(price)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(numeric_price) or numeric_price < 0:
-        return None
-    product_url = _safe_http_url(_first(raw, "product_url", "url", "link"))
-    source_id = _first(raw, "item_id", "id", "product_id", "sku")
-    if source_id is None:
-        identity = f"{platform}|{title}|{product_url or numeric_price}".encode()
-        source_id = hashlib.sha256(identity).hexdigest()[:20]
-    rating_raw = _first(raw, "rating", "score")
-    sales_raw = _first(raw, "sales", "sold", "sales_count")
-    return Candidate(
-        item_id=str(source_id),
-        platform=platform,
-        title=str(title),
-        price=numeric_price,
-        currency=str(currency).upper(),
-        rating=_optional_float(rating_raw),
-        sales=_optional_int(sales_raw),
-        image_url=_safe_http_url(_first(raw, "image_url", "image", "thumbnail")),
-        product_url=product_url,
-        attributes=raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {},
-        source="live",
-    )
+def _parse_live_item(raw: dict[str, object], platform: Platform) -> Candidate | None:
+    candidates = normalize_gateway_response([raw], platform)
+    return candidates[0] if candidates else None
 
 
 async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candidate]:
@@ -250,14 +191,7 @@ async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candi
         )
         response.raise_for_status()
         payload = response.json()
-    if isinstance(payload, list):
-        raw_items = payload
-    else:
-        raw_items = payload.get("items") or payload.get("products") or payload.get("data") or []
-        if isinstance(raw_items, dict):
-            raw_items = raw_items.get("items") or raw_items.get("products") or []
-    parsed = [_parse_live_item(item, platform) for item in raw_items if isinstance(item, dict)]
-    return [item for item in parsed if item is not None][:top_k]
+    return normalize_gateway_response(payload, platform)[:top_k]
 
 
 async def item_search(
@@ -298,7 +232,15 @@ async def item_search(
                 candidates=candidates,
                 total_recall=len(candidates),
                 truncated=len(candidates) >= top_k,
-                provider=ProviderMetadata(source="live", provider=platform),
+                provider=ProviderMetadata(
+                    source="live",
+                    provider=(
+                        candidates[0].provenance.provider
+                        if candidates[0].provenance is not None
+                        and candidates[0].provenance.provider is not None
+                        else platform
+                    ),
+                ),
             )
         except Exception as exc:  # noqa: BLE001 - provider failures become typed metadata
             reason = f"provider request failed: {type(exc).__name__}"

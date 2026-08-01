@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
+OfferLinkKind = Literal["product_detail", "marketplace_search"]
 EventName = Literal[
     "session_created",
     "assistant_call",
@@ -45,6 +46,19 @@ class ProviderMetadata(StrictModel):
     provider: str
     status: Literal["ok", "degraded", "unavailable"] = "ok"
     fallback_reason: str | None = None
+
+
+class ProductIdentity(StrictModel):
+    gtin: str | None = None
+    mpn: str | None = None
+    brand: str | None = None
+    model: str | None = None
+
+
+class OfferProvenance(StrictModel):
+    kind: Literal["marketplace_gateway", "sandbox_fixture"]
+    provider: str | None = None
+    upstream_source: str | None = None
 
 
 class MarketplaceDemand(StrictModel):
@@ -198,6 +212,22 @@ class Candidate(StrictModel):
     product_url: str | None = None
     attributes: dict[str, Any] = Field(default_factory=dict)
     source: ProviderSource
+    marketplace: Platform | None = None
+    offer_id: str | None = None
+    identity: ProductIdentity = Field(default_factory=ProductIdentity)
+    variant_attributes: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    availability: str | None = None
+    retrieved_at: str | None = None
+    provenance: OfferProvenance | None = None
+    link_kind: OfferLinkKind | None = None
+
+    @model_validator(mode="after")
+    def normalize_marketplace(self) -> Candidate:
+        if self.marketplace is None:
+            self.marketplace = self.platform
+        elif self.marketplace != self.platform:
+            raise ValueError("marketplace must match platform")
+        return self
 
 
 class ItemSearchOutput(StrictModel):
@@ -222,6 +252,22 @@ class PricePoint(StrictModel):
     attributes: dict[str, Any] = Field(default_factory=dict)
     source: ProviderSource
     note: str | None = None
+    marketplace: Platform | None = None
+    offer_id: str | None = None
+    identity: ProductIdentity = Field(default_factory=ProductIdentity)
+    variant_attributes: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    availability: str | None = None
+    retrieved_at: str | None = None
+    provenance: OfferProvenance | None = None
+    link_kind: OfferLinkKind | None = None
+
+    @model_validator(mode="after")
+    def normalize_marketplace(self) -> PricePoint:
+        if self.marketplace is None:
+            self.marketplace = self.platform
+        elif self.marketplace != self.platform:
+            raise ValueError("marketplace must match platform")
+        return self
 
 
 class PriceCompareOutput(StrictModel):

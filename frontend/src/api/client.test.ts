@@ -12,6 +12,7 @@ describe("URL handling", () => {
     expect(safeExternalUrl("https://example.com/item?id=1")).toBe("https://example.com/item?id=1");
     expect(safeExternalUrl("javascript:alert(1)")).toBeNull();
     expect(safeExternalUrl("/relative-item")).toBeNull();
+    expect(safeExternalUrl("https://user:password@example.com/item")).toBeNull();
   });
 
   it("resolves generated reports against the API origin", () => {

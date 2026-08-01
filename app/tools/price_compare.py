@@ -71,6 +71,14 @@ async def price_compare(
                 product_url=item.product_url,
                 attributes=item.attributes,
                 source=item.source,
+                marketplace=item.marketplace,
+                offer_id=item.offer_id,
+                identity=item.identity,
+                variant_attributes=item.variant_attributes,
+                availability=item.availability,
+                retrieved_at=item.retrieved_at,
+                provenance=item.provenance,
+                link_kind=item.link_kind,
             )
         )
     if candidates and not ranked:

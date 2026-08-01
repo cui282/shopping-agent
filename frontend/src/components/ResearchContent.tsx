@@ -26,7 +26,8 @@ interface ResearchContentProps {
 
 function ProductImage({ product }: { product: Recommendation }) {
   const [failed, setFailed] = useState(false);
-  if (!product.image_url || failed) {
+  const imageUrl = safeExternalUrl(product.image_url);
+  if (!imageUrl || failed) {
     return (
       <div className={styles.imageFallback} aria-label={`${product.title} 暂无商品图`}>
         <ImageOff size={22} aria-hidden="true" />
@@ -37,7 +38,7 @@ function ProductImage({ product }: { product: Recommendation }) {
   return (
     <img
       className={styles.productImage}
-      src={product.image_url}
+      src={imageUrl}
       width="480"
       height="360"
       loading="lazy"
@@ -47,21 +48,58 @@ function ProductImage({ product }: { product: Recommendation }) {
   );
 }
 
+const evidenceLabels: Record<string, string> = {
+  weight_kg: "重量",
+  material: "材质",
+  style: "风格",
+  color: "颜色",
+  battery_hours: "续航",
+  storage: "存储",
+  display: "屏幕",
+  capacity: "容量",
+  condition: "成色",
+};
+
+function availabilityLabel(value: string | null): string {
+  if (!value) return "未提供";
+  return {
+    in_stock: "有货",
+    out_of_stock: "缺货",
+    limited: "库存有限",
+    preorder: "预售",
+    backorder: "可订货",
+  }[value] ?? value;
+}
+
+function retrievedAtLabel(value: string | null): string | null {
+  if (!value) return null;
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return null;
+  return new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(timestamp);
+}
+
 function ProductCard({ product }: { product: Recommendation }) {
-  const attributes = Object.entries(product.attributes ?? {})
-    .filter(([key, value]) => value != null && key !== "sandbox")
+  const variantAttributes = Object.entries(product.variant_attributes ?? {})
+    .filter(([, value]) => value != null)
     .slice(0, 3);
-  const attributeLabels: Record<string, string> = {
-    weight_kg: "重量",
-    material: "材质",
-    style: "风格",
-    color: "颜色",
-    battery_hours: "续航",
-    storage: "存储",
-    display: "屏幕",
-  };
-  const productUrl = safeExternalUrl(product.product_url);
-  const fixture = product.source === "fixture";
+  const identityEntries = [
+    ["品牌", product.identity?.brand],
+    ["型号", product.identity?.model],
+    ["GTIN", product.identity?.gtin],
+    ["MPN", product.identity?.mpn],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1]));
+  const retrievedAt = retrievedAtLabel(product.retrieved_at);
+  const productUrl = product.link_kind ? safeExternalUrl(product.product_url) : null;
+  const searchLink = product.link_kind === "marketplace_search";
+  const marketplace = providerNameLabel(product.marketplace ?? product.platform);
+  const provider = product.provenance?.provider;
 
   return (
     <article className={styles.productCard}>
@@ -75,20 +113,54 @@ function ProductCard({ product }: { product: Recommendation }) {
       <div className={styles.productBody}>
         <div className={styles.sourceLine} data-source={product.source}>
           {providerSourceLabel(product.source)}
+          {provider ? ` · ${provider}` : ""}
         </div>
         <h3 title={product.title}>{product.title}</h3>
         <p className={styles.reason}>{product.reason}</p>
-        {product.note && <p className={styles.sourceNote}>来源说明：{product.note}</p>}
-        {attributes.length > 0 && (
-          <dl className={styles.attributes}>
-            {attributes.map(([key, value]) => (
-              <div key={key}>
-                <dt>{attributeLabels[key] ?? key}</dt>
-                <dd>{key === "weight_kg" ? `${String(value)} kg` : String(value)}</dd>
+        <dl className={styles.evidence} aria-label={`${product.title} 商品证据`}>
+          <div>
+            <dt>抓取时间</dt>
+            <dd>
+              {retrievedAt ? (
+                <time dateTime={product.retrieved_at ?? undefined}>{retrievedAt}</time>
+              ) : (
+                "未提供"
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>库存</dt>
+            <dd>{availabilityLabel(product.availability)}</dd>
+          </div>
+          <div className={styles.evidenceWide}>
+            <dt>上游来源</dt>
+            <dd>{product.provenance?.upstream_source ?? "未提供"}</dd>
+          </div>
+          <div className={styles.evidenceWide}>
+            <dt>Offer ID</dt>
+            <dd>{product.offer_id ?? "未提供"}</dd>
+          </div>
+          {identityEntries.length ? (
+            identityEntries.map(([label, value]) => (
+              <div key={label}>
+                <dt>{label}</dt>
+                <dd>{value}</dd>
               </div>
-            ))}
-          </dl>
-        )}
+            ))
+          ) : (
+            <div className={styles.evidenceWide}>
+              <dt>跨平台标识</dt>
+              <dd>未提供</dd>
+            </div>
+          )}
+          {variantAttributes.map(([key, value]) => (
+            <div key={key}>
+              <dt>{evidenceLabels[key] ?? key}</dt>
+              <dd>{key === "weight_kg" ? `${String(value)} kg` : String(value)}</dd>
+            </div>
+          ))}
+        </dl>
+        {product.note && <p className={styles.sourceNote}>来源说明：{product.note}</p>}
         <div className={styles.cardFooter}>
           <div>
             <span className={styles.price}>{currencyCny.format(product.landed_cny)}</span>
@@ -102,10 +174,14 @@ function ProductCard({ product }: { product: Recommendation }) {
               href={productUrl}
               target="_blank"
               rel="noreferrer"
-              aria-label={fixture ? `在 ${product.platform} 搜索 ${product.title}` : `前往 ${product.platform} 查看 ${product.title}`}
-              title={fixture ? "在平台搜索相似商品" : "前往商品页"}
+              aria-label={
+                searchLink
+                  ? `在 ${marketplace} 搜索 ${product.title}`
+                  : `前往 ${marketplace} 查看 ${product.title}`
+              }
+              title={searchLink ? "打开商城搜索结果" : "打开具体商品详情"}
             >
-              <span>{fixture ? "平台搜索" : "查看商品"}</span>
+              <span>{searchLink ? "平台搜索" : "查看商品"}</span>
               <ArrowUpRight size={17} aria-hidden="true" />
             </a>
           )}
