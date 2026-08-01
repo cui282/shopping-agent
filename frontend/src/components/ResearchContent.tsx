@@ -6,11 +6,11 @@ import type { Recommendation } from "../types/api";
 import { starterQueries } from "../data/starterQueries";
 import { currencyCny, formatCount } from "../utils/format";
 import {
-  providerModeLabel,
   providerNameLabel,
   providerReasonLabel,
   providerSourceLabel,
   providerStatusLabel,
+  resultBadgeLabel,
 } from "../utils/trust";
 import styles from "./ResearchContent.module.css";
 
@@ -327,11 +327,16 @@ function Comparison({ state }: { state: AgentState }) {
 
 function ProviderDisclosure({ state }: { state: AgentState }) {
   const providers = Object.entries(state.result?.providers ?? {});
+  const unavailable = state.result?.unavailable_marketplaces ?? [];
   return (
     <section className={styles.providerDisclosure} aria-labelledby="provider-heading">
       <div>
-        <h3 id="provider-heading">数据提供方</h3>
-        <span>{providers.length ? `${providers.length} 项来源明细` : "本次结果未返回提供方明细"}</span>
+        <h3 id="provider-heading">平台覆盖</h3>
+        <span>
+          {providers.length
+            ? `${providers.length - unavailable.length}/${providers.length} 个平台返回结果`
+            : "本次结果未返回提供方明细"}
+        </span>
       </div>
       {providers.length > 0 && (
         <ul>
@@ -341,12 +346,40 @@ function ProviderDisclosure({ state }: { state: AgentState }) {
               <span>
                 {providerSourceLabel(metadata.source)} · {providerStatusLabel(metadata.status)} · {metadata.provider}
               </span>
+              {metadata.failure_reason && <small>{providerReasonLabel(metadata.failure_reason)}</small>}
               {metadata.fallback_reason && <small>{providerReasonLabel(metadata.fallback_reason)}</small>}
             </li>
           ))}
         </ul>
       )}
     </section>
+  );
+}
+
+function ResultDisclosure({ state }: { state: AgentState }) {
+  const result = state.result;
+  if (!result) return null;
+  if (result.data_mode === "mixed") {
+    return (
+      <p className={styles.resultDisclosure} role="note">
+        仅开发诊断模式允许混合来源；此结果不是普通用户可发起的 Live Result 或 Sandbox Result。
+      </p>
+    );
+  }
+  if (result.result_kind === "partial") {
+    const unavailable = result.unavailable_marketplaces.map(providerNameLabel).join("、");
+    return (
+      <p className={styles.resultDisclosure} role="note">
+        已返回可用平台的 Product Evidence；{unavailable || "部分平台"}不可用，稳定失败原因见平台覆盖。
+      </p>
+    );
+  }
+  return (
+    <p className={styles.resultDisclosure} role="note">
+      {result.data_mode === "sandbox"
+        ? "本次结果仅来自显式启用的 Sandbox Result fixture。"
+        : "本次结果仅来自已配置 Marketplace Gateway 的 Live Result。"}
+    </p>
   );
 }
 
@@ -387,7 +420,10 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
       <div className={styles.resultHeader}>
         <div>
           <span className={styles.eyebrow}>
-            {providerModeLabel(result?.provider_mode ?? "unverified")}
+            {resultBadgeLabel(
+              result?.data_mode ?? result?.provider_mode ?? "live",
+              result?.result_kind ?? "live",
+            )}
           </span>
           <h2 id="result-heading">购物建议</h2>
         </div>
@@ -432,6 +468,7 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
       </div>
 
       {result?.final_answer && <p className={styles.summary}>{result.final_answer}</p>}
+      <ResultDisclosure state={state} />
       {result?.calculation_notice && (
         <p className={styles.calculationNotice}>
           <Calculator size={16} aria-hidden="true" />

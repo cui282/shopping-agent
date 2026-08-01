@@ -13,6 +13,8 @@ const ready: ReadinessResponse = {
   providers: {},
   capabilities: { image_analysis: false },
   required_actions: [],
+  data_mode: "live",
+  developer_diagnostic_mode: false,
 };
 
 describe("trust state", () => {
@@ -23,8 +25,8 @@ describe("trust state", () => {
   });
 
   it("uses an explicit unverified source state", () => {
-    expect(providerModeLabel("unverified")).toBe("来源待确认");
-    expect(providerModeLabel("sandbox")).toBe("沙盒来源");
+    expect(providerModeLabel("unverified")).toBe("Result source pending");
+    expect(providerModeLabel("sandbox")).toBe("Sandbox Result");
     expect(providerReasonLabel("SANDBOX_MODE is enabled")).toBe("已显式启用沙盒模式");
   });
 });

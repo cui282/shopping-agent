@@ -3,7 +3,7 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAgentState } from "../hooks/useShoppingAgent";
-import type { Recommendation } from "../types/api";
+import type { ProviderMetadata, Recommendation, TaskResultData } from "../types/api";
 import ResearchContent from "./ResearchContent";
 
 afterEach(cleanup);
@@ -48,7 +48,10 @@ const evidenceRecommendation: Recommendation = {
   rank: 1,
 };
 
-function renderCompletedResult(recommendation = evidenceRecommendation) {
+function renderCompletedResult(
+  recommendation = evidenceRecommendation,
+  resultOverrides: Partial<TaskResultData> = {},
+) {
   render(
     <ResearchContent
       state={{
@@ -63,6 +66,10 @@ function renderCompletedResult(recommendation = evidenceRecommendation) {
           provider_mode: "live",
           providers: {},
           calculation_notice: "价格为抓取时点信息。",
+          data_mode: "live",
+          result_kind: "live",
+          unavailable_marketplaces: [],
+          ...resultOverrides,
         },
       }}
       view="recommendations"
@@ -121,5 +128,34 @@ describe("Product Evidence", () => {
     expect(screen.queryByRole("link")).toBeNull();
     expect(screen.getByText("跨平台标识")).toBeTruthy();
     expect(screen.getAllByText("未提供").length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("labels a partial result and discloses failed marketplace coverage", () => {
+    const failedProvider: ProviderMetadata = {
+      source: "live",
+      provider: "ebay-feed",
+      status: "unavailable",
+      fallback_reason: "provider request failed: TimeoutException",
+      failure_reason: "request_failed",
+    };
+    renderCompletedResult(evidenceRecommendation, {
+      result_kind: "partial",
+      unavailable_marketplaces: ["ebay"],
+      providers: {
+        amazon: {
+          source: "live",
+          provider: "amazon-feed",
+          status: "ok",
+          fallback_reason: null,
+          failure_reason: null,
+        },
+        ebay: failedProvider,
+      },
+    });
+
+    expect(screen.getByText("Partial Result")).toBeTruthy();
+    expect(screen.getByText(/eBay.*不可用/)).toBeTruthy();
+    expect(screen.getByText("平台网关请求失败")).toBeTruthy();
+    expect(screen.getByText("平台请求失败（TimeoutException）")).toBeTruthy();
   });
 });

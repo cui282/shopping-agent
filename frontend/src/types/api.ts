@@ -1,7 +1,14 @@
 export type Marketplace = "amazon" | "shopee" | "aliexpress" | "ebay" | string;
 
 export type ProviderSource = "live" | "curated" | "fixture" | "computed";
-export type ProviderMode = "live" | "mixed" | "sandbox" | "unverified";
+export type DataMode = "live" | "sandbox" | "mixed";
+export type ProviderMode = DataMode | "unverified";
+export type ResultKind = "live" | "sandbox" | "partial";
+export type ProviderFailureReason =
+  | "not_configured"
+  | "request_failed"
+  | "empty_response"
+  | "sandbox_forbidden";
 export type OfferLinkKind = "product_detail" | "marketplace_search";
 
 export interface ProductIdentity {
@@ -38,6 +45,7 @@ export interface ProviderMetadata {
   provider: string;
   status: "ok" | "degraded" | "unavailable";
   fallback_reason: string | null;
+  failure_reason: ProviderFailureReason | null;
 }
 
 export type TaskStatus =
@@ -70,6 +78,13 @@ export interface ForkEventData {
   sub_thread_id: string;
   platform: Marketplace;
   demand: MarketplaceDemand;
+  data_mode: DataMode;
+}
+
+export interface AssistantCallEventData {
+  step: string;
+  data_mode: DataMode;
+  [key: string]: unknown;
 }
 
 export interface ToolEndEventData {
@@ -80,17 +95,19 @@ export interface ToolEndEventData {
   provider: string;
   status: "ok" | "degraded" | "unavailable";
   fallback_reason: string | null;
+  failure_reason: ProviderFailureReason | null;
+  data_mode: DataMode;
 }
 
 export interface MonitorEventDataMap {
-  session_created: { thread_id: string; reference_images: Record<string, unknown>[] };
-  assistant_call: Record<string, unknown>;
-  tool_start: { tool_name: string; args: Record<string, unknown> };
+  session_created: { thread_id: string; reference_images: Record<string, unknown>[]; data_mode: DataMode };
+  assistant_call: AssistantCallEventData;
+  tool_start: { tool_name: string; args: Record<string, unknown>; data_mode: DataMode };
   tool_end: ToolEndEventData;
   fork: ForkEventData;
   task_result: TaskResultData;
-  task_cancelled: { thread_id: string };
-  error: { thread_id: string; code: string };
+  task_cancelled: { thread_id: string; data_mode: DataMode };
+  error: { thread_id: string; code: string; data_mode: DataMode };
 }
 
 interface MonitorEventEnvelope<K extends MonitorEventName> {
@@ -155,6 +172,9 @@ export interface TaskResultData {
   provider_mode: Exclude<ProviderMode, "unverified">;
   providers: Record<string, ProviderMetadata>;
   calculation_notice: string;
+  data_mode: DataMode;
+  result_kind: ResultKind;
+  unavailable_marketplaces: Marketplace[];
 }
 
 export interface TaskRequest {
@@ -175,6 +195,7 @@ export interface TaskSnapshot {
   status: "running" | "completed" | "cancelled" | "error";
   query: string;
   user_id: string;
+  data_mode: DataMode;
   created_at: string;
   updated_at: string;
   events: MonitorEvent[];
@@ -205,6 +226,9 @@ export interface HealthResponse {
 export interface ProviderCapability {
   configured: boolean;
   state: "configured" | "partial" | "missing";
+  available: boolean;
+  source: "live" | "fixture";
+  failure_reason: ProviderFailureReason | null;
 }
 
 export interface ReadinessResponse {
@@ -218,6 +242,8 @@ export interface ReadinessResponse {
   providers: Record<string, ProviderCapability>;
   capabilities: Record<string, boolean>;
   required_actions: string[];
+  data_mode: DataMode;
+  developer_diagnostic_mode: boolean;
 }
 
 export interface PreferencesResponse {

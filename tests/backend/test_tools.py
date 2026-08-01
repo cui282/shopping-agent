@@ -95,6 +95,56 @@ async def test_failed_live_provider_is_not_reported_as_success(monkeypatch) -> N
     assert result.provider.source == "live"
     assert result.provider.status == "unavailable"
     assert result.provider.fallback_reason
+    assert result.provider.failure_reason == "request_failed"
+
+
+@pytest.mark.asyncio
+async def test_blank_live_gateway_is_reported_as_not_configured(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "   ")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+
+    result = await item_search("降噪耳机", "amazon", top_k=2)
+
+    assert result.candidates == []
+    assert result.provider.failure_reason == "not_configured"
+
+
+@pytest.mark.asyncio
+async def test_fixture_fallback_requires_explicit_developer_diagnostic_mode(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "true")
+    monkeypatch.setenv("DEVELOPER_DIAGNOSTIC_MODE", "false")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "http://127.0.0.1:1/search")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+    monkeypatch.setenv("PROVIDER_TIMEOUT_SECONDS", "1")
+
+    normal = await item_search("降噪耳机", "amazon", top_k=2)
+    assert normal.candidates == []
+    assert normal.provider.source == "live"
+    assert normal.provider.failure_reason == "request_failed"
+
+    monkeypatch.setenv("DEVELOPER_DIAGNOSTIC_MODE", "true")
+    diagnostic = await item_search("降噪耳机", "amazon", top_k=2)
+    assert diagnostic.candidates
+    assert diagnostic.provider.source == "fixture"
+    assert diagnostic.provider.failure_reason == "request_failed"
+
+
+@pytest.mark.asyncio
+async def test_production_sandbox_fails_closed_at_provider_boundary(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SANDBOX_MODE", "true")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "")
+    monkeypatch.setenv("AMAZON_API_KEY", "")
+
+    result = await item_search("降噪耳机", "amazon", top_k=2)
+
+    assert result.candidates == []
+    assert result.provider.source == "live"
+    assert result.provider.status == "unavailable"
+    assert result.provider.failure_reason == "sandbox_forbidden"
 
 
 @pytest.mark.parametrize("price", ["NaN", "Infinity", "-Infinity"])

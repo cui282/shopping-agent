@@ -22,14 +22,16 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
   "task_ready": true,
   "environment": "development",
   "runtime_mode": "sandbox",
+  "data_mode": "sandbox",
+  "developer_diagnostic_mode": false,
   "agent_mode": "rules",
   "requested_agent_mode": "rules",
   "preference_store": "memory",
   "providers": {
-    "amazon": {"configured": false, "state": "missing"},
-    "shopee": {"configured": false, "state": "missing"},
-    "aliexpress": {"configured": false, "state": "missing"},
-    "ebay": {"configured": false, "state": "missing"}
+    "amazon": {"configured": false, "state": "missing", "available": true, "source": "fixture", "failure_reason": null},
+    "shopee": {"configured": false, "state": "missing", "available": true, "source": "fixture", "failure_reason": null},
+    "aliexpress": {"configured": false, "state": "missing", "available": true, "source": "fixture", "failure_reason": null},
+    "ebay": {"configured": false, "state": "missing", "available": true, "source": "fixture", "failure_reason": null}
   },
   "capabilities": {
     "websocket_events": true,
@@ -95,6 +97,7 @@ durable snapshot, even when the process-local event buffer is empty:
     "status": "running",
     "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
     "user_id": "browser-7f3c1f7a",
+    "data_mode": "live",
     "created_at": "2026-07-30T12:00:00Z",
     "updated_at": "2026-07-30T12:00:01Z",
     "events": [],
@@ -138,7 +141,7 @@ Supported events:
 | `session_created` | Worker accepted the task |
 | `assistant_call` | Workflow state changed |
 | `tool_start` | A typed tool started |
-| `tool_end` | A typed tool completed, including duration, `outcome`, source, provider status, and fallback reason |
+| `tool_end` | A typed tool completed, including duration, `outcome`, source, provider status, failure reason, and fallback reason |
 | `fork` | A marketplace branch started with explicit `platform` and `demand` |
 | `task_result` | Terminal success; `data` is `ShoppingSummaryOutput` |
 | `task_cancelled` | Terminal cancellation |
@@ -154,9 +157,18 @@ before the task-level `error`. `fork.data` has this shape:
   "demand": {
     "platform": "amazon",
     "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革"
-  }
+  },
+  "data_mode": "live"
 }
 ```
+
+`assistant_call`, search `tool_start`, and `tool_end` data also carry `data_mode`.
+`assistant_call.step` identifies the workflow phase and other diagnostic fields remain extensible.
+`tool_end` carries nullable
+`failure_reason` with one of `not_configured`, `request_failed`, `empty_response`, or
+`sandbox_forbidden`; this code is stable for client handling while `fallback_reason` remains a
+human-readable disclosure. Every event in one task uses the same data mode. `mixed` is emitted only
+when explicit developer diagnostics are enabled.
 
 Clients must branch on `event`; `message` is display text and may change. `event_id` is stable for
 the lifetime of the event. `run_id` identifies one execution of a thread, while `sequence` starts at
@@ -178,6 +190,7 @@ snapshot is not treated as the end of recovery.
   "status": "running",
   "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
   "user_id": "browser-7f3c1f7a",
+  "data_mode": "live",
   "created_at": "2026-07-30T12:00:00Z",
   "updated_at": "2026-07-30T12:00:03Z",
   "events": [
@@ -189,7 +202,7 @@ snapshot is not treated as the end of recovery.
       "sequence": 1,
       "event": "session_created",
       "message": "购物任务已创建",
-      "data": {"thread_id": "thread-7b8cb4a9c23f", "reference_images": []},
+      "data": {"thread_id": "thread-7b8cb4a9c23f", "reference_images": [], "data_mode": "live"},
       "timestamp": "2026-07-30T12:00:00Z"
     }
   ],
@@ -255,25 +268,42 @@ Uploaded references and user preferences are not task-owned and are therefore no
     {"name": "shopping-report.md", "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.md"}
   ],
   "provider_mode": "mixed",
+  "data_mode": "mixed",
+  "result_kind": "partial",
+  "unavailable_marketplaces": ["ebay"],
   "providers": {
     "amazon": {
       "source": "live",
       "provider": "amazon_api",
       "status": "ok",
-      "fallback_reason": null
+      "fallback_reason": null,
+      "failure_reason": null
+    },
+    "ebay": {
+      "source": "live",
+      "provider": "ebay_api",
+      "status": "unavailable",
+      "fallback_reason": "provider request failed: TimeoutException",
+      "failure_reason": "request_failed"
     }
   },
   "calculation_notice": "汇率来源 ...；运费与税费为估算值。"
 }
 ```
 
-`provider_mode` is:
+`data_mode` and the backwards-compatible `provider_mode` are:
 
 - `live`: all marketplace candidates came from configured live gateways.
 - `mixed`: live and fixture candidates were combined by explicitly allowed fallback.
 - `sandbox`: all marketplace candidates came from the explicit sandbox catalog.
 
-Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or `unavailable`.
+`result_kind` is `live`, `sandbox`, or `partial`. A `partial` result contains usable Product
+Evidence from at least one enabled marketplace and lists every unavailable marketplace in
+`unavailable_marketplaces` and `providers`. When all enabled marketplaces are unavailable, no
+result is emitted and the terminal error code is `providers_unavailable`.
+
+Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or
+`unavailable`. `failure_reason` is nullable and uses the stable provider failure codes above.
 
 Every recommendation and comparison row carries the same normalized offer evidence before adding
 calculated price, shipping, duty, and ranking fields:
@@ -381,7 +411,14 @@ The `image_analysis` readiness capability is currently false. Clients must hide 
 
 ## Provider boundary
 
-`SANDBOX_MODE=true` enables deterministic fixture data for local end-to-end testing. Production rejects both sandbox mode and fixture fallback. In live mode, each marketplace is enabled only when both its endpoint and key are present. Missing or failed gateways never become live results; outside production, fixture fallback requires the separate `ALLOW_FIXTURE_FALLBACK=true` setting and is always disclosed.
+`SANDBOX_MODE=true` enables deterministic fixture data only for an explicit non-production sandbox
+runtime. Production rejects sandbox mode and fixture fallback, and the provider boundary fails
+closed even when called directly. In live mode, each marketplace is enabled only when both its
+endpoint and key are present. Missing or failed gateways never become live results. Fixture
+fallback is disabled unless both `ALLOW_FIXTURE_FALLBACK=true` and
+`DEVELOPER_DIAGNOSTIC_MODE=true` are set outside production; such a task is explicitly marked
+`data_mode=mixed` and is not a normal user result. A readiness provider has `available=true` with
+`source=fixture` in sandbox, while missing live gateway configuration is always `available=false`.
 
 `AGENT_MODE=auto` selects the model-assisted advisory step when model credentials are complete and otherwise uses rules. `AGENT_MODE=llm` with no credentials is unavailable unless `ALLOW_RULES_FALLBACK=true`.
 

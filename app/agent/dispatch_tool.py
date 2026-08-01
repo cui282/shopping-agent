@@ -6,7 +6,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from app.api.monitor import Monitor
-from app.schemas import ForkEventData
+from app.config import get_settings
+from app.schemas import DataMode, ForkEventData
 from app.utils.thread_ctx import get_session_dir, get_thread_id, thread_scope
 
 T = TypeVar("T")
@@ -16,6 +17,8 @@ async def dispatch_tool(
     demands: list[dict[str, Any]],
     worker: Callable[[dict[str, Any]], Awaitable[T]],
     monitor: Monitor,
+    *,
+    data_mode: DataMode | None = None,
 ) -> list[T]:
     """Clone homogeneous sub-agent contexts and execute independent demands."""
 
@@ -29,6 +32,7 @@ async def dispatch_tool(
             sub_thread_id=sub_thread_id,
             platform=platform,
             demand=demand,
+            data_mode=data_mode or get_settings().data_mode,
         )
         await monitor.emit(
             parent_thread_id,

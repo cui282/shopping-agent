@@ -63,3 +63,50 @@ async def test_dispatch_cancels_and_awaits_siblings_when_one_branch_fails(
     finally:
         release_sibling.set()
         await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_overlaps_enabled_marketplace_branches(tmp_path: Path) -> None:
+    branch_count = 4
+    all_started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    max_active = 0
+    monitor = RecordingMonitor()
+
+    async def worker(_demand: dict[str, Any]) -> str:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if active == branch_count:
+            all_started.set()
+        try:
+            await release.wait()
+            return "result"
+        finally:
+            active -= 1
+
+    async def release_when_ready() -> None:
+        await all_started.wait()
+        release.set()
+
+    try:
+        with thread_scope("thread-overlap", tmp_path):
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    dispatch_tool(
+                        [
+                            {"platform": name, "query": "耳机"}
+                            for name in ("amazon", "shopee", "aliexpress", "ebay")
+                        ],
+                        worker,
+                        monitor,  # type: ignore[arg-type]
+                    ),
+                    release_when_ready(),
+                ),
+                timeout=1,
+            )
+        assert results[0] == ["result"] * branch_count
+        assert max_active == branch_count
+    finally:
+        release.set()

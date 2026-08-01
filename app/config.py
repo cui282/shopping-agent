@@ -83,6 +83,7 @@ class Settings:
     agent_mode: AgentMode
     sandbox_mode: bool
     allow_fixture_fallback: bool
+    developer_diagnostic_mode: bool
     allow_rules_fallback: bool
     store_backend: Literal["memory", "redis"]
     provider_timeout_seconds: float
@@ -118,6 +119,7 @@ class Settings:
             agent_mode=agent_mode,  # type: ignore[arg-type]
             sandbox_mode=_boolean("SANDBOX_MODE", False),
             allow_fixture_fallback=_boolean("ALLOW_FIXTURE_FALLBACK", False),
+            developer_diagnostic_mode=_boolean("DEVELOPER_DIAGNOSTIC_MODE", False),
             allow_rules_fallback=_boolean("ALLOW_RULES_FALLBACK", True),
             store_backend=_choice("STORE_BACKEND", "memory", {"memory", "redis"}),  # type: ignore[arg-type]
             provider_timeout_seconds=_number("PROVIDER_TIMEOUT_SECONDS", 15, 1),
@@ -156,13 +158,26 @@ class Settings:
 
     @property
     def fixture_fallback_enabled(self) -> bool:
-        return self.allow_fixture_fallback and self.app_env != "production"
+        return (
+            self.allow_fixture_fallback
+            and self.developer_diagnostic_mode
+            and self.app_env != "production"
+            and not self.sandbox_mode
+        )
+
+    @property
+    def data_mode(self) -> Literal["live", "sandbox", "mixed"]:
+        if self.fixture_fallback_enabled:
+            return "mixed"
+        return "sandbox" if self.sandbox_mode else "live"
 
     @property
     def task_ready(self) -> bool:
         if self.active_agent_mode == "unavailable":
             return False
-        if self.app_env == "production" and (self.sandbox_mode or self.allow_fixture_fallback):
+        if self.app_env == "production" and (
+            self.sandbox_mode or self.allow_fixture_fallback or self.developer_diagnostic_mode
+        ):
             return False
         return bool(self.enabled_marketplaces)
 
@@ -175,6 +190,10 @@ class Settings:
             actions.append("Disable SANDBOX_MODE in production")
         if self.app_env == "production" and self.allow_fixture_fallback:
             actions.append("Disable ALLOW_FIXTURE_FALLBACK in production")
+        if self.app_env == "production" and self.developer_diagnostic_mode:
+            actions.append("Disable DEVELOPER_DIAGNOSTIC_MODE in production")
+        if self.allow_fixture_fallback and not self.developer_diagnostic_mode:
+            actions.append("Enable DEVELOPER_DIAGNOSTIC_MODE to allow fixture fallback")
         if not self.enabled_marketplaces:
             actions.append(
                 "Configure at least one marketplace endpoint/key pair, or explicitly enable SANDBOX_MODE for local testing"
@@ -194,6 +213,7 @@ class Settings:
             return "not_ready"
         if (
             self.sandbox_mode
+            or self.fixture_fallback_enabled
             or len(self.configured_marketplaces) < len(MARKETPLACES)
             or (self.app_env == "production" and self.store_backend == "memory")
         ):

@@ -7,6 +7,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
+DataMode = Literal["live", "sandbox", "mixed"]
+ResultKind = Literal["live", "sandbox", "partial"]
+ProviderFailureReason = Literal[
+    "not_configured",
+    "request_failed",
+    "empty_response",
+    "sandbox_forbidden",
+]
 OfferLinkKind = Literal["product_detail", "marketplace_search"]
 EventName = Literal[
     "session_created",
@@ -46,6 +54,7 @@ class ProviderMetadata(StrictModel):
     provider: str
     status: Literal["ok", "degraded", "unavailable"] = "ok"
     fallback_reason: str | None = None
+    failure_reason: ProviderFailureReason | None = None
 
 
 class ProductIdentity(StrictModel):
@@ -70,6 +79,7 @@ class ForkEventData(StrictModel):
     sub_thread_id: str = Field(pattern=r"^sub-[0-9a-f]{8}$")
     platform: Platform
     demand: MarketplaceDemand
+    data_mode: DataMode = "live"
 
     @model_validator(mode="after")
     def demand_matches_platform(self) -> ForkEventData:
@@ -81,11 +91,20 @@ class ForkEventData(StrictModel):
 class SessionCreatedEventData(StrictModel):
     thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
     reference_images: list[dict[str, Any]]
+    data_mode: DataMode = "live"
 
 
 class ToolStartEventData(StrictModel):
     tool_name: str = Field(min_length=1)
     args: dict[str, Any]
+    data_mode: DataMode = "live"
+
+
+class AssistantCallEventData(StrictModel):
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
+
+    step: str = Field(min_length=1)
+    data_mode: DataMode = "live"
 
 
 class ToolEndEventData(StrictModel):
@@ -96,6 +115,8 @@ class ToolEndEventData(StrictModel):
     provider: str = Field(min_length=1)
     status: Literal["ok", "degraded", "unavailable"]
     fallback_reason: str | None = None
+    failure_reason: ProviderFailureReason | None = None
+    data_mode: DataMode = "live"
 
     @model_validator(mode="after")
     def outcome_matches_status(self) -> ToolEndEventData:
@@ -107,6 +128,7 @@ class ToolEndEventData(StrictModel):
 
 class TaskCancelledEventData(StrictModel):
     thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    data_mode: DataMode = "live"
 
 
 class ErrorEventData(TaskCancelledEventData):
@@ -134,6 +156,7 @@ class MonitorEvent(StrictModel):
         event = value.get("event")
         models = {
             "session_created": SessionCreatedEventData,
+            "assistant_call": AssistantCallEventData,
             "tool_start": ToolStartEventData,
             "tool_end": ToolEndEventData,
             "fork": ForkEventData,
@@ -318,6 +341,38 @@ class ShoppingSummaryOutput(StrictModel):
     provider_mode: Literal["live", "mixed", "sandbox"]
     providers: dict[str, ProviderMetadata] = Field(default_factory=dict)
     calculation_notice: str
+    data_mode: DataMode = "live"
+    result_kind: ResultKind = "live"
+    unavailable_marketplaces: list[Platform] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_result_contract(self) -> ShoppingSummaryOutput:
+        evidence_sources = {item.source for item in [*self.recommendations, *self.comparison]} | {
+            metadata.source for metadata in self.providers.values()
+        }
+        if self.provider_mode == "live" and "fixture" in evidence_sources:
+            raise ValueError("live result cannot contain fixture evidence")
+        if self.provider_mode == "sandbox" and any(
+            source != "fixture" for source in evidence_sources
+        ):
+            raise ValueError("sandbox result cannot contain live evidence")
+        self.data_mode = self.provider_mode
+        self.unavailable_marketplaces = sorted(
+            set(self.unavailable_marketplaces)
+            | {
+                name
+                for name, metadata in self.providers.items()
+                if metadata.status == "unavailable" or metadata.failure_reason is not None
+            }
+        )
+        self.result_kind = (
+            "sandbox"
+            if self.provider_mode == "sandbox" and not self.unavailable_marketplaces
+            else "partial"
+            if self.unavailable_marketplaces or self.provider_mode == "mixed"
+            else "live"
+        )
+        return self
 
 
 class TaskSnapshot(StrictModel):
@@ -326,6 +381,7 @@ class TaskSnapshot(StrictModel):
     status: Literal["running", "completed", "cancelled", "error"]
     query: str
     user_id: str
+    data_mode: DataMode = "live"
     created_at: str
     updated_at: str
     events: list[MonitorEvent] = Field(default_factory=list)
@@ -358,6 +414,9 @@ class HealthResponse(StrictModel):
 class ProviderCapability(StrictModel):
     configured: bool
     state: Literal["configured", "partial", "missing"]
+    available: bool = False
+    source: Literal["live", "fixture"] = "live"
+    failure_reason: ProviderFailureReason | None = None
 
 
 class ReadinessResponse(StrictModel):
@@ -371,3 +430,5 @@ class ReadinessResponse(StrictModel):
     providers: dict[str, ProviderCapability]
     capabilities: dict[str, bool]
     required_actions: list[str]
+    data_mode: DataMode = "live"
+    developer_diagnostic_mode: bool = False

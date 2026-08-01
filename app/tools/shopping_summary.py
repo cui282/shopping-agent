@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from app.schemas import (
+    DataMode,
     FileLink,
     ItemPickerOutput,
     LandedCost,
@@ -32,6 +33,8 @@ async def shopping_summary(
     rates_as_of: str = "unspecified",
     excluded_currencies: list[str] | None = None,
     shipping_basis: str = "estimated; verify at checkout",
+    unavailable_marketplaces: list[str] | None = None,
+    data_mode: DataMode | None = None,
 ) -> ShoppingSummaryOutput:
     """Create the terminal result and persist Markdown and JSON reports."""
 
@@ -40,12 +43,29 @@ async def shopping_summary(
     provider_details = providers or {}
     sources = {item.source for item in comparison}
     sources.update(metadata.source for metadata in provider_details.values())
-    if sources == {"fixture"}:
+    if data_mode is not None:
+        provider_mode = data_mode
+    elif sources == {"fixture"}:
         provider_mode = "sandbox"
     elif "fixture" in sources:
         provider_mode = "mixed"
     else:
         provider_mode = "live"
+    unavailable = sorted(
+        set(unavailable_marketplaces or [])
+        | {
+            name
+            for name, metadata in provider_details.items()
+            if metadata.status == "unavailable" or metadata.failure_reason is not None
+        }
+    )
+    result_kind = (
+        "sandbox"
+        if provider_mode == "sandbox" and not unavailable
+        else "partial"
+        if unavailable or provider_mode == "mixed"
+        else "live"
+    )
     excluded_notice = "部分候选因缺少汇率已排除；" if excluded_currencies else ""
     calculation_notice = (
         f"汇率来源：{_rate_label(rate_source)}（{_date_label(rates_as_of)}）；{excluded_notice}"
@@ -55,6 +75,15 @@ async def shopping_summary(
         lines = ["我按到手价、约束和评价筛选了以下选择："]
         for item in picks.recommendations:
             lines.append(f"{item.rank}. {item.title}：{item.reason}")
+        if unavailable:
+            lines.append(
+                "部分平台不可用："
+                + "；".join(
+                    f"{name}（{provider_details[name].failure_reason or 'unavailable'}）"
+                    for name in unavailable
+                    if name in provider_details
+                )
+            )
         final_answer = "\n".join(lines)
     elif comparison:
         final_answer = "当前候选都不满足预算或材质约束。建议提高预算或放宽一项条件。"
@@ -85,14 +114,14 @@ async def shopping_summary(
                 "",
                 "## 数据提供方",
                 "",
-                "| 平台 | 状态 | 数据类型 | 说明 |",
-                "| --- | --- | --- | --- |",
+                "| 平台 | 状态 | 数据类型 | 稳定失败原因 | 说明 |",
+                "| --- | --- | --- | --- | --- |",
             ]
         )
         for name, metadata in provider_details.items():
             markdown_lines.append(
                 f"| {name} | {metadata.status} | {metadata.source} | "
-                f"{metadata.fallback_reason or '-'} |"
+                f"{metadata.failure_reason or '-'} | {metadata.fallback_reason or '-'} |"
             )
     markdown_path = directory / "shopping-report.md"
     json_path = directory / "shopping-report.json"
@@ -110,6 +139,9 @@ async def shopping_summary(
         provider_mode=provider_mode,
         providers=provider_details,
         calculation_notice=calculation_notice,
+        data_mode=provider_mode,
+        result_kind=result_kind,
+        unavailable_marketplaces=unavailable,
     )
     json_path.write_text(
         json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",

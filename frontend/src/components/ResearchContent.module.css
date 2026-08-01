@@ -12,7 +12,14 @@
 }
 
 .eyebrow {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
   color: var(--ink-muted);
+  background: var(--surface-muted);
   font-size: 11px;
   font-weight: 720;
   line-height: 1.45;
@@ -282,6 +289,13 @@
   line-height: 1.72;
   white-space: pre-line;
   text-wrap: pretty;
+}
+
+.resultDisclosure {
+  margin: -9px 0 18px;
+  color: var(--ink-muted);
+  font-size: 11px;
+  line-height: 1.65;
 }
 
 .calculationNotice {

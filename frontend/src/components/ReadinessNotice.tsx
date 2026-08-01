@@ -1,6 +1,6 @@
 import { AlertTriangle, CircleAlert, LoaderCircle, RefreshCw } from "lucide-react";
 import type { AgentState } from "../hooks/useShoppingAgent";
-import { requiredActionLabel } from "../utils/trust";
+import { providerNameLabel, providerReasonLabel, requiredActionLabel } from "../utils/trust";
 import styles from "./ReadinessNotice.module.css";
 
 interface ReadinessNoticeProps {
@@ -10,7 +10,13 @@ interface ReadinessNoticeProps {
 
 export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticeProps) {
   const readiness = state.readiness;
-  if (state.serviceStatus === "available" && readiness?.status === "ready") return null;
+  if (
+    state.serviceStatus === "available" &&
+    readiness?.status === "ready" &&
+    readiness.data_mode !== "mixed"
+  ) {
+    return null;
+  }
 
   if (state.serviceStatus === "checking") {
     return (
@@ -40,9 +46,12 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
   const title = blocked
     ? "服务尚未完成运行配置"
     : readiness.runtime_mode === "sandbox"
-      ? "当前使用沙盒数据"
-      : "部分服务能力已降级";
+      ? "Sandbox Result 已启用"
+      : readiness.data_mode === "mixed"
+        ? "Developer Diagnostic mode 已启用"
+        : "部分服务能力已降级";
   const actions = readiness.required_actions.map(requiredActionLabel);
+  const providers = Object.entries(readiness.providers);
 
   return (
     <div className={styles.notice} data-state={blocked ? "error" : "warning"} role={blocked ? "alert" : "status"}>
@@ -52,12 +61,28 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
         <span>
           {blocked
             ? "完成以下配置后才能启动购物研究。"
-            : "任务仍可运行，结果页会逐项标明实时、回退或沙盒来源。"}
+            : "任务仍可运行，结果页会逐项标明 Live、Sandbox 或 Partial Result。"}
         </span>
         {actions.length > 0 && (
           <ul>
             {actions.map((action) => (
               <li key={action}>{action}</li>
+            ))}
+          </ul>
+        )}
+        {providers.length > 0 && (
+          <ul className={styles.providers} aria-label="平台 readiness">
+            {providers.map(([name, capability]) => (
+              <li key={name} data-available={capability.available}>
+                <strong>{providerNameLabel(name)}</strong>
+                <span>
+                  {capability.available
+                    ? capability.source === "fixture"
+                      ? "sandbox fixture 可用"
+                      : "live gateway 已配置"
+                    : providerReasonLabel(capability.failure_reason ?? capability.state)}
+                </span>
+              </li>
             ))}
           </ul>
         )}

@@ -41,6 +41,7 @@ function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     status: "running",
     query: "test",
     user_id: "test-user",
+    data_mode: "live",
     created_at: "2026-07-30T12:00:00Z",
     updated_at: "2026-07-30T12:00:00Z",
     events: [],
@@ -62,6 +63,9 @@ describe("agentReducer", () => {
       provider_mode: "sandbox",
       providers: {},
       calculation_notice: "运税为估算值",
+      data_mode: "sandbox",
+      result_kind: "sandbox",
+      unavailable_marketplaces: [],
     };
     const event = timelineEvent(1, "task_result", result as unknown as Record<string, unknown>);
 
@@ -141,6 +145,9 @@ describe("agentReducer", () => {
             provider_mode: "sandbox",
             providers: {},
             calculation_notice: "test",
+            data_mode: "sandbox",
+            result_kind: "sandbox",
+            unavailable_marketplaces: [],
           }
         : {};
     const terminal = timelineEvent(3, terminalName, terminalData);

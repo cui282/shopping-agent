@@ -13,8 +13,11 @@ from app.config import get_settings
 from app.memory.injector import extract_preferences, merge_preference_records, merge_preferences
 from app.memory.store import PreferenceStore
 from app.schemas import (
+    DataMode,
     ItemSearchOutput,
     Platform,
+    ProviderFailureReason,
+    ProviderMetadata,
     ShoppingSummaryOutput,
     TaskRequest,
     ToolEndEventData,
@@ -47,26 +50,39 @@ async def _call_tool(
     call: Callable[[], Awaitable[T]],
     *,
     event_thread_id: str | None = None,
+    data_mode: DataMode | None = None,
+    failure_metadata: ProviderMetadata | None = None,
 ) -> T:
     thread_id = event_thread_id or get_thread_id()
+    event_data_mode = data_mode or get_settings().data_mode
     await monitor.emit(
         thread_id,
         "tool_start",
         message=f"正在调用 {name} 工具",
-        data={"tool_name": name, "args": args},
+        data={"tool_name": name, "args": args, "data_mode": event_data_mode},
     )
     started = time.perf_counter()
     try:
         result = await call()
     except Exception as exc:
+        metadata = failure_metadata
+        if metadata is None:
+            metadata = ProviderMetadata(
+                source="fixture" if event_data_mode == "sandbox" else "computed",
+                provider=name,
+                status="unavailable",
+                fallback_reason=type(exc).__name__,
+            )
         failed = ToolEndEventData(
             tool_name=name,
             duration_ms=round((time.perf_counter() - started) * 1000),
             outcome="failure",
-            source="computed",
-            provider=name,
+            source=metadata.source,
+            provider=metadata.provider,
             status="unavailable",
-            fallback_reason=type(exc).__name__,
+            fallback_reason=metadata.fallback_reason,
+            failure_reason=metadata.failure_reason,
+            data_mode=event_data_mode,
         )
         await monitor.emit(
             thread_id,
@@ -90,6 +106,7 @@ async def _call_tool(
         source = metadata["source"]
         provider_name = metadata["provider"]
         fallback_reason = metadata["fallback_reason"]
+        failure_reason = metadata["failure_reason"]
     else:
         result_source = getattr(result, "source", "computed")
         source = (
@@ -101,6 +118,7 @@ async def _call_tool(
         provider_status = "ok"
         outcome = "success"
         fallback_reason = None
+        failure_reason = None
     completed = ToolEndEventData(
         tool_name=name,
         duration_ms=round((time.perf_counter() - started) * 1000),
@@ -109,6 +127,8 @@ async def _call_tool(
         provider=provider_name,
         status=provider_status,
         fallback_reason=fallback_reason,
+        failure_reason=failure_reason,
+        data_mode=event_data_mode,
     )
     await monitor.emit(
         thread_id,
@@ -151,9 +171,11 @@ async def run_agent(
     monitor: Monitor,
     store: PreferenceStore,
     reference_images: list[dict[str, Any]] | None = None,
+    data_mode: DataMode | None = None,
 ) -> ShoppingSummaryOutput:
     thread_id = get_thread_id()
     settings = get_settings()
+    task_data_mode = data_mode or settings.data_mode
     remembered = await store.get(request.user_id)
 
     await monitor.emit(
@@ -165,6 +187,7 @@ async def run_agent(
             "preview": request.query[:160],
             "agent_mode": active_agent_mode(),
             "reference_images": reference_images or [],
+            "data_mode": task_data_mode,
         },
     )
     agent_mode = active_agent_mode()
@@ -177,7 +200,12 @@ async def run_agent(
                 thread_id,
                 "assistant_call",
                 message="LangGraph ReAct 已完成意图分析",
-                data={"step": "thinking", "preview": preview, "source": "live"},
+                data={
+                    "step": "thinking",
+                    "preview": preview,
+                    "source": "live",
+                    "data_mode": task_data_mode,
+                },
             )
         except Exception as exc:
             if not allow_rules_fallback():
@@ -190,6 +218,7 @@ async def run_agent(
                     "step": "thinking",
                     "source": "computed",
                     "fallback_reason": type(exc).__name__,
+                    "data_mode": task_data_mode,
                 },
             )
 
@@ -213,24 +242,51 @@ async def run_agent(
             "category": insight.category,
             "components": insight.components,
             "platforms": list(settings.enabled_marketplaces),
+            "data_mode": task_data_mode,
         },
     )
     platforms = [cast(Platform, name) for name in settings.enabled_marketplaces]
 
     async def search_branch(demand: dict[str, Any]) -> ItemSearchOutput:
         platform: Platform = demand["platform"]
-        return await _call_tool(
-            monitor,
-            "item_search",
-            {"platform": platform, "top_k": 20},
-            lambda: item_search(request.query, platform, top_k=20, user_id=request.user_id),
-            event_thread_id=thread_id,
+        failure_metadata = ProviderMetadata(
+            source="fixture" if task_data_mode == "sandbox" else "live",
+            provider=platform,
+            status="unavailable",
+            fallback_reason="provider request failed: unexpected exception",
+            failure_reason="request_failed",
         )
+        try:
+            return await _call_tool(
+                monitor,
+                "item_search",
+                {"platform": platform, "top_k": 20},
+                lambda: item_search(request.query, platform, top_k=20, user_id=request.user_id),
+                event_thread_id=thread_id,
+                data_mode=task_data_mode,
+                failure_metadata=failure_metadata,
+            )
+        except Exception as exc:  # noqa: BLE001 - one marketplace cannot cancel siblings
+            failure_reason: ProviderFailureReason = "request_failed"
+            failure_metadata = failure_metadata.model_copy(
+                update={
+                    "fallback_reason": f"provider request failed: {type(exc).__name__}",
+                    "failure_reason": failure_reason,
+                }
+            )
+            return ItemSearchOutput(
+                platform=platform,
+                candidates=[],
+                total_recall=0,
+                truncated=False,
+                provider=failure_metadata,
+            )
 
     searches = await dispatch_tool(
         [{"platform": platform, "query": request.query} for platform in platforms],
         search_branch,
         monitor,
+        data_mode=task_data_mode,
     )
     candidates = [candidate for result in searches for candidate in result.candidates]
     providers = {result.platform: result.provider for result in searches}
@@ -245,11 +301,11 @@ async def run_agent(
             "providers": {
                 name: metadata.model_dump(mode="json") for name, metadata in providers.items()
             },
+            "data_mode": task_data_mode,
         },
     )
-    if providers and all(
-        metadata.source == "live" and metadata.status == "unavailable"
-        for metadata in providers.values()
+    if not candidates or (
+        providers and all(metadata.status == "unavailable" for metadata in providers.values())
     ):
         raise ProvidersUnavailableError("all enabled marketplace providers are unavailable")
 
@@ -275,7 +331,11 @@ async def run_agent(
         thread_id,
         "assistant_call",
         message="Reflect：核对硬约束与推荐理由",
-        data={"step": "reflecting", "selected_count": len(picks.recommendations)},
+        data={
+            "step": "reflecting",
+            "selected_count": len(picks.recommendations),
+            "data_mode": task_data_mode,
+        },
     )
     result = await _call_tool(
         monitor,
@@ -289,6 +349,10 @@ async def run_agent(
             rates_as_of=prices.rates_as_of,
             excluded_currencies=prices.excluded_currencies,
             shipping_basis=shipping.calculation_basis,
+            unavailable_marketplaces=[
+                result.platform for result in searches if result.provider.status == "unavailable"
+            ],
+            data_mode=task_data_mode,
         ),
     )
     extracted = extract_preferences(request.query, plan)

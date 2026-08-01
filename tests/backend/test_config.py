@@ -58,6 +58,29 @@ def test_fixture_fallback_is_never_production_ready(monkeypatch: pytest.MonkeyPa
     assert "Disable ALLOW_FIXTURE_FALLBACK in production" in settings.required_actions
 
 
+def test_mixed_diagnostic_mode_is_explicit_and_never_production_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "true")
+    monkeypatch.setenv("DEVELOPER_DIAGNOSTIC_MODE", "true")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example.com/amazon")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+
+    development = get_settings()
+    assert development.fixture_fallback_enabled
+    assert development.data_mode == "mixed"
+    assert development.developer_diagnostic_mode
+    assert development.status == "degraded"
+
+    monkeypatch.setenv("APP_ENV", "production")
+    production = get_settings()
+    assert not production.task_ready
+    assert not production.fixture_fallback_enabled
+    assert "Disable DEVELOPER_DIAGNOSTIC_MODE in production" in production.required_actions
+
+
 def test_partial_live_configuration_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_marketplaces(monkeypatch)
     monkeypatch.setenv("SANDBOX_MODE", "false")

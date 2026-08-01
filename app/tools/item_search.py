@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from urllib.parse import quote_plus
 
 import httpx
 
 from app.config import get_settings
-from app.schemas import Candidate, ItemSearchOutput, OfferProvenance, Platform, ProviderMetadata
+from app.schemas import (
+    Candidate,
+    ItemSearchOutput,
+    OfferProvenance,
+    Platform,
+    ProviderFailureReason,
+    ProviderMetadata,
+)
 from app.tools.marketplace_gateway import normalize_gateway_response
 from app.tools.query_parser import extract_budget_cny, extract_product_subject
 
@@ -177,9 +183,9 @@ def _parse_live_item(raw: dict[str, object], platform: Platform) -> Candidate | 
 
 
 async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candidate]:
-    endpoint_env, key_env = _PLATFORM_CONFIG[platform]
-    endpoint = os.environ[endpoint_env]
-    api_key = os.environ[key_env]
+    marketplace = next(item for item in get_settings().marketplaces if item.name == platform)
+    endpoint = marketplace.endpoint
+    api_key = marketplace.api_key
     headers = {"Authorization": f"Bearer {api_key}", "X-API-Key": api_key}
     transport = httpx.AsyncHTTPTransport(retries=2)
     async with httpx.AsyncClient(
@@ -206,8 +212,23 @@ async def item_search(
     top_k = max(1, min(top_k, 50))
     settings = get_settings()
     endpoint_env, key_env = _PLATFORM_CONFIG[platform]
-    configured = bool(os.getenv(endpoint_env) and os.getenv(key_env))
+    marketplace = next(item for item in settings.marketplaces if item.name == platform)
+    configured = marketplace.configured
     if settings.sandbox_mode:
+        if settings.app_env == "production":
+            return ItemSearchOutput(
+                platform=platform,
+                candidates=[],
+                total_recall=0,
+                truncated=False,
+                provider=ProviderMetadata(
+                    source="live",
+                    provider=platform,
+                    status="unavailable",
+                    fallback_reason="sandbox mode is forbidden in production",
+                    failure_reason="sandbox_forbidden",
+                ),
+            )
         candidates = _fixture_candidates(query, platform, top_k)
         return ItemSearchOutput(
             platform=platform,
@@ -244,6 +265,9 @@ async def item_search(
             )
         except Exception as exc:  # noqa: BLE001 - provider failures become typed metadata
             reason = f"provider request failed: {type(exc).__name__}"
+            failure_reason: ProviderFailureReason = (
+                "empty_response" if isinstance(exc, LookupError) else "request_failed"
+            )
             if settings.fixture_fallback_enabled:
                 candidates = _fixture_candidates(query, platform, top_k)
                 return ItemSearchOutput(
@@ -256,6 +280,7 @@ async def item_search(
                         provider=f"{platform}-sandbox",
                         status="degraded",
                         fallback_reason=reason,
+                        failure_reason=failure_reason,
                     ),
                 )
             return ItemSearchOutput(
@@ -268,6 +293,7 @@ async def item_search(
                     provider=platform,
                     status="unavailable",
                     fallback_reason=reason,
+                    failure_reason=failure_reason,
                 ),
             )
 
@@ -281,5 +307,6 @@ async def item_search(
             provider=platform,
             status="unavailable",
             fallback_reason=f"{endpoint_env} and {key_env} are not fully configured",
+            failure_reason="not_configured",
         ),
     )

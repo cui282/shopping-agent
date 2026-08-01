@@ -1,14 +1,20 @@
-import type { ProviderMode, ProviderSource, ReadinessResponse } from "../types/api";
+import type { DataMode, ProviderFailureReason, ProviderMode, ProviderSource, ReadinessResponse, ResultKind } from "../types/api";
 import type { ServiceStatus } from "../hooks/useShoppingAgent";
 
 export function providerModeLabel(mode: ProviderMode | string): string {
   const labels: Record<ProviderMode, string> = {
-    live: "实时来源",
-    mixed: "混合来源",
-    sandbox: "沙盒来源",
-    unverified: "来源待确认",
+    live: "Live Result",
+    mixed: "Developer Diagnostic · Mixed Source",
+    sandbox: "Sandbox Result",
+    unverified: "Result source pending",
   };
-  return labels[mode as ProviderMode] ?? "来源待确认";
+  return labels[mode as ProviderMode] ?? "Result source pending";
+}
+
+export function resultBadgeLabel(dataMode: DataMode | string, resultKind: ResultKind | string): string {
+  if (dataMode === "mixed") return "Developer Diagnostic · Mixed Source";
+  if (resultKind === "partial") return "Partial Result";
+  return dataMode === "sandbox" ? "Sandbox Result" : "Live Result";
 }
 
 export function providerSourceLabel(source: ProviderSource): string {
@@ -27,6 +33,13 @@ export function providerStatusLabel(status: "ok" | "degraded" | "unavailable"): 
 
 export function providerReasonLabel(reason: string): string {
   if (reason === "SANDBOX_MODE is enabled") return "已显式启用沙盒模式";
+  const stableLabels: Record<ProviderFailureReason, string> = {
+    not_configured: "平台未配置完整网关",
+    request_failed: "平台网关请求失败",
+    empty_response: "平台未返回可用商品证据",
+    sandbox_forbidden: "生产环境拒绝沙盒数据",
+  };
+  if (reason in stableLabels) return stableLabels[reason as ProviderFailureReason];
   if (reason.startsWith("provider request failed:")) {
     return `平台请求失败（${reason.slice("provider request failed:".length).trim()}）`;
   }
@@ -45,6 +58,12 @@ export function requiredActionLabel(action: string): string {
     return "配置 OPENAI_API_KEY 与 LLM_MAIN，或启用规则编排回退";
   }
   if (action === "Disable SANDBOX_MODE in production") return "生产环境关闭 SANDBOX_MODE";
+  if (action === "Disable DEVELOPER_DIAGNOSTIC_MODE in production") {
+    return "生产环境关闭 DEVELOPER_DIAGNOSTIC_MODE";
+  }
+  if (action === "Enable DEVELOPER_DIAGNOSTIC_MODE to allow fixture fallback") {
+    return "fixture fallback 仅能在显式开发诊断模式使用";
+  }
   if (action.startsWith("Configure at least one marketplace")) {
     return "至少配置一个平台的 API 地址与密钥，本地验证也可显式启用 SANDBOX_MODE";
   }

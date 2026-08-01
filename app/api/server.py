@@ -34,6 +34,7 @@ from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.store import PreferenceStore, build_preference_store
 from app.schemas import (
+    DataMode,
     EventName,
     HealthResponse,
     MonitorEvent,
@@ -81,6 +82,47 @@ def _persist_snapshot(snapshot: TaskSnapshot) -> None:
         raise SnapshotPersistenceError(str(exc)) from exc
 
 
+def _as_data_mode(value: Any) -> DataMode | None:
+    return value if value in {"live", "sandbox", "mixed"} else None
+
+
+def _infer_legacy_snapshot_data_mode(payload: dict[str, Any]) -> DataMode:
+    result = payload.get("result")
+    result_mode: DataMode | None = None
+    if isinstance(result, dict):
+        result_mode = _as_data_mode(result.get("data_mode") or result.get("provider_mode"))
+
+    event_modes: set[DataMode] = set()
+    sources: set[str] = set()
+
+    for event in payload.get("events", []):
+        if not isinstance(event, dict):
+            continue
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        event_mode = _as_data_mode(data.get("data_mode"))
+        if event_mode is not None:
+            event_modes.add(event_mode)
+        if event.get("event") != "tool_end" or data.get("tool_name") != "item_search":
+            continue
+        source = data.get("source")
+        if source in {"live", "fixture"}:
+            sources.add(source)
+
+    if result_mode is not None and any(mode != result_mode for mode in event_modes):
+        raise ValueError("legacy snapshot contains conflicting data modes")
+    if result_mode is not None:
+        return result_mode
+    if "mixed" in event_modes or len(event_modes) > 1 or sources == {"live", "fixture"}:
+        return "mixed"
+    if event_modes:
+        return next(iter(event_modes))
+    if sources == {"fixture"}:
+        return "sandbox"
+    return "live"
+
+
 def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         return None
@@ -88,8 +130,25 @@ def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
     if not path.is_file():
         return None
     try:
-        snapshot = TaskSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise TypeError("task snapshot must be a JSON object")
+        snapshot = TaskSnapshot.model_validate(payload)
+        if "data_mode" not in payload:
+            data_mode = _infer_legacy_snapshot_data_mode(payload)
+            snapshot = snapshot.model_copy(
+                update={
+                    "data_mode": data_mode,
+                    "events": [
+                        event.model_copy(update={"data": {**event.data, "data_mode": data_mode}})
+                        for event in snapshot.events
+                    ],
+                }
+            )
+            _persist_snapshot(snapshot)
+    except SnapshotPersistenceError:
+        raise
+    except (OSError, TypeError, ValueError):
         logger.exception("failed to load task snapshot", extra={"thread_id": thread_id})
         return None
     if snapshot.status == "running" and thread_id not in records:
@@ -103,7 +162,11 @@ def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
             sequence=sequence,
             event="error",
             message=message,
-            data={"thread_id": thread_id, "code": "task_interrupted"},
+            data={
+                "thread_id": thread_id,
+                "code": "task_interrupted",
+                "data_mode": snapshot.data_mode,
+            },
             timestamp=timestamp,
         )
         snapshot = snapshot.model_copy(
@@ -198,6 +261,8 @@ def _record_event(
         raise RuntimeError(f"cannot record an event for terminal task {thread_id}")
 
     sequence = record.snapshot.events[-1].sequence + 1 if record.snapshot.events else 1
+    task_data_mode = record.snapshot.data_mode
+    event_data = {**data, "data_mode": task_data_mode}
     envelope = MonitorEvent(
         event_id=event_id,
         thread_id=thread_id,
@@ -205,7 +270,7 @@ def _record_event(
         sequence=sequence,
         event=event,
         message=message,
-        data=data,
+        data=event_data,
         timestamp=timestamp,
     )
     changes: dict[str, Any] = {
@@ -213,9 +278,14 @@ def _record_event(
         "updated_at": timestamp,
     }
     if event == "task_result":
+        result = ShoppingSummaryOutput.model_validate(data)
+        if result.data_mode != task_data_mode:
+            raise RuntimeError(
+                f"task result data mode {result.data_mode} does not match task mode {task_data_mode}"
+            )
         changes.update(
             status="completed",
-            result=ShoppingSummaryOutput.model_validate(data),
+            result=result,
             error_code=None,
             error=None,
         )
@@ -258,6 +328,10 @@ async def _execute_task(
 ) -> None:
     thread_id = request.thread_id
     assert thread_id is not None
+    record = records.get(thread_id)
+    task_data_mode: DataMode = (
+        record.snapshot.data_mode if record is not None else get_settings().data_mode
+    )
     try:
         async with task_slots:
             with thread_scope(thread_id, directory, run_id):
@@ -267,10 +341,17 @@ async def _execute_task(
                     data={
                         "thread_id": thread_id,
                         "reference_images": reference_images,
+                        "data_mode": task_data_mode,
                     },
                 )
                 result = await asyncio.wait_for(
-                    run_agent(request, monitor, preference_store, reference_images),
+                    run_agent(
+                        request,
+                        monitor,
+                        preference_store,
+                        reference_images,
+                        data_mode=task_data_mode,
+                    ),
                     timeout=get_settings().task_timeout_seconds,
                 )
                 await monitor.emit(
@@ -359,6 +440,32 @@ async def _execute(
 
 def _readiness_response() -> ReadinessResponse:
     settings = get_settings()
+    sandbox_available = settings.sandbox_mode and settings.app_env != "production"
+
+    def capability(marketplace) -> ProviderCapability:
+        if sandbox_available:
+            return ProviderCapability(
+                configured=marketplace.configured,
+                state=marketplace.state,
+                available=True,
+                source="fixture",
+            )
+        if settings.sandbox_mode and settings.app_env == "production":
+            return ProviderCapability(
+                configured=marketplace.configured,
+                state=marketplace.state,
+                available=False,
+                source="fixture",
+                failure_reason="sandbox_forbidden",
+            )
+        return ProviderCapability(
+            configured=marketplace.configured,
+            state=marketplace.state,
+            available=marketplace.configured,
+            source="live",
+            failure_reason=None if marketplace.configured else "not_configured",
+        )
+
     return ReadinessResponse(
         status=settings.status,
         task_ready=settings.task_ready,
@@ -368,11 +475,7 @@ def _readiness_response() -> ReadinessResponse:
         requested_agent_mode=settings.agent_mode,
         preference_store=settings.store_backend,
         providers={
-            marketplace.name: ProviderCapability(
-                configured=marketplace.configured,
-                state=marketplace.state,
-            )
-            for marketplace in settings.marketplaces
+            marketplace.name: capability(marketplace) for marketplace in settings.marketplaces
         },
         capabilities={
             "websocket_events": True,
@@ -381,6 +484,8 @@ def _readiness_response() -> ReadinessResponse:
             "image_analysis": False,
         },
         required_actions=list(settings.required_actions),
+        data_mode=settings.data_mode,
+        developer_diagnostic_mode=settings.developer_diagnostic_mode,
     )
 
 
@@ -428,6 +533,7 @@ async def create_task(request: TaskRequest) -> TaskStarted:
             status="running",
             query=request.query,
             user_id=request.user_id,
+            data_mode=settings.data_mode,
             created_at=created_at,
             updated_at=created_at,
         )

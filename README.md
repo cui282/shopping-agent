@@ -14,7 +14,7 @@ Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用�
 - Amazon、Shopee、AliExpress、eBay 网关适配器并行检索
 - 9 个类型化购物工具，覆盖规划、类目、检索、筛选、价格、到手价和总结
 - AGUI 风格 WebSocket 事件，支持连接前缓冲和断线重连
-- live、mixed、sandbox 三种结果来源状态
+- Live Result、Sandbox Result 与 Partial Result；开发诊断模式会额外披露 mixed source
 - Redis 偏好存储、OpenSearch 类目知识库、Faiss 与三塔召回扩展边界
 - Markdown、JSON 报告和受控文件下载
 - GitHub Actions、Dependabot 和统一的 `make verify` 质量门禁
@@ -128,6 +128,7 @@ curl --fail http://127.0.0.1:8000/api/readiness
 APP_ENV=production
 SANDBOX_MODE=false
 ALLOW_FIXTURE_FALLBACK=false
+DEVELOPER_DIAGNOSTIC_MODE=false
 ```
 
 至少配置一个平台网关：

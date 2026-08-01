@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from contextlib import suppress
 from typing import Any
@@ -13,7 +14,15 @@ from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
 
 from app.api import server
-from app.schemas import MonitorEvent, ShoppingSummaryOutput, TaskRequest, TaskSnapshot
+from app.schemas import (
+    Candidate,
+    ItemSearchOutput,
+    MonitorEvent,
+    ProviderMetadata,
+    ShoppingSummaryOutput,
+    TaskRequest,
+    TaskSnapshot,
+)
 from app.tools.price_compare import MissingExchangeRatesError
 from app.utils.thread_ctx import thread_scope
 
@@ -31,6 +40,18 @@ class TrackingWebSocket:
         self.closed = (code, reason)
 
 
+def _wait_for_terminal_snapshot(
+    client: TestClient, thread_id: str, timeout: float = 5
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snapshot = client.get(f"/api/task/{thread_id}").json()
+        if snapshot["status"] != "running":
+            return snapshot
+        time.sleep(0.01)
+    raise AssertionError(f"task {thread_id} did not reach a terminal state within {timeout}s")
+
+
 def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient) -> None:
     response = client.get("/api/health")
     assert response.status_code == 200
@@ -42,12 +63,18 @@ def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient)
     assert readiness.json()["status"] == "degraded"
     assert readiness.json()["task_ready"] is True
     assert readiness.json()["runtime_mode"] == "sandbox"
-    assert readiness.json()["providers"] == {
-        "amazon": {"configured": False, "state": "missing"},
-        "shopee": {"configured": False, "state": "missing"},
-        "aliexpress": {"configured": False, "state": "missing"},
-        "ebay": {"configured": False, "state": "missing"},
-    }
+    assert readiness.json()["data_mode"] == "sandbox"
+    assert all(
+        capability
+        == {
+            "configured": False,
+            "state": "missing",
+            "available": True,
+            "source": "fixture",
+            "failure_reason": None,
+        }
+        for capability in readiness.json()["providers"].values()
+    )
 
 
 @pytest.mark.parametrize("query", ["a", "商" * 4000, f" \t{'商' * 4000}\n"])
@@ -84,6 +111,60 @@ def test_unconfigured_live_runtime_rejects_tasks(client: TestClient, monkeypatch
     assert response.headers["X-Request-ID"]
 
 
+def test_production_sandbox_readiness_and_task_fail_closed(client: TestClient, monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SANDBOX_MODE", "true")
+    monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "false")
+    monkeypatch.setenv("DEVELOPER_DIAGNOSTIC_MODE", "false")
+
+    readiness = client.get("/api/readiness")
+    assert readiness.status_code == 200
+    body = readiness.json()
+    assert body["status"] == "not_ready"
+    assert body["task_ready"] is False
+    assert body["data_mode"] == "sandbox"
+    assert all(
+        capability["available"] is False
+        and capability["source"] == "fixture"
+        and capability["failure_reason"] == "sandbox_forbidden"
+        for capability in body["providers"].values()
+    )
+
+    response = client.post(
+        "/api/task",
+        json={"query": "找一款降噪耳机", "user_id": "production-sandbox-user", "upload_ids": []},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "runtime_not_ready"
+
+
+def test_production_fixture_fallback_readiness_and_task_fail_closed(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "true")
+    monkeypatch.setenv("DEVELOPER_DIAGNOSTIC_MODE", "true")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example/amazon")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+
+    readiness = client.get("/api/readiness")
+    assert readiness.status_code == 200
+    body = readiness.json()
+    assert body["status"] == "not_ready"
+    assert body["task_ready"] is False
+    assert body["data_mode"] == "live"
+    assert "Disable ALLOW_FIXTURE_FALLBACK in production" in body["required_actions"]
+    assert "Disable DEVELOPER_DIAGNOSTIC_MODE in production" in body["required_actions"]
+
+    response = client.post(
+        "/api/task",
+        json={"query": "找一款降噪耳机", "user_id": "production-fallback-user", "upload_ids": []},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "runtime_not_ready"
+
+
 def test_all_enabled_live_providers_unavailable_ends_with_stable_error(
     client: TestClient, monkeypatch
 ) -> None:
@@ -99,15 +180,7 @@ def test_all_enabled_live_providers_unavailable_ends_with_stable_error(
     assert started.status_code == 202
     thread_id = started.json()["thread_id"]
 
-    with client.websocket_connect(f"/ws/{thread_id}") as websocket:
-        while True:
-            terminal = websocket.receive_json()
-            if terminal.get("event") in {"task_result", "error"}:
-                break
-
-    assert terminal["event"] == "error"
-    assert terminal["data"]["code"] == "providers_unavailable"
-    snapshot = client.get(f"/api/task/{thread_id}").json()
+    snapshot = _wait_for_terminal_snapshot(client, thread_id)
     assert snapshot["status"] == "error"
     assert snapshot["error_code"] == "providers_unavailable"
     assert snapshot["result"] is None
@@ -120,7 +193,176 @@ def test_all_enabled_live_providers_unavailable_ends_with_stable_error(
     assert failed_tools[0]["data"]["tool_name"] == "item_search"
     assert failed_tools[0]["data"]["source"] == "live"
     assert failed_tools[0]["data"]["status"] == "unavailable"
+    assert failed_tools[0]["data"]["failure_reason"] == "request_failed"
     assert snapshot["events"][-1]["event"] == "error"
+
+
+def test_live_partial_result_keeps_successful_evidence_and_failed_provider_reason(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    for platform in ("amazon", "ebay"):
+        monkeypatch.setenv(
+            f"{platform.upper()}_API_ENDPOINT", f"https://gateway.example/{platform}"
+        )
+        monkeypatch.setenv(f"{platform.upper()}_API_KEY", "test-key")
+
+    async def partial_search(query, platform, top_k=20, user_id=None):
+        del query, top_k, user_id
+        if platform == "amazon":
+            candidate = Candidate(
+                item_id="amazon-success",
+                platform="amazon",
+                title="Live Amazon headphones",
+                price=100,
+                currency="USD",
+                source="live",
+            )
+            return ItemSearchOutput(
+                platform="amazon",
+                candidates=[candidate],
+                total_recall=1,
+                truncated=False,
+                provider=ProviderMetadata(source="live", provider="amazon-feed"),
+            )
+        raise RuntimeError("provider request failed")
+
+    monkeypatch.setattr("app.agent.main_agent.item_search", partial_search)
+    started = client.post(
+        "/api/task",
+        json={"query": "找一款降噪耳机", "user_id": "partial-user", "upload_ids": []},
+    )
+    assert started.status_code == 202
+    thread_id = started.json()["thread_id"]
+
+    snapshot = _wait_for_terminal_snapshot(client, thread_id)
+    assert snapshot["status"] == "completed"
+    result = snapshot["result"]
+    assert result["data_mode"] == "live"
+    assert result["provider_mode"] == "live"
+    assert result["result_kind"] == "partial"
+    assert result["unavailable_marketplaces"] == ["ebay"]
+    assert result["providers"]["amazon"]["status"] == "ok"
+    assert result["providers"]["ebay"]["failure_reason"] == "request_failed"
+    assert result["recommendations"]
+
+
+def test_multiple_live_provider_failures_end_with_one_stable_error(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    for platform in ("amazon", "ebay"):
+        monkeypatch.setenv(
+            f"{platform.upper()}_API_ENDPOINT", f"https://gateway.example/{platform}"
+        )
+        monkeypatch.setenv(f"{platform.upper()}_API_KEY", "test-key")
+
+    async def unavailable_search(query, platform, top_k=20, user_id=None):
+        del query, top_k, user_id
+        return ItemSearchOutput(
+            platform=platform,
+            candidates=[],
+            total_recall=0,
+            truncated=False,
+            provider=ProviderMetadata(
+                source="live",
+                provider=f"{platform}-feed",
+                status="unavailable",
+                fallback_reason="provider request failed: TimeoutException",
+                failure_reason="request_failed",
+            ),
+        )
+
+    monkeypatch.setattr("app.agent.main_agent.item_search", unavailable_search)
+    started = client.post(
+        "/api/task",
+        json={"query": "找一款降噪耳机", "user_id": "all-failed-user", "upload_ids": []},
+    )
+    thread_id = started.json()["thread_id"]
+
+    snapshot = _wait_for_terminal_snapshot(client, thread_id)
+    assert snapshot["status"] == "error"
+    assert snapshot["error_code"] == "providers_unavailable"
+    failed_tools = [
+        event
+        for event in snapshot["events"]
+        if event["event"] == "tool_end" and event["data"]["outcome"] == "failure"
+    ]
+    assert {event["data"]["provider"] for event in failed_tools} == {
+        "amazon-feed",
+        "ebay-feed",
+    }
+    assert all(event["data"]["failure_reason"] == "request_failed" for event in failed_tools)
+
+
+def test_mixed_source_requires_diagnostic_configuration_and_stays_out_of_normal_request_api(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "true")
+    monkeypatch.setenv("DEVELOPER_DIAGNOSTIC_MODE", "true")
+    for platform in ("amazon", "ebay"):
+        monkeypatch.setenv(
+            f"{platform.upper()}_API_ENDPOINT", f"https://gateway.example/{platform}"
+        )
+        monkeypatch.setenv(f"{platform.upper()}_API_KEY", "test-key")
+
+    normal_request = client.post(
+        "/api/task",
+        json={
+            "query": "找一款降噪耳机",
+            "user_id": "mixed-request-user",
+            "upload_ids": [],
+            "data_mode": "mixed",
+        },
+    )
+    assert normal_request.status_code == 422
+    readiness = client.get("/api/readiness").json()
+    assert readiness["data_mode"] == "mixed"
+    assert readiness["developer_diagnostic_mode"] is True
+
+    async def diagnostic_search(query, platform, top_k=20, user_id=None):
+        del query, top_k, user_id
+        candidate = Candidate(
+            item_id=f"{platform}-diagnostic",
+            platform=platform,
+            title=f"{platform} diagnostic item",
+            price=100,
+            currency="USD",
+            source="fixture" if platform == "ebay" else "live",
+        )
+        return ItemSearchOutput(
+            platform=platform,
+            candidates=[candidate],
+            total_recall=1,
+            truncated=False,
+            provider=ProviderMetadata(
+                source="fixture" if platform == "ebay" else "live",
+                provider=f"{platform}-diagnostic",
+                status="degraded" if platform == "ebay" else "ok",
+                fallback_reason="provider request failed: TimeoutException"
+                if platform == "ebay"
+                else None,
+                failure_reason="request_failed" if platform == "ebay" else None,
+            ),
+        )
+
+    monkeypatch.setattr("app.agent.main_agent.item_search", diagnostic_search)
+    started = client.post(
+        "/api/task",
+        json={"query": "找一款降噪耳机", "user_id": "diagnostic-user", "upload_ids": []},
+    )
+    thread_id = started.json()["thread_id"]
+    snapshot = _wait_for_terminal_snapshot(client, thread_id)
+    assert snapshot["status"] == "completed"
+    assert snapshot["result"]["data_mode"] == "mixed"
+    assert snapshot["result"]["provider_mode"] == "mixed"
+    assert snapshot["result"]["result_kind"] == "partial"
+    assert snapshot["result"]["unavailable_marketplaces"] == ["ebay"]
+    assert all(event["data"].get("data_mode") == "mixed" for event in snapshot["events"])
 
 
 def test_missing_exchange_rates_ends_with_stable_error(client: TestClient, monkeypatch) -> None:
@@ -673,6 +915,7 @@ def test_monitor_event_rejects_malformed_typed_payloads() -> None:
         )
     for event, data in (
         ("session_created", {"thread_id": "typed-event"}),
+        ("assistant_call", {}),
         ("tool_start", {"tool_name": "item_search"}),
         ("task_result", {}),
         ("task_cancelled", {}),
@@ -680,6 +923,20 @@ def test_monitor_event_rejects_malformed_typed_payloads() -> None:
     ):
         with pytest.raises(ValidationError):
             MonitorEvent(event=event, data=data, **common)
+
+
+def test_result_contract_rejects_fixture_evidence_marked_as_live() -> None:
+    with pytest.raises(ValidationError, match="live result cannot contain fixture evidence"):
+        ShoppingSummaryOutput(
+            thread_id="typed-result",
+            final_answer="invalid",
+            recommendations=[],
+            comparison=[],
+            files=[],
+            provider_mode="live",
+            providers={"amazon": ProviderMetadata(source="fixture", provider="fixture")},
+            calculation_notice="test",
+        )
 
 
 def test_websocket_bootstraps_from_the_durable_snapshot_after_memory_reset(
@@ -710,6 +967,71 @@ def test_websocket_bootstraps_from_the_durable_snapshot_after_memory_reset(
     assert first["snapshot"]["events"][-1]["event"] == "task_result"
 
 
+def test_legacy_sandbox_snapshot_migrates_its_data_mode(client: TestClient) -> None:
+    thread_id = "legacy-sandbox-snapshot"
+    created_at = server._now()
+    snapshot = TaskSnapshot(
+        thread_id=thread_id,
+        status="completed",
+        query="找一款通勤耳机",
+        user_id="legacy-user",
+        data_mode="sandbox",
+        created_at=created_at,
+        updated_at=created_at,
+        events=[
+            MonitorEvent(
+                event_id="evt-" + "1" * 32,
+                thread_id=thread_id,
+                sequence=1,
+                event="assistant_call",
+                message="正在分析需求",
+                data={"step": "thinking", "source": "live"},
+                timestamp=created_at,
+            ),
+            MonitorEvent(
+                event_id="evt-" + "2" * 32,
+                thread_id=thread_id,
+                sequence=2,
+                event="tool_end",
+                message="商品检索已完成",
+                data={
+                    "tool_name": "item_search",
+                    "duration_ms": 1,
+                    "outcome": "degraded",
+                    "source": "fixture",
+                    "provider": "amazon-sandbox",
+                    "status": "degraded",
+                    "fallback_reason": "已显式启用沙盒模式",
+                },
+                timestamp=created_at,
+            ),
+        ],
+        result=ShoppingSummaryOutput(
+            thread_id=thread_id,
+            final_answer="完成",
+            recommendations=[],
+            comparison=[],
+            files=[],
+            provider_mode="sandbox",
+            calculation_notice="test result",
+        ),
+    )
+    path = server.session_dir(thread_id) / "task.json"
+    payload = snapshot.model_dump(mode="json")
+    payload.pop("data_mode")
+    for event in payload["events"]:
+        event["data"].pop("data_mode")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = client.get(f"/api/task/{thread_id}")
+
+    assert restored.status_code == 200
+    assert restored.json()["data_mode"] == "sandbox"
+    assert all(event["data"]["data_mode"] == "sandbox" for event in restored.json()["events"])
+    assert restored.json()["result"]["data_mode"] == "sandbox"
+    assert json.loads(path.read_text(encoding="utf-8"))["data_mode"] == "sandbox"
+
+
 def test_orphaned_running_snapshot_is_marked_interrupted(client: TestClient) -> None:
     thread_id = "interrupted-thread"
     created_at = server._now()
@@ -719,6 +1041,7 @@ def test_orphaned_running_snapshot_is_marked_interrupted(client: TestClient) -> 
             status="running",
             query="找一款通勤耳机",
             user_id="recovery-user",
+            data_mode="sandbox",
             created_at=created_at,
             updated_at=created_at,
         )
@@ -742,6 +1065,7 @@ def test_orphaned_running_task_persists_one_interruption_terminal_for_every_read
             status="running",
             query="找一款通勤耳机",
             user_id="recovery-user",
+            data_mode="sandbox",
             created_at=created_at,
             updated_at=created_at,
         )
@@ -759,6 +1083,7 @@ def test_orphaned_running_task_persists_one_interruption_terminal_for_every_read
     assert first["events"][0]["data"] == {
         "thread_id": thread_id,
         "code": "task_interrupted",
+        "data_mode": "sandbox",
     }
 
     with client.websocket_connect(f"/ws/{thread_id}") as websocket:
