@@ -5,6 +5,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from app.memory.injector import resolve_preferences
 from app.schemas import (
     AlternativeCandidate,
     ConstraintEvaluation,
@@ -261,15 +262,23 @@ _RANKING_LABELS: dict[RankingDimension, str] = {
 }
 
 
-def _preference_terms(intent: ShoppingPlan, remembered: RememberedPreference) -> list[str]:
-    values = [
+def _preference_terms(
+    intent: ShoppingPlan, remembered: RememberedPreference
+) -> list[tuple[str, bool]]:
+    terms: list[tuple[str, bool]] = []
+    for value in [
         *intent.style_preferences,
         *intent.soft_preferences,
         *remembered.material_preferences,
         *remembered.style_preferences,
         *remembered.soft_preferences,
-    ]
-    return list(dict.fromkeys(value for value in values if value.strip()))
+    ]:
+        if not value.strip():
+            continue
+        negative = value.startswith(("不含", "不要"))
+        terms.append((value.removeprefix("不含").removeprefix("不要"), not negative))
+    terms.extend((value, False) for value in remembered.avoid if value.strip())
+    return list(dict.fromkeys(terms))
 
 
 def _product_evidence_text(offer: LandedCost) -> list[str]:
@@ -288,8 +297,12 @@ def _preference_match_score(
     evidence = _product_evidence_text(offer)
     matched = sum(
         1
-        for term in terms
-        if any(_normal_text(term) in evidence_value for evidence_value in evidence)
+        for term, positive in terms
+        if (
+            any(_normal_text(term) in evidence_value for evidence_value in evidence)
+            if positive
+            else not any(_normal_text(term) in evidence_value for evidence_value in evidence)
+        )
     )
     return round(matched / len(terms), 4)
 
@@ -381,7 +394,8 @@ def decision_engine(
 ) -> ItemPickerOutput:
     """Deterministically classify normalized offers against the current task intent."""
 
-    remembered = _remembered_model(remembered_preferences)
+    resolution = resolve_preferences(intent, _remembered_model(remembered_preferences))
+    remembered = resolution.effective_remembered
     assumptions = intent.working_assumptions or _default_assumptions()
     if intent.mode == "exact_offer_comparison":
         classification = classify_exact_offers(normalized_offers)
@@ -484,4 +498,5 @@ def decision_engine(
         match_status="matched" if picks else "no_match",
         rejected_count=len(exclusions),
         ranking_profile=profile,
+        preference_decisions=resolution.decisions,
     )

@@ -37,6 +37,16 @@ RankingDimension = Literal[
     "evidence_quality",
     "delivery_time",
 ]
+PreferenceField = Literal[
+    "material_preferences",
+    "style_preferences",
+    "soft_preferences",
+    "avoid",
+]
+MemoryAction = Literal["remember", "forget"]
+PreferenceDecisionStatus = Literal["applied", "ignored", "overridden"]
+PreferenceDecisionSource = Literal["current_request", "remembered_preference"]
+PreferenceDurability = Literal["local_evaluation", "durable"]
 CalculationExclusionReason = Literal["unsupported_currency", "invalid_amount"]
 EventName = Literal[
     "session_created",
@@ -289,6 +299,48 @@ class RememberedPreference(StrictModel):
     avoid: list[str] = Field(default_factory=list)
 
 
+class MemoryCommand(StrictModel):
+    action: MemoryAction
+    field: PreferenceField
+    values: list[str] = Field(min_length=1, max_length=20)
+    scope: Literal["future_tasks"] = "future_tasks"
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def normalize_values(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        normalized = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        return list(dict.fromkeys(normalized))
+
+
+class PreferenceDecision(StrictModel):
+    field: PreferenceField
+    value: str = Field(min_length=1)
+    status: PreferenceDecisionStatus
+    source: PreferenceDecisionSource
+    reason: str = Field(min_length=1)
+
+
+class PreferenceBackendStatus(StrictModel):
+    requested_backend: Literal["memory", "redis"]
+    backend: Literal["memory", "redis"]
+    durability: PreferenceDurability
+    fallback_reason: str | None = None
+
+
+class PreferenceResponse(StrictModel):
+    user_id: str
+    preferences: dict[str, list[str]] = Field(default_factory=dict)
+    backend: PreferenceBackendStatus
+
+
+class PreferenceDeleteResponse(StrictModel):
+    status: Literal["deleted"] = "deleted"
+    user_id: str
+    backend: PreferenceBackendStatus
+
+
 class ShoppingPlan(StrictModel):
     mode: ResearchMode = "product_research"
     budget_cny: float | None = None
@@ -506,6 +558,7 @@ class ItemPickerOutput(StrictModel):
     match_status: Literal["matched", "no_match"] = "matched"
     rejected_count: int
     ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
+    preference_decisions: list[PreferenceDecision] = Field(default_factory=list)
 
 
 class FileLink(StrictModel):
@@ -536,6 +589,7 @@ class ShoppingSummaryOutput(StrictModel):
     working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
     relaxation_suggestions: list[ConstraintRelaxationSuggestion] = Field(default_factory=list)
     match_status: Literal["matched", "no_match"] = "matched"
+    preference_decisions: list[PreferenceDecision] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def normalize_result_contract(self) -> ShoppingSummaryOutput:
@@ -626,3 +680,10 @@ class ReadinessResponse(StrictModel):
     required_actions: list[str]
     data_mode: DataMode = "live"
     developer_diagnostic_mode: bool = False
+    preference_backend: PreferenceBackendStatus = Field(
+        default_factory=lambda: PreferenceBackendStatus(
+            requested_backend="memory",
+            backend="memory",
+            durability="local_evaluation",
+        )
+    )

@@ -32,14 +32,19 @@ from app.agent.main_agent import ProvidersUnavailableError, UnsupportedCapabilit
 from app.api.connection import manager
 from app.api.monitor import monitor
 from app.config import get_settings
-from app.memory.store import PreferenceStore, build_preference_store
+from app.memory.commands import execute_memory_commands
+from app.memory.store import PreferenceStore, PreferenceStoreError, build_preference_store
 from app.schemas import (
     DataMode,
     EventName,
     HealthResponse,
+    MemoryCommand,
     MonitorEvent,
+    PreferenceDeleteResponse,
+    PreferenceResponse,
     ProviderCapability,
     ReadinessResponse,
+    RememberedPreference,
     ShoppingSummaryOutput,
     TaskRequest,
     TaskSnapshot,
@@ -406,6 +411,15 @@ async def _execute_task(
             data={"thread_id": thread_id, "code": "fx_rates_unavailable"},
             run_id=run_id,
         )
+    except PreferenceStoreError as exc:
+        message = f"Remembered Preference backend unavailable: {exc}"
+        await monitor.emit(
+            thread_id,
+            "error",
+            message=message,
+            data={"thread_id": thread_id, "code": "preference_store_unavailable"},
+            run_id=run_id,
+        )
     except SnapshotPersistenceError:
         raise
     except Exception as exc:
@@ -451,6 +465,7 @@ async def _execute(
 def _readiness_response() -> ReadinessResponse:
     settings = get_settings()
     sandbox_available = settings.sandbox_mode and settings.app_env != "production"
+    preference_backend = preference_store.backend_status
 
     def capability(marketplace) -> ProviderCapability:
         if sandbox_available:
@@ -476,14 +491,22 @@ def _readiness_response() -> ReadinessResponse:
             failure_reason=None if marketplace.configured else "not_configured",
         )
 
+    required_actions = list(settings.required_actions)
+    if preference_backend.fallback_reason:
+        required_actions.append(
+            "Redis preference backend unavailable; local evaluation is non-persistent"
+        )
+    readiness_status = settings.status
+    if preference_backend.fallback_reason and readiness_status == "ready":
+        readiness_status = "degraded"
     return ReadinessResponse(
-        status=settings.status,
+        status=readiness_status,
         task_ready=settings.task_ready,
         environment=settings.app_env,
         runtime_mode="sandbox" if settings.sandbox_mode else "live",
         agent_mode=settings.active_agent_mode,
         requested_agent_mode=settings.agent_mode,
-        preference_store=settings.store_backend,
+        preference_store=preference_backend.backend,
         providers={
             marketplace.name: capability(marketplace) for marketplace in settings.marketplaces
         },
@@ -493,9 +516,10 @@ def _readiness_response() -> ReadinessResponse:
             "image_upload": True,
             "image_analysis": False,
         },
-        required_actions=list(settings.required_actions),
+        required_actions=required_actions,
         data_mode=settings.data_mode,
         developer_diagnostic_mode=settings.developer_diagnostic_mode,
+        preference_backend=preference_backend,
     )
 
 
@@ -749,16 +773,71 @@ async def download_file(thread_id: str, name: str) -> FileResponse:
     return FileResponse(path, filename=path.name)
 
 
-@app.get("/api/preferences/{user_id}")
-async def get_preferences(user_id: str) -> dict[str, Any]:
-    if not _USER_ID_PATTERN.fullmatch(user_id):
-        raise HTTPException(status_code=422, detail="invalid user id")
-    return {"user_id": user_id, "preferences": await preference_store.get(user_id)}
+def _preference_record(value: dict[str, Any]) -> dict[str, list[str]]:
+    record = RememberedPreference.model_validate(
+        {field: value.get(field, []) for field in RememberedPreference.model_fields}
+    )
+    return {field: values for field, values in record.model_dump(mode="json").items() if values}
 
 
-@app.delete("/api/preferences/{user_id}")
-async def delete_preferences(user_id: str) -> dict[str, str]:
+def _preference_response(user_id: str, value: dict[str, Any]) -> PreferenceResponse:
+    return PreferenceResponse(
+        user_id=user_id,
+        preferences=_preference_record(value),
+        backend=preference_store.backend_status,
+    )
+
+
+def _preference_error(exc: PreferenceStoreError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "code": "preference_store_unavailable",
+            "message": "Remembered Preference backend is unavailable",
+            "fallback_reason": str(exc),
+        },
+    )
+
+
+@app.get("/api/preferences/{user_id}", response_model=PreferenceResponse)
+async def get_preferences(user_id: str) -> PreferenceResponse:
     if not _USER_ID_PATTERN.fullmatch(user_id):
         raise HTTPException(status_code=422, detail="invalid user id")
-    await preference_store.delete(user_id)
-    return {"status": "deleted", "user_id": user_id}
+    try:
+        return _preference_response(user_id, await preference_store.get(user_id))
+    except PreferenceStoreError as exc:
+        raise _preference_error(exc) from exc
+
+
+async def _update_preferences(user_id: str, command: MemoryCommand) -> PreferenceResponse:
+    if not _USER_ID_PATTERN.fullmatch(user_id):
+        raise HTTPException(status_code=422, detail="invalid user id")
+    try:
+        await execute_memory_commands(preference_store, user_id, [command])
+        return _preference_response(user_id, await preference_store.get(user_id))
+    except PreferenceStoreError as exc:
+        raise _preference_error(exc) from exc
+
+
+@app.put("/api/preferences/{user_id}", response_model=PreferenceResponse)
+async def update_preferences(user_id: str, command: MemoryCommand) -> PreferenceResponse:
+    return await _update_preferences(user_id, command)
+
+
+@app.post("/api/preferences/{user_id}/commands", response_model=PreferenceResponse)
+async def apply_preference_command(user_id: str, command: MemoryCommand) -> PreferenceResponse:
+    return await _update_preferences(user_id, command)
+
+
+@app.delete("/api/preferences/{user_id}", response_model=PreferenceDeleteResponse)
+async def delete_preferences(user_id: str) -> PreferenceDeleteResponse:
+    if not _USER_ID_PATTERN.fullmatch(user_id):
+        raise HTTPException(status_code=422, detail="invalid user id")
+    try:
+        await preference_store.delete(user_id)
+    except PreferenceStoreError as exc:
+        raise _preference_error(exc) from exc
+    return PreferenceDeleteResponse(
+        user_id=user_id,
+        backend=preference_store.backend_status,
+    )

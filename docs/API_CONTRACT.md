@@ -27,6 +27,12 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
   "agent_mode": "rules",
   "requested_agent_mode": "rules",
   "preference_store": "memory",
+  "preference_backend": {
+    "requested_backend": "memory",
+    "backend": "memory",
+    "durability": "local_evaluation",
+    "fallback_reason": null
+  },
   "providers": {
     "amazon": {"configured": false, "state": "missing", "available": true, "source": "fixture", "failure_reason": null},
     "shopee": {"configured": false, "state": "missing", "available": true, "source": "fixture", "failure_reason": null},
@@ -301,6 +307,22 @@ Uploaded references and user preferences are not task-owned and are therefore no
     "priority_order": ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
     "explicit": false
   },
+  "preference_decisions": [
+    {
+      "field": "style_preferences",
+      "value": "简约",
+      "status": "applied",
+      "source": "remembered_preference",
+      "reason": "作为本任务的透明默认值参与 preference match ranking。"
+    },
+    {
+      "field": "style_preferences",
+      "value": "复古",
+      "status": "overridden",
+      "source": "remembered_preference",
+      "reason": "当前请求存在冲突表达，Remembered Preference 不覆盖当前任务。"
+    }
+  ],
   "providers": {
     "amazon": {
       "source": "live",
@@ -543,12 +565,64 @@ matcher remains the sole exact-mode eligibility gate.
 `GET /api/preferences/{user_id}` returns:
 
 ```json
-{"user_id": "browser-7f3c1f7a", "preferences": {}}
+{
+  "user_id": "browser-7f3c1f7a",
+  "preferences": {"style_preferences": ["简约"]},
+  "backend": {
+    "requested_backend": "memory",
+    "backend": "memory",
+    "durability": "local_evaluation",
+    "fallback_reason": null
+  }
+}
 ```
 
-`DELETE /api/preferences/{user_id}` removes the record. `memory` storage is process-local; `redis` uses `PREFERENCE_TTL_SECONDS`.
+`PUT /api/preferences/{user_id}` and `POST /api/preferences/{user_id}/commands` accept the same explicit
+`MemoryCommand` body:
 
-`user_id` is a storage partition key, not authentication. Public deployments must supply an authenticated identity at a trusted gateway and enforce ownership for tasks, preferences, WebSockets, and files.
+```json
+{
+  "action": "remember",
+  "field": "style_preferences",
+  "values": ["简约"],
+  "scope": "future_tasks"
+}
+```
+
+`action` is `remember` or `forget`; `field` is `material_preferences`, `style_preferences`,
+`soft_preferences`, or `avoid`. The command boundary is deterministic. A task query is only
+allowed to create a memory command when it contains explicit future scope such as `以后` or
+`今后` plus a remember/forget verb. Ordinary search, current-task correction, task-result choice,
+success, failure, and cancellation never update memory. New `remember` values apply to future
+tasks, not the task that issued the command; explicit `forget` takes effect immediately. The
+result's `preference_decisions` reports `applied`, `ignored`, and `overridden` values with their
+source and reason. Remembered Preference can influence only the transparent `preference_match`
+ranking dimension after Hard Constraint eligibility; it never creates or relaxes a Hard Constraint.
+
+`DELETE /api/preferences/{user_id}` removes the whole record. `memory` storage is process-local and
+marked `local_evaluation`, never durable. `redis` is the durable backend and uses
+`PREFERENCE_TTL_SECONDS`. If Redis is unavailable outside production, the response and readiness
+contract report `backend=memory`, `durability=local_evaluation`, and `fallback_reason`; production
+fails closed instead of pretending the fallback is durable.
+
+The delete response is also explicit about the backend used:
+
+```json
+{
+  "status": "deleted",
+  "user_id": "browser-7f3c1f7a",
+  "backend": {
+    "requested_backend": "memory",
+    "backend": "memory",
+    "durability": "local_evaluation",
+    "fallback_reason": null
+  }
+}
+```
+
+`user_id` is an anonymous storage association key, not authentication, ownership, or authorization.
+Public deployments must supply an authenticated identity at a trusted gateway and enforce ownership
+for tasks, preferences, WebSockets, and files.
 
 ## Provider boundary
 

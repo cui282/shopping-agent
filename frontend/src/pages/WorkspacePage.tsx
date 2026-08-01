@@ -165,6 +165,7 @@ export default function WorkspacePage() {
             state={state}
             userId={userId}
             preferenceStore={state.readiness?.preference_store}
+            preferenceBackend={state.readiness?.preference_backend}
             onClose={() => setActivityOpen(false)}
           />
         </div>

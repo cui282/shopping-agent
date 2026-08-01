@@ -18,6 +18,7 @@ import type {
   CalculationExclusion,
   ConstraintExclusion,
   IdentityEvidence,
+  PreferenceDecision,
   RankingDimension,
   RankingProfile,
   Recommendation,
@@ -676,6 +677,41 @@ function CalculationExclusions({ exclusions }: { exclusions: CalculationExclusio
   );
 }
 
+const preferenceStatusLabels: Record<PreferenceDecision["status"], string> = {
+  applied: "应用",
+  ignored: "忽略",
+  overridden: "覆盖",
+};
+
+const preferenceSourceLabels: Record<PreferenceDecision["source"], string> = {
+  current_request: "当前请求",
+  remembered_preference: "Remembered Preference",
+};
+
+function PreferenceRationale({ decisions }: { decisions: PreferenceDecision[] }) {
+  return (
+    <section className={styles.decisionSection} aria-labelledby="preference-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="preference-heading">偏好处理</h3>
+        <span>仅作为 eligible candidate 的透明 ranking 输入</span>
+      </div>
+      {decisions.length ? (
+        <ul className={styles.preferenceDecisionList}>
+          {decisions.map((decision, index) => (
+            <li key={`${decision.field}-${decision.value}-${decision.source}-${index}`} data-status={decision.status}>
+              <strong>{`${preferenceStatusLabels[decision.status]}：${decision.value}`}</strong>
+              <span>来源：{preferenceSourceLabels[decision.source]}</span>
+              <small>{decision.reason}</small>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className={styles.identityEmpty}>本任务没有可应用的 Remembered Preference 或显式软偏好。</p>
+      )}
+    </section>
+  );
+}
+
 function DecisionTransparency({ state }: { state: AgentState }) {
   const result = state.result;
   if (!result) return null;
@@ -704,6 +740,7 @@ function DecisionTransparency({ state }: { state: AgentState }) {
           </span>
         </section>
       )}
+      <PreferenceRationale decisions={result.preference_decisions ?? []} />
       <CalculationExclusions exclusions={calculationExclusions} />
       <MatchingOffers state={state} />
       <AlternativeCandidates candidates={result.alternative_candidates ?? []} />

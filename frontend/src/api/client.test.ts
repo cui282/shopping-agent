@@ -62,6 +62,43 @@ describe("request lifecycle", () => {
     );
   });
 
+  it("sends an explicit future preference command", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          user_id: "browser-user",
+          preferences: { style_preferences: ["简约"] },
+          backend: {
+            requested_backend: "memory",
+            backend: "memory",
+            durability: "local_evaluation",
+            fallback_reason: null,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.updatePreferences("browser-user", {
+      action: "remember",
+      field: "style_preferences",
+      values: ["简约"],
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/preferences\/browser-user$/),
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({
+          action: "remember",
+          field: "style_preferences",
+          values: ["简约"],
+        }),
+      }),
+    );
+  });
+
   it("propagates caller cancellation", async () => {
     vi.stubGlobal(
       "fetch",

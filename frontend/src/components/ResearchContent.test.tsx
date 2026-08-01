@@ -215,6 +215,33 @@ describe("Product Evidence", () => {
     expect(screen.getByText(/checkout guarantee/)).toBeTruthy();
   });
 
+  it("shows preference decisions with their source and disposition", () => {
+    renderCompletedResult(null, {
+      preference_decisions: [
+        {
+          field: "style_preferences",
+          value: "简约",
+          status: "applied",
+          source: "current_request",
+          reason: "当前请求明确表达，本任务优先采用。",
+        },
+        {
+          field: "style_preferences",
+          value: "复古",
+          status: "overridden",
+          source: "remembered_preference",
+          reason: "当前请求存在冲突表达，Remembered Preference 不覆盖当前任务。",
+        },
+      ],
+    });
+
+    expect(screen.getByRole("heading", { name: "偏好处理" })).toBeTruthy();
+    expect(screen.getByText(/应用.*简约/)).toBeTruthy();
+    expect(screen.getByText(/覆盖.*复古/)).toBeTruthy();
+    expect(screen.getByText(/来源：当前请求/)).toBeTruthy();
+    expect(screen.getByText(/来源：Remembered Preference/)).toBeTruthy();
+  });
+
   it("shows currency and amount exclusions with machine-readable reasons", () => {
     const exclusions: CalculationExclusion[] = [
       {

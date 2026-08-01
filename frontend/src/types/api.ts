@@ -21,6 +21,33 @@ export type ConstraintOperator =
   | "contains"
   | "not_contains";
 export type RankingDimension = "landed_cost" | "preference_match" | "evidence_quality" | "delivery_time";
+export type PreferenceField = "material_preferences" | "style_preferences" | "soft_preferences" | "avoid";
+export type MemoryAction = "remember" | "forget";
+export type PreferenceDecisionStatus = "applied" | "ignored" | "overridden";
+export type PreferenceDecisionSource = "current_request" | "remembered_preference";
+export type PreferenceDurability = "local_evaluation" | "durable";
+
+export interface MemoryCommand {
+  action: MemoryAction;
+  field: PreferenceField;
+  values: string[];
+  scope?: "future_tasks";
+}
+
+export interface PreferenceDecision {
+  field: PreferenceField;
+  value: string;
+  status: PreferenceDecisionStatus;
+  source: PreferenceDecisionSource;
+  reason: string;
+}
+
+export interface PreferenceBackendStatus {
+  requested_backend: "memory" | "redis";
+  backend: "memory" | "redis";
+  durability: PreferenceDurability;
+  fallback_reason: string | null;
+}
 
 export interface HardConstraint {
   id: string;
@@ -342,6 +369,7 @@ export interface TaskResultData {
   working_assumptions?: WorkingAssumption[];
   relaxation_suggestions?: ConstraintRelaxationSuggestion[];
   match_status?: "matched" | "no_match";
+  preference_decisions?: PreferenceDecision[];
 }
 
 export interface TaskRequest {
@@ -411,12 +439,20 @@ export interface ReadinessResponse {
   required_actions: string[];
   data_mode: DataMode;
   developer_diagnostic_mode: boolean;
+  preference_backend?: PreferenceBackendStatus;
 }
 
 export interface PreferencesResponse {
   user_id?: string;
-  preferences?: unknown;
+  preferences?: Record<string, string[]>;
+  backend?: PreferenceBackendStatus;
   items?: unknown;
+}
+
+export interface PreferenceDeleteResponse {
+  status: "deleted";
+  user_id: string;
+  backend: PreferenceBackendStatus;
 }
 
 export interface SessionHistoryItem {

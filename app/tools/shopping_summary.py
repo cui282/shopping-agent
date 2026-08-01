@@ -9,6 +9,7 @@ from app.schemas import (
     FileLink,
     ItemPickerOutput,
     LandedCost,
+    PreferenceDecision,
     ProviderMetadata,
     ShoppingSummaryOutput,
 )
@@ -39,6 +40,7 @@ async def shopping_summary(
     shipping_basis: str = "estimated; verify at checkout",
     unavailable_marketplaces: list[str] | None = None,
     data_mode: DataMode | None = None,
+    preference_decisions: list[PreferenceDecision] | None = None,
 ) -> ShoppingSummaryOutput:
     """Create the terminal result and persist Markdown and JSON reports."""
 
@@ -50,6 +52,7 @@ async def shopping_summary(
         effective_date=rates_as_of,
     )
     calculation_exclusions = calculation_exclusions or []
+    preference_decisions = preference_decisions or []
     sources = {item.source for item in comparison}
     sources.update(metadata.source for metadata in provider_details.values())
     if data_mode is not None:
@@ -96,6 +99,27 @@ async def shopping_summary(
     mode_label = (
         "Exact Offer Comparison" if picks.mode == "exact_offer_comparison" else "Product Research"
     )
+    preference_labels = {
+        "applied": "应用",
+        "ignored": "忽略",
+        "overridden": "覆盖",
+    }
+
+    def preference_rationale() -> str:
+        if not preference_decisions:
+            return "偏好处理：本任务没有可应用的 Remembered Preference 或显式软偏好。"
+        grouped: dict[str, list[str]] = {"applied": [], "ignored": [], "overridden": []}
+        for decision in preference_decisions:
+            source = "当前请求" if decision.source == "current_request" else "Remembered Preference"
+            grouped[decision.status].append(f"{decision.value}（{source}）")
+        parts = [
+            f"{preference_labels[status]}：{'、'.join(values)}"
+            for status, values in grouped.items()
+            if values
+        ]
+        return "偏好处理：" + "；".join(parts) + "。"
+
+    rationale = preference_rationale()
     if picks.recommendations:
         if picks.mode == "exact_offer_comparison":
             lines = [
@@ -122,24 +146,31 @@ async def shopping_summary(
                     if name in provider_details
                 )
             )
+        lines.append(rationale)
         final_answer = "\n".join(lines)
     elif picks.unverified_candidates:
         final_answer = (
             f"当前没有可验证的推荐；{len(picks.unverified_candidates)} 个候选缺少硬性条件证据。"
-            "补充商品材质或规格证据后再判断。"
+            "补充商品材质或规格证据后再判断。\n"
+            f"{rationale}"
         )
     elif picks.alternative_candidates and not picks.matching_offers:
         final_answer = (
             f"{mode_label} 没有 Identity Evidence 充分的 Matching Offer；"
             f"{len(picks.alternative_candidates)} 个相似商品已单列为 Alternative Candidate，"
-            "未参与正式排名或最低价结论。"
+            f"未参与正式排名或最低价结论。\n{rationale}"
         )
     elif picks.exclusions or comparison:
-        final_answer = "当前没有满足全部硬性条件的候选。可以查看排除原因，并在确认后放宽条件。"
+        final_answer = (
+            f"当前没有满足全部硬性条件的候选。可以查看排除原因，并在确认后放宽条件。\n{rationale}"
+        )
     elif calculation_exclusions:
-        final_answer = "候选商品均未能完成合法的价格计算；请查看计算排除原因并检查金额或汇率配置。"
+        final_answer = (
+            "候选商品均未能完成合法的价格计算；请查看计算排除原因并检查金额或汇率配置。\n"
+            f"{rationale}"
+        )
     else:
-        final_answer = "已启用平台没有返回可比较的候选商品。请调整关键词后重试。"
+        final_answer = f"已启用平台没有返回可比较的候选商品。请调整关键词后重试。\n{rationale}"
 
     markdown_lines = [
         "# Shopping Agent 购物研究报告",
@@ -171,6 +202,16 @@ async def shopping_summary(
             "显式表达：" + ("是" if picks.ranking_profile.explicit else "否（默认以到手价优先）"),
         ]
     )
+    markdown_lines.extend(["", "## 偏好处理", ""])
+    if preference_decisions:
+        markdown_lines.extend(
+            f"- {preference_labels[item.status]}：{item.value}；"
+            f"来源：{'当前请求' if item.source == 'current_request' else 'Remembered Preference'}；"
+            f"{item.reason}"
+            for item in preference_decisions
+        )
+    else:
+        markdown_lines.append("- 本任务没有可应用的 Remembered Preference 或显式软偏好。")
     if calculation_exclusions:
         markdown_lines.extend(["", "## 计算排除", ""])
         markdown_lines.extend(
@@ -261,6 +302,7 @@ async def shopping_summary(
         working_assumptions=picks.working_assumptions,
         relaxation_suggestions=picks.relaxation_suggestions,
         match_status=picks.match_status,
+        preference_decisions=preference_decisions,
     )
     json_path.write_text(
         json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",

@@ -64,6 +64,12 @@ def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient)
     assert readiness.json()["task_ready"] is True
     assert readiness.json()["runtime_mode"] == "sandbox"
     assert readiness.json()["data_mode"] == "sandbox"
+    assert readiness.json()["preference_backend"] == {
+        "requested_backend": "memory",
+        "backend": "memory",
+        "durability": "local_evaluation",
+        "fallback_reason": None,
+    }
     assert all(
         capability
         == {
@@ -514,7 +520,7 @@ def test_task_lifecycle_and_buffered_websocket_replay(client: TestClient) -> Non
     assert json_report.json()["recommendations"] == payload["result"]["recommendations"]
 
     preferences = client.get("/api/preferences/api-user").json()["preferences"]
-    assert "不含皮革" in preferences["material_preferences"]
+    assert preferences == {}
     assert client.delete("/api/preferences/api-user").status_code == 200
     assert client.get("/api/preferences/api-user").json()["preferences"] == {}
 

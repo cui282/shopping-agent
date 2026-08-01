@@ -133,4 +133,65 @@ describe("ActivityRail timeline", () => {
 
     expect(timeline.scrollTop).toBe(600);
   });
+
+  it("lets the shopper explicitly remember a preference and reports local durability", async () => {
+    vi.spyOn(api, "preferences").mockResolvedValue({
+      preferences: {},
+      backend: {
+        requested_backend: "memory",
+        backend: "memory",
+        durability: "local_evaluation",
+        fallback_reason: null,
+      },
+    });
+    const update = vi.spyOn(api, "updatePreferences").mockResolvedValue({
+      preferences: { style_preferences: ["简约"] },
+      backend: {
+        requested_backend: "memory",
+        backend: "memory",
+        durability: "local_evaluation",
+        fallback_reason: null,
+      },
+    });
+    const clear = vi.spyOn(api, "clearPreferences").mockResolvedValue({
+      status: "deleted",
+      user_id: "activity-user",
+      backend: {
+        requested_backend: "memory",
+        backend: "memory",
+        durability: "local_evaluation",
+        fallback_reason: null,
+      },
+    });
+
+    render(
+      <ActivityRail
+        state={{ ...initialAgentState, status: "idle" }}
+        userId="activity-user"
+        preferenceStore="memory"
+        preferenceBackend={{
+          requested_backend: "memory",
+          backend: "memory",
+          durability: "local_evaluation",
+          fallback_reason: null,
+        }}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByText(/本地评估/)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("偏好值"), { target: { value: "简约" } });
+    fireEvent.click(screen.getByRole("button", { name: "明确记住偏好" }));
+
+    expect(update).toHaveBeenCalledWith("activity-user", {
+      action: "remember",
+      field: "style_preferences",
+      values: ["简约"],
+    });
+    expect(await screen.findByText("偏好已明确保存")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "清除偏好" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认清除" }));
+    expect(clear).toHaveBeenCalledWith("activity-user");
+    expect(await screen.findByText("偏好已清除")).toBeTruthy();
+  });
 });

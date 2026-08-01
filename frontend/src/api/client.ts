@@ -1,5 +1,7 @@
 import type {
   HealthResponse,
+  MemoryCommand,
+  PreferenceDeleteResponse,
   PreferencesResponse,
   ReadinessResponse,
   TaskRequest,
@@ -115,8 +117,17 @@ export const api = {
   },
   preferences: (userId: string, control: RequestControl = {}) =>
     requestJson<PreferencesResponse>(`/api/preferences/${encodeURIComponent(userId)}`, control),
+  updatePreferences: (userId: string, command: MemoryCommand, control: RequestControl = {}) =>
+    requestJson<PreferencesResponse>(`/api/preferences/${encodeURIComponent(userId)}`, {
+      method: "PUT",
+      body: JSON.stringify(command),
+      ...control,
+    }),
   clearPreferences: (userId: string, control: RequestControl = {}) =>
-    requestJson<{ status: string }>(`/api/preferences/${encodeURIComponent(userId)}`, { method: "DELETE", ...control }),
+    requestJson<PreferenceDeleteResponse>(`/api/preferences/${encodeURIComponent(userId)}`, {
+      method: "DELETE",
+      ...control,
+    }),
 };
 
 function browserOrigin(): string {

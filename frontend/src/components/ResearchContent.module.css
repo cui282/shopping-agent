@@ -510,6 +510,60 @@
   text-align: right;
 }
 
+.preferenceDecisionList {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.preferenceDecisionList li {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 2px 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.preferenceDecisionList strong,
+.preferenceDecisionList span,
+.preferenceDecisionList small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.preferenceDecisionList strong {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.preferenceDecisionList span,
+.preferenceDecisionList small {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.preferenceDecisionList small {
+  grid-column: 1 / -1;
+}
+
+.preferenceDecisionList li[data-status="applied"] strong {
+  color: var(--success);
+}
+
+.preferenceDecisionList li[data-status="ignored"] strong {
+  color: var(--ink-muted);
+}
+
+.preferenceDecisionList li[data-status="overridden"] strong {
+  color: var(--warning);
+}
+
 .assumptionList,
 .decisionList,
 .evaluationList {

@@ -58,6 +58,23 @@ def test_fixture_fallback_is_never_production_ready(monkeypatch: pytest.MonkeyPa
     assert "Disable ALLOW_FIXTURE_FALLBACK in production" in settings.required_actions
 
 
+def test_memory_preferences_are_not_production_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("STORE_BACKEND", "memory")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example.com/amazon")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+
+    settings = get_settings()
+
+    assert not settings.task_ready
+    assert settings.status == "not_ready"
+    assert (
+        "Use STORE_BACKEND=redis for persistent production preferences" in settings.required_actions
+    )
+
+
 def test_mixed_diagnostic_mode_is_explicit_and_never_production_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

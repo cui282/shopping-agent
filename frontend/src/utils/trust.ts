@@ -73,6 +73,9 @@ export function requiredActionLabel(action: string): string {
   if (action === "Use STORE_BACKEND=redis for persistent production preferences") {
     return "生产环境使用 STORE_BACKEND=redis 持久保存偏好";
   }
+  if (action === "Redis preference backend unavailable; local evaluation is non-persistent") {
+    return "Redis 偏好后端不可用；当前仅本地评估且不会持久保存";
+  }
   return action;
 }
 

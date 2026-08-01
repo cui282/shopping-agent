@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
+  BookmarkPlus,
   Check,
   ChevronRight,
   Circle,
@@ -12,7 +13,7 @@ import {
 } from "lucide-react";
 import { api } from "../api/client";
 import type { AgentState } from "../hooks/useShoppingAgent";
-import type { MonitorEvent } from "../types/api";
+import type { MonitorEvent, PreferenceBackendStatus, PreferenceField } from "../types/api";
 import { eventMeta, flattenPreferences } from "../utils/format";
 import styles from "./ActivityRail.module.css";
 
@@ -53,13 +54,42 @@ interface ActivityRailProps {
   state: AgentState;
   userId: string;
   preferenceStore?: "memory" | "redis";
+  preferenceBackend?: PreferenceBackendStatus;
   onClose: () => void;
 }
 
-export default function ActivityRail({ state, userId, preferenceStore, onClose }: ActivityRailProps) {
+const DEFAULT_BACKEND: PreferenceBackendStatus = {
+  requested_backend: "memory",
+  backend: "memory",
+  durability: "local_evaluation",
+  fallback_reason: null,
+};
+
+const preferenceFields: Array<{ value: PreferenceField; label: string }> = [
+  { value: "style_preferences", label: "风格偏好" },
+  { value: "material_preferences", label: "材质偏好" },
+  { value: "soft_preferences", label: "使用偏好" },
+  { value: "avoid", label: "避开" },
+];
+
+export default function ActivityRail({
+  state,
+  userId,
+  preferenceStore,
+  preferenceBackend,
+  onClose,
+}: ActivityRailProps) {
   const [preferences, setPreferences] = useState<string[]>([]);
   const [preferenceStatus, setPreferenceStatus] = useState<"loading" | "ready" | "error">("loading");
   const [confirmClear, setConfirmClear] = useState(false);
+  const [preferenceField, setPreferenceField] = useState<PreferenceField>("style_preferences");
+  const [preferenceValue, setPreferenceValue] = useState("");
+  const [mutationStatus, setMutationStatus] = useState<
+    "idle" | "saving" | "saved" | "cleared" | "failed"
+  >("idle");
+  const [backendStatus, setBackendStatus] = useState<PreferenceBackendStatus>(
+    preferenceBackend ?? (preferenceStore === "redis" ? { ...DEFAULT_BACKEND, requested_backend: "redis", backend: "redis", durability: "durable" } : DEFAULT_BACKEND),
+  );
   const eventListRef = useRef<HTMLOListElement>(null);
   const followTimelineRef = useRef(true);
   const preferenceRequestRef = useRef<AbortController | null>(null);
@@ -75,6 +105,7 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
       const response = await api.preferences(userId, { signal: controller.signal });
       if (preferenceRequestRef.current !== controller) return;
       setPreferences(flattenPreferences(response.preferences ?? response.items));
+      if (response.backend) setBackendStatus(response.backend);
       setPreferenceStatus("ready");
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -88,6 +119,10 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
     void loadPreferences();
     return () => preferenceRequestRef.current?.abort();
   }, [userId, refreshKey]);
+
+  useEffect(() => {
+    if (preferenceBackend) setBackendStatus(preferenceBackend);
+  }, [preferenceBackend]);
 
   useEffect(() => {
     followTimelineRef.current = true;
@@ -104,14 +139,38 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
 
   const clear = async () => {
     try {
-      await api.clearPreferences(userId);
+      const response = await api.clearPreferences(userId);
       setPreferences([]);
+      setBackendStatus(response.backend);
       setPreferenceStatus("ready");
       setConfirmClear(false);
+      setMutationStatus("cleared");
     } catch {
       setPreferenceStatus("error");
+      setMutationStatus("failed");
     }
   };
+
+  const savePreference = async () => {
+    const value = preferenceValue.trim();
+    if (!value) return;
+    setMutationStatus("saving");
+    try {
+      const response = await api.updatePreferences(userId, {
+        action: "remember",
+        field: preferenceField,
+        values: [value],
+      });
+      setPreferences(flattenPreferences(response.preferences ?? response.items));
+      if (response.backend) setBackendStatus(response.backend);
+      setPreferenceValue("");
+      setMutationStatus("saved");
+    } catch {
+      setMutationStatus("failed");
+    }
+  };
+
+  const backendLabel = backendStatus.durability === "durable" ? "Redis 持久偏好" : "本地评估，非持久偏好";
 
   return (
     <aside className={styles.rail} aria-label="研究过程与偏好">
@@ -206,11 +265,65 @@ export default function ActivityRail({ state, userId, preferenceStore, onClose }
 
       <section className={styles.preferences} aria-labelledby="preferences-heading">
         <div className={styles.sectionHeading}>
-          <h3 id="preferences-heading">{preferenceStore === "redis" ? "长期偏好" : "服务内偏好"}</h3>
+          <h3 id="preferences-heading">偏好控制</h3>
           <button type="button" onClick={() => void loadPreferences()} aria-label="刷新偏好" title="刷新偏好">
             <RefreshCw size={14} aria-hidden="true" />
           </button>
         </div>
+        <p className={styles.backendStatus} data-durability={backendStatus.durability}>
+          {backendLabel}
+          {backendStatus.fallback_reason ? ` · ${backendStatus.fallback_reason}` : ""}
+        </p>
+        <div className={styles.preferenceEditor}>
+          <label htmlFor="preference-field">保存到未来任务</label>
+          <select
+            id="preference-field"
+            value={preferenceField}
+            onChange={(event) => setPreferenceField(event.target.value as PreferenceField)}
+            disabled={mutationStatus === "saving"}
+          >
+            {preferenceFields.map((field) => (
+              <option value={field.value} key={field.value}>
+                {field.label}
+              </option>
+            ))}
+          </select>
+          <label className={styles.visuallyHidden} htmlFor="preference-value">
+            偏好值
+          </label>
+          <input
+            id="preference-value"
+            value={preferenceValue}
+            onChange={(event) => setPreferenceValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void savePreference();
+            }}
+            placeholder="例如：简约"
+            disabled={mutationStatus === "saving"}
+          />
+          <button
+            className={styles.rememberButton}
+            type="button"
+            onClick={() => void savePreference()}
+            disabled={!preferenceValue.trim() || mutationStatus === "saving"}
+            aria-label="明确记住偏好"
+            title="明确记住偏好"
+          >
+            <BookmarkPlus size={14} aria-hidden="true" />
+            记住
+          </button>
+        </div>
+        <p className={styles.preferenceFeedback} role="status" aria-live="polite">
+          {mutationStatus === "saving"
+            ? "正在保存偏好"
+            : mutationStatus === "saved"
+              ? "偏好已明确保存"
+              : mutationStatus === "cleared"
+                ? "偏好已清除"
+                : mutationStatus === "failed"
+                  ? "偏好操作失败，请重试"
+                  : ""}
+        </p>
         {preferenceStatus === "loading" ? (
           <p className={styles.preferencePending}>正在读取偏好</p>
         ) : preferenceStatus === "error" ? (

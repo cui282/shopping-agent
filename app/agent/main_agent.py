@@ -10,7 +10,12 @@ from app.agent.llm import active_agent_mode, allow_rules_fallback, get_llm, requ
 from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import Monitor
 from app.config import get_settings
-from app.memory.injector import extract_preferences, merge_preference_records, merge_preferences
+from app.memory.commands import (
+    execute_memory_commands,
+    parse_memory_commands,
+    remembered_for_task,
+    strip_memory_commands,
+)
 from app.memory.store import PreferenceStore
 from app.schemas import (
     DataMode,
@@ -18,6 +23,7 @@ from app.schemas import (
     Platform,
     ProviderFailureReason,
     ProviderMetadata,
+    RememberedPreference,
     ShoppingSummaryOutput,
     TaskRequest,
     ToolEndEventData,
@@ -181,7 +187,15 @@ async def run_agent(
     thread_id = get_thread_id()
     settings = get_settings()
     task_data_mode = data_mode or settings.data_mode
-    remembered = await store.get(request.user_id)
+    stored_preferences = await store.get(request.user_id)
+    remembered = RememberedPreference.model_validate(
+        {field: stored_preferences.get(field, []) for field in RememberedPreference.model_fields}
+    )
+    memory_commands = parse_memory_commands(request.query)
+    if memory_commands:
+        await execute_memory_commands(store, request.user_id, memory_commands)
+    remembered = remembered_for_task(remembered, memory_commands)
+    query = strip_memory_commands(request.query)
 
     await monitor.emit(
         thread_id,
@@ -189,7 +203,7 @@ async def run_agent(
         message="Think：正在理解预算、品类和约束",
         data={
             "step": "thinking",
-            "preview": request.query[:160],
+            "preview": query[:160],
             "agent_mode": active_agent_mode(),
             "reference_images": reference_images or [],
             "data_mode": task_data_mode,
@@ -200,7 +214,7 @@ async def run_agent(
         raise RuntimeError("AGENT_MODE=llm but model credentials are not configured")
     if agent_mode == "llm":
         try:
-            preview = await _run_react_advisory(request.query, remembered)
+            preview = await _run_react_advisory(query, remembered.model_dump(mode="json"))
             await monitor.emit(
                 thread_id,
                 "assistant_call",
@@ -227,10 +241,7 @@ async def run_agent(
                 },
             )
 
-    plan = await _call_tool(
-        monitor, "planner", {"query": request.query}, lambda: planner(request.query)
-    )
-    plan = merge_preferences(plan, remembered)
+    plan = await _call_tool(monitor, "planner", {"query": query}, lambda: planner(query))
     if not is_supported_destination(plan.destination):
         raise UnsupportedCapabilityError(
             f"当前仅支持配送至{SUPPORTED_DESTINATION}，暂不支持配送至{plan.destination}。"
@@ -270,7 +281,7 @@ async def run_agent(
                 monitor,
                 "item_search",
                 {"platform": platform, "top_k": 20},
-                lambda: item_search(request.query, platform, top_k=20, user_id=request.user_id),
+                lambda: item_search(query, platform, top_k=20, user_id=request.user_id),
                 event_thread_id=thread_id,
                 data_mode=task_data_mode,
                 failure_metadata=failure_metadata,
@@ -292,7 +303,7 @@ async def run_agent(
             )
 
     searches = await dispatch_tool(
-        [{"platform": platform, "query": request.query} for platform in platforms],
+        [{"platform": platform, "query": query} for platform in platforms],
         search_branch,
         monitor,
         data_mode=task_data_mode,
@@ -364,9 +375,7 @@ async def run_agent(
                 result.platform for result in searches if result.provider.status == "unavailable"
             ],
             data_mode=task_data_mode,
+            preference_decisions=picks.preference_decisions,
         ),
     )
-    extracted = extract_preferences(request.query, plan)
-    if extracted:
-        await store.put(request.user_id, merge_preference_records(remembered, extracted))
     return result

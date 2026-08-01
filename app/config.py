@@ -176,7 +176,10 @@ class Settings:
         if self.active_agent_mode == "unavailable":
             return False
         if self.app_env == "production" and (
-            self.sandbox_mode or self.allow_fixture_fallback or self.developer_diagnostic_mode
+            self.sandbox_mode
+            or self.allow_fixture_fallback
+            or self.developer_diagnostic_mode
+            or self.store_backend == "memory"
         ):
             return False
         return bool(self.enabled_marketplaces)
