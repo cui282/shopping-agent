@@ -19,6 +19,7 @@ export type ConstraintOperator =
   | "not_equals"
   | "contains"
   | "not_contains";
+export type RankingDimension = "landed_cost" | "preference_match" | "evidence_quality" | "delivery_time";
 
 export interface HardConstraint {
   id: string;
@@ -35,6 +36,44 @@ export interface WorkingAssumption {
   field: string;
   value: string;
   reason: string;
+}
+
+export interface RankingProfile {
+  priority_order: RankingDimension[];
+  explicit: boolean;
+}
+
+export interface RankingScoreBreakdown {
+  priority_order: RankingDimension[];
+  landed_cost_cny: number;
+  landed_cost_score: number;
+  preference_match_score: number;
+  evidence_quality_score: number;
+  delivery_time_days: number;
+  delivery_time_score: number;
+}
+
+export interface ExchangeRateProvenance {
+  base_currency: "CNY";
+  source: string;
+  effective_date: string;
+  calculation_basis: string;
+}
+
+export interface CalculationExclusion {
+  item_id: string;
+  platform: Marketplace;
+  title: string;
+  currency: string;
+  amount: number | null;
+  reason_code: "unsupported_currency" | "invalid_amount";
+  reason: string;
+}
+
+export interface EstimateDisclosure {
+  estimated: boolean;
+  source: string;
+  calculation_basis: string;
 }
 
 export interface ConstraintEvidence {
@@ -180,9 +219,13 @@ export interface Recommendation extends ProductEvidence {
   attributes: Record<string, string | number | boolean | null>;
   note: string | null;
   duty_tier: "免征" | "标准" | "高税";
+  shipping_estimate: EstimateDisclosure;
+  duty_estimate: EstimateDisclosure;
+  delivery_estimate: EstimateDisclosure;
   reason: string;
   rank: number;
   constraint_evaluations: ConstraintEvaluation[];
+  score_breakdown: RankingScoreBreakdown;
 }
 
 export interface UnverifiedCandidate extends ProductEvidence {
@@ -199,6 +242,9 @@ export interface UnverifiedCandidate extends ProductEvidence {
   attributes: Record<string, string | number | boolean | null>;
   note: string | null;
   duty_tier: "免征" | "标准" | "高税";
+  shipping_estimate: EstimateDisclosure;
+  duty_estimate: EstimateDisclosure;
+  delivery_estimate: EstimateDisclosure;
   reason: string;
   constraint_evaluations: ConstraintEvaluation[];
 }
@@ -229,6 +275,9 @@ export interface ComparisonItem extends ProductEvidence {
   price_local?: number;
   attributes: Record<string, string | number | boolean | null>;
   note?: string | null;
+  shipping_estimate?: EstimateDisclosure;
+  duty_estimate?: EstimateDisclosure;
+  delivery_estimate?: EstimateDisclosure;
 }
 
 export interface GeneratedFile {
@@ -245,6 +294,9 @@ export interface TaskResultData {
   provider_mode: Exclude<ProviderMode, "unverified">;
   providers: Record<string, ProviderMetadata>;
   calculation_notice: string;
+  exchange_rate: ExchangeRateProvenance;
+  calculation_exclusions: CalculationExclusion[];
+  ranking_profile: RankingProfile;
   data_mode: DataMode;
   result_kind: ResultKind;
   unavailable_marketplaces: Marketplace[];

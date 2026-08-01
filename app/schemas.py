@@ -27,6 +27,13 @@ ConstraintOperator = Literal[
     "not_contains",
 ]
 ConstraintEvidenceSource = Literal["product_evidence", "computed"]
+RankingDimension = Literal[
+    "landed_cost",
+    "preference_match",
+    "evidence_quality",
+    "delivery_time",
+]
+CalculationExclusionReason = Literal["unsupported_currency", "invalid_amount"]
 EventName = Literal[
     "session_created",
     "assistant_call",
@@ -194,6 +201,67 @@ class HardConstraint(StrictModel):
     label: str = Field(min_length=1)
 
 
+class RankingProfile(StrictModel):
+    priority_order: list[RankingDimension] = Field(
+        default_factory=lambda: [
+            "landed_cost",
+            "preference_match",
+            "evidence_quality",
+            "delivery_time",
+        ],
+        min_length=4,
+        max_length=4,
+    )
+    explicit: bool = False
+
+    @model_validator(mode="after")
+    def require_each_dimension_once(self) -> RankingProfile:
+        expected = {"landed_cost", "preference_match", "evidence_quality", "delivery_time"}
+        if len(set(self.priority_order)) != len(expected) or set(self.priority_order) != expected:
+            raise ValueError("ranking profile must contain each ranking dimension exactly once")
+        return self
+
+
+class RankingScoreBreakdown(StrictModel):
+    priority_order: list[RankingDimension] = Field(min_length=4, max_length=4)
+    landed_cost_cny: float = Field(ge=0)
+    landed_cost_score: float = Field(ge=0, le=1)
+    preference_match_score: float = Field(ge=0, le=1)
+    evidence_quality_score: float = Field(ge=0, le=1)
+    delivery_time_days: int = Field(ge=0)
+    delivery_time_score: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def require_each_dimension_once(self) -> RankingScoreBreakdown:
+        expected = {"landed_cost", "preference_match", "evidence_quality", "delivery_time"}
+        if len(set(self.priority_order)) != len(expected) or set(self.priority_order) != expected:
+            raise ValueError("score breakdown must contain each ranking dimension exactly once")
+        return self
+
+
+class ExchangeRateProvenance(StrictModel):
+    base_currency: Literal["CNY"] = "CNY"
+    source: str = Field(default="unspecified", min_length=1)
+    effective_date: str = Field(default="unspecified", min_length=1)
+    calculation_basis: str = Field(default="original_amount * rate_to_cny", min_length=1)
+
+
+class CalculationExclusion(StrictModel):
+    item_id: str = Field(min_length=1)
+    platform: Platform
+    title: str = Field(min_length=1)
+    currency: str = Field(min_length=1)
+    amount: float | None = None
+    reason_code: CalculationExclusionReason
+    reason: str = Field(min_length=1)
+
+
+class EstimateDisclosure(StrictModel):
+    estimated: bool = True
+    source: str = Field(default="computed", min_length=1)
+    calculation_basis: str = Field(default="not provided", min_length=1)
+
+
 class WorkingAssumption(StrictModel):
     code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
     field: str = Field(min_length=1)
@@ -216,6 +284,7 @@ class ShoppingPlan(StrictModel):
     hard_constraints: list[HardConstraint] = Field(default_factory=list)
     soft_preferences: list[str] = Field(default_factory=list)
     destination: str = "中国大陆"
+    ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
     working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
     source: ProviderSource = "computed"
 
@@ -335,7 +404,9 @@ class PriceCompareOutput(StrictModel):
     cheapest_per_platform: dict[str, PricePoint]
     rate_source: str
     rates_as_of: str
+    exchange_rate: ExchangeRateProvenance = Field(default_factory=ExchangeRateProvenance)
     excluded_currencies: list[str] = Field(default_factory=list)
+    calculation_exclusions: list[CalculationExclusion] = Field(default_factory=list)
 
 
 class LandedCost(PricePoint):
@@ -344,6 +415,9 @@ class LandedCost(PricePoint):
     landed_cny: float
     eta_days: int
     duty_tier: Literal["免征", "标准", "高税"]
+    shipping_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
+    duty_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
+    delivery_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
 
 
 class ConstraintEvidence(StrictModel):
@@ -390,6 +464,7 @@ class Recommendation(LandedCost):
     reason: str
     rank: int
     constraint_evaluations: list[ConstraintEvaluation]
+    score_breakdown: RankingScoreBreakdown
 
 
 class ItemPickerOutput(StrictModel):
@@ -400,6 +475,7 @@ class ItemPickerOutput(StrictModel):
     relaxation_suggestions: list[ConstraintRelaxationSuggestion] = Field(default_factory=list)
     match_status: Literal["matched", "no_match"] = "matched"
     rejected_count: int
+    ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
 
 
 class FileLink(StrictModel):
@@ -416,6 +492,9 @@ class ShoppingSummaryOutput(StrictModel):
     provider_mode: Literal["live", "mixed", "sandbox"]
     providers: dict[str, ProviderMetadata] = Field(default_factory=dict)
     calculation_notice: str
+    exchange_rate: ExchangeRateProvenance = Field(default_factory=ExchangeRateProvenance)
+    calculation_exclusions: list[CalculationExclusion] = Field(default_factory=list)
+    ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
     data_mode: DataMode = "live"
     result_kind: ResultKind = "live"
     unavailable_marketplaces: list[Platform] = Field(default_factory=list)

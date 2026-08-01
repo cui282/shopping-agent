@@ -4,7 +4,13 @@ import json
 import math
 import os
 
-from app.schemas import Candidate, PriceCompareOutput, PricePoint
+from app.schemas import (
+    CalculationExclusion,
+    Candidate,
+    ExchangeRateProvenance,
+    PriceCompareOutput,
+    PricePoint,
+)
 
 REFERENCE_FX_TO_CNY = {
     "CNY": 1.0,
@@ -14,6 +20,8 @@ REFERENCE_FX_TO_CNY = {
     "EUR": 7.78,
     "JPY": 0.046,
 }
+REFERENCE_FX_EFFECTIVE_DATE = "2026-01-01"
+FX_CALCULATION_BASIS = "original_amount * rate_to_cny"
 
 
 class MissingExchangeRatesError(ValueError):
@@ -25,7 +33,7 @@ class MissingExchangeRatesError(ValueError):
 def _rates() -> tuple[dict[str, float], str, str]:
     configured = os.getenv("FX_RATES_JSON", "").strip()
     if not configured:
-        return REFERENCE_FX_TO_CNY, "reference-table", "unspecified"
+        return REFERENCE_FX_TO_CNY, "reference-table", REFERENCE_FX_EFFECTIVE_DATE
     try:
         payload = json.loads(configured)
         rates = {str(currency).upper(): float(rate) for currency, rate in payload.items()}
@@ -34,10 +42,14 @@ def _rates() -> tuple[dict[str, float], str, str]:
     if not rates or any(not math.isfinite(rate) or rate <= 0 for rate in rates.values()):
         raise ValueError("FX_RATES_JSON must contain positive rates")
     rates.setdefault("CNY", 1.0)
+    rate_source = os.getenv("FX_RATE_SOURCE", "configured").strip() or "configured"
+    rates_as_of = os.getenv("FX_RATES_AS_OF", "").strip()
+    if not rates_as_of:
+        raise ValueError("FX_RATES_AS_OF must be configured for custom exchange rates")
     return (
         rates,
-        os.getenv("FX_RATE_SOURCE", "configured"),
-        os.getenv("FX_RATES_AS_OF", "unspecified"),
+        rate_source,
+        rates_as_of,
     )
 
 
@@ -51,11 +63,50 @@ async def price_compare(
     rates, rate_source, rates_as_of = _rates()
     ranked: list[PricePoint] = []
     excluded_currencies: set[str] = set()
+    calculation_exclusions: list[CalculationExclusion] = []
+    valid_amount_count = 0
     for item in candidates[:100]:
-        currency = item.currency.upper()
+        currency = str(item.currency).strip().upper() or "UNKNOWN"
+        amount = item.price if isinstance(item.price, (int, float)) else None
+        if (
+            isinstance(amount, bool)
+            or amount is None
+            or not math.isfinite(float(amount))
+            or float(amount) < 0
+        ):
+            calculation_exclusions.append(
+                CalculationExclusion(
+                    item_id=item.item_id,
+                    platform=item.platform,
+                    title=item.title,
+                    currency=currency,
+                    amount=None
+                    if (
+                        amount is None
+                        or isinstance(amount, bool)
+                        or not math.isfinite(float(amount))
+                    )
+                    else float(amount),
+                    reason_code="invalid_amount",
+                    reason="商品原始金额不是有限的非负数，已排除计算和排序。",
+                )
+            )
+            continue
+        valid_amount_count += 1
         rate = rates.get(currency)
         if rate is None:
             excluded_currencies.add(currency)
+            calculation_exclusions.append(
+                CalculationExclusion(
+                    item_id=item.item_id,
+                    platform=item.platform,
+                    title=item.title,
+                    currency=currency,
+                    amount=float(amount),
+                    reason_code="unsupported_currency",
+                    reason=f"没有可用的 {currency} 到 CNY 汇率，已排除计算和排序。",
+                )
+            )
             continue
         ranked.append(
             PricePoint(
@@ -64,7 +115,7 @@ async def price_compare(
                 title=item.title,
                 price=item.price,
                 currency=item.currency,
-                price_cny=round(item.price * rate, 2),
+                price_cny=round(float(amount) * rate, 2),
                 rating=item.rating,
                 sales=item.sales,
                 image_url=item.image_url,
@@ -81,9 +132,12 @@ async def price_compare(
                 link_kind=item.link_kind,
             )
         )
-    if candidates and not ranked:
+    unsupported_count = sum(
+        item.reason_code == "unsupported_currency" for item in calculation_exclusions
+    )
+    if candidates and not ranked and valid_amount_count and unsupported_count == valid_amount_count:
         raise MissingExchangeRatesError(excluded_currencies)
-    ranked.sort(key=lambda item: item.price_cny)
+    ranked.sort(key=lambda item: (item.price_cny, item.platform, item.item_id))
     ranked = ranked[: max(1, min(top_n, 30))]
     cheapest: dict[str, PricePoint] = {}
     for item in ranked:
@@ -93,5 +147,11 @@ async def price_compare(
         cheapest_per_platform=cheapest,
         rate_source=rate_source,
         rates_as_of=rates_as_of,
+        exchange_rate=ExchangeRateProvenance(
+            source=rate_source,
+            effective_date=rates_as_of,
+            calculation_basis=FX_CALCULATION_BASIS,
+        ),
         excluded_currencies=sorted(excluded_currencies),
+        calculation_exclusions=calculation_exclusions,
     )

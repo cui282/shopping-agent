@@ -4,6 +4,7 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAgentState } from "../hooks/useShoppingAgent";
 import type {
+  CalculationExclusion,
   ConstraintExclusion,
   HardConstraint,
   ProviderMetadata,
@@ -52,9 +53,33 @@ const evidenceRecommendation: Recommendation = {
   source: "live",
   note: null,
   duty_tier: "标准",
+  shipping_estimate: {
+    estimated: true,
+    source: "shipping_rules",
+    calculation_basis: "平台和重量区间",
+  },
+  duty_estimate: {
+    estimated: true,
+    source: "duty_rules",
+    calculation_basis: "商品价 CNY × 平台关税率",
+  },
+  delivery_estimate: {
+    estimated: true,
+    source: "shipping_rules",
+    calculation_basis: "平台和重量区间",
+  },
   reason: "到手价与证据完整",
   rank: 1,
   constraint_evaluations: [],
+  score_breakdown: {
+    priority_order: ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
+    landed_cost_cny: 888.23,
+    landed_cost_score: 1,
+    preference_match_score: 0.5,
+    evidence_quality_score: 0.8,
+    delivery_time_days: 12,
+    delivery_time_score: 1,
+  },
 };
 
 function renderCompletedResult(
@@ -75,6 +100,17 @@ function renderCompletedResult(
           provider_mode: "live",
           providers: {},
           calculation_notice: "价格为抓取时点信息。",
+          exchange_rate: {
+            base_currency: "CNY",
+            source: "reference-table",
+            effective_date: "2026-01-01",
+            calculation_basis: "original_amount * rate_to_cny",
+          },
+          calculation_exclusions: [],
+          ranking_profile: {
+            priority_order: ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
+            explicit: false,
+          },
           data_mode: "live",
           result_kind: "live",
           unavailable_marketplaces: [],
@@ -120,6 +156,51 @@ describe("Product Evidence", () => {
     const link = screen.getByRole("link", { name: /前往 Amazon 查看 Acme X1 headphones/ });
     expect(link.textContent).toContain("查看商品");
     expect(link.getAttribute("href")).toBe("https://shop.example/offers/offer-1");
+  });
+
+  it("shows the landed-cost breakdown, estimate sources, and ranking basis", () => {
+    renderCompletedResult();
+
+    expect(screen.getByText("USD 99.00")).toBeTruthy();
+    expect(screen.getByText("¥710.82")).toBeTruthy();
+    expect(screen.getByText("¥85.00")).toBeTruthy();
+    expect(screen.getByText("¥92.41")).toBeTruthy();
+    expect(screen.getByText("运费 估算")).toBeTruthy();
+    expect(screen.getByText("关税 估算")).toBeTruthy();
+    expect(screen.getByText("中国大陆到手价（估算）")).toBeTruthy();
+    expect(screen.getByText("来源：shipping_rules")).toBeTruthy();
+    expect(screen.getByText(/排序依据：到手价/)).toBeTruthy();
+    expect(screen.getByText(/checkout guarantee/)).toBeTruthy();
+  });
+
+  it("shows currency and amount exclusions with machine-readable reasons", () => {
+    const exclusions: CalculationExclusion[] = [
+      {
+        item_id: "unsupported-hkd",
+        platform: "ebay",
+        title: "港币耳机",
+        currency: "HKD",
+        amount: 100,
+        reason_code: "unsupported_currency",
+        reason: "没有可用的 HKD 到 CNY 汇率，已排除计算和排序。",
+      },
+      {
+        item_id: "invalid-price",
+        platform: "amazon",
+        title: "非法金额耳机",
+        currency: "USD",
+        amount: null,
+        reason_code: "invalid_amount",
+        reason: "商品原始金额不是有限的非负数，已排除计算和排序。",
+      },
+    ];
+    renderCompletedResult(evidenceRecommendation, { calculation_exclusions: exclusions });
+
+    expect(screen.getByRole("heading", { name: "计算排除" })).toBeTruthy();
+    expect(screen.getByText("HKD 100.00")).toBeTruthy();
+    expect(screen.getByText("USD 原始金额不可用")).toBeTruthy();
+    expect(screen.getByText("unsupported_currency")).toBeTruthy();
+    expect(screen.getByText("invalid_amount")).toBeTruthy();
   });
 
   it("omits unsafe links and keeps missing evidence explicit", () => {

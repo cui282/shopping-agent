@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.schemas import LandedCost, PricePoint, ShippingCalcOutput
+import math
+
+from app.schemas import EstimateDisclosure, LandedCost, PricePoint, ShippingCalcOutput
+from app.tools.destination import (
+    SUPPORTED_DESTINATION,
+    UnsupportedDestinationError,
+    normalize_destination,
+)
 
 _DUTY = {"amazon": 0.13, "shopee": 0.06, "aliexpress": 0.13, "ebay": 0.20}
 _SHIPPING = {
@@ -25,10 +32,19 @@ async def shipping_calc(
 ) -> ShippingCalcOutput:
     """Estimate shipping, duties, landed price, and delivery time."""
 
+    destination = normalize_destination(destination)
+    if destination != SUPPORTED_DESTINATION:
+        raise UnsupportedDestinationError(destination)
+
     landed: list[LandedCost] = []
     for item in items[:12]:
         weight_raw = item.attributes.get("weight_kg")
-        weight_is_known = isinstance(weight_raw, (int, float))
+        weight_is_known = (
+            isinstance(weight_raw, (int, float))
+            and not isinstance(weight_raw, bool)
+            and math.isfinite(float(weight_raw))
+            and float(weight_raw) >= 0
+        )
         weight = float(weight_raw) if weight_is_known else 0.5
         shipping, eta = _shipping_for(item.platform, weight)
         duty_rate = _DUTY[item.platform]
@@ -44,11 +60,30 @@ async def shipping_calc(
                 landed_cny=round(item.price_cny + shipping + duty, 2),
                 eta_days=eta,
                 duty_tier=tier,
+                shipping_estimate=EstimateDisclosure(
+                    estimated=True,
+                    source="shipping_rules",
+                    calculation_basis=(
+                        "平台和重量区间；重量缺失时按0.5kg估算"
+                        if not weight_is_known
+                        else "平台和重量区间"
+                    ),
+                ),
+                duty_estimate=EstimateDisclosure(
+                    estimated=True,
+                    source="duty_rules",
+                    calculation_basis="商品价 CNY × 平台关税率",
+                ),
+                delivery_estimate=EstimateDisclosure(
+                    estimated=True,
+                    source="shipping_rules",
+                    calculation_basis="平台和重量区间",
+                ),
             )
         )
-    landed.sort(key=lambda item: item.landed_cny)
+    landed.sort(key=lambda item: (item.landed_cny, item.platform, item.item_id))
     return ShippingCalcOutput(
         destination=destination,
         items=landed,
-        calculation_basis="按平台和重量区间的可配置规则估算",
+        calculation_basis="运费与配送时效按平台和重量区间估算；关税按平台关税率估算",
     )

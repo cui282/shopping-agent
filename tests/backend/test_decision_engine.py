@@ -19,6 +19,7 @@ def landed_offer(
     *,
     title: str = "通勤耳机",
     landed_cny: float = 888,
+    eta_days: int = 12,
     attributes: dict[str, object] | None = None,
 ) -> LandedCost:
     return LandedCost(
@@ -31,7 +32,7 @@ def landed_offer(
         shipping_cny=85,
         duty_cny=85,
         landed_cny=landed_cny,
-        eta_days=12,
+        eta_days=eta_days,
         duty_tier="标准",
         attributes=attributes or {},
         source="live",
@@ -151,6 +152,77 @@ def test_unknown_evidence_is_unverified_and_never_a_recommendation() -> None:
     )
     assert result.exclusions == []
     assert result.match_status == "no_match"
+
+
+def test_unverified_candidate_is_not_ranked_ahead_of_verified_candidate() -> None:
+    intent = ShoppingPlan(
+        category="耳机",
+        hard_constraints=[
+            HardConstraint(
+                id="material_not_contains_plastic",
+                kind="material",
+                field="material",
+                operator="not_contains",
+                value="塑料",
+                label="材质不含塑料",
+            )
+        ],
+    )
+    result = decision_engine(
+        intent,
+        RememberedPreference(),
+        [
+            landed_offer("unverified-cheap", landed_cny=100, attributes={}),
+            landed_offer("verified-expensive", landed_cny=900, attributes={"material": "金属"}),
+        ],
+    )
+
+    assert [item.item_id for item in result.recommendations] == ["verified-expensive"]
+    assert [item.item_id for item in result.unverified_candidates] == ["unverified-cheap"]
+
+
+def test_default_ranking_uses_landed_cost_then_stable_tie_break() -> None:
+    result = decision_engine(
+        ShoppingPlan(category="耳机"),
+        RememberedPreference(),
+        [
+            landed_offer("zeta", landed_cny=700),
+            landed_offer("alpha", landed_cny=700),
+            landed_offer("cheapest", landed_cny=600),
+        ],
+    )
+
+    assert result.ranking_profile.explicit is False
+    assert result.ranking_profile.priority_order == [
+        "landed_cost",
+        "preference_match",
+        "evidence_quality",
+        "delivery_time",
+    ]
+    assert [item.item_id for item in result.recommendations] == ["cheapest", "alpha", "zeta"]
+    assert result.recommendations[0].score_breakdown.priority_order == (
+        result.ranking_profile.priority_order
+    )
+    assert result.recommendations[0].score_breakdown.landed_cost_cny == 600
+
+
+@pytest.mark.asyncio
+async def test_explicit_delivery_priority_changes_verified_candidate_order() -> None:
+    plan = await planner("找耳机，优先配送速度")
+    result = decision_engine(
+        plan,
+        RememberedPreference(),
+        [
+            landed_offer("cheap-slow", landed_cny=500, eta_days=20),
+            landed_offer("fast-expensive", landed_cny=900, eta_days=5),
+        ],
+    )
+
+    assert result.ranking_profile.priority_order[0] == "delivery_time"
+    assert [item.item_id for item in result.recommendations] == [
+        "fast-expensive",
+        "cheap-slow",
+    ]
 
 
 def test_mixed_violation_and_unknown_keeps_all_evaluations_unverified() -> None:

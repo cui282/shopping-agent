@@ -318,6 +318,51 @@
   overflow-wrap: anywhere;
 }
 
+.calculationDisclaimer,
+.rankingNotice {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+  margin: -8px 0 18px;
+  color: var(--warning);
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.calculationDisclaimer {
+  padding-left: 24px;
+}
+
+.rankingNotice {
+  align-items: flex-start;
+  margin-top: -8px;
+  padding: 10px 0 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.rankingNotice svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.rankingNotice > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.rankingNotice strong {
+  margin-right: 4px;
+}
+
+.rankingNotice small {
+  display: block;
+  margin-top: 2px;
+  color: var(--ink-muted);
+}
+
 .providerDisclosure {
   display: grid;
   grid-template-columns: 142px minmax(0, 1fr);
@@ -729,6 +774,56 @@
   grid-column: 1 / -1;
 }
 
+.costBreakdown,
+.scoreBreakdown {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 10px;
+  margin: 11px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.costBreakdown div,
+.scoreBreakdown div {
+  min-width: 0;
+}
+
+.costBreakdown dt,
+.scoreBreakdown dt {
+  color: var(--ink-muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.costBreakdown dd,
+.scoreBreakdown dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+}
+
+.costBreakdown dd small {
+  display: block;
+  color: var(--ink-muted);
+  font-size: 9px;
+  font-weight: 450;
+}
+
+.scoreBreakdown {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top-style: dashed;
+}
+
+.scoreBreakdown dd {
+  color: var(--accent);
+}
+
 .cardFooter {
   display: flex;
   align-items: flex-end;
@@ -1060,7 +1155,7 @@
 
   .mobileComparison dl {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
     margin: 9px 0 0;
   }

@@ -31,6 +31,7 @@ from app.tools import (
     shipping_calc,
     shopping_summary,
 )
+from app.tools.destination import SUPPORTED_DESTINATION, is_supported_destination
 from app.utils.thread_ctx import get_thread_id
 
 T = TypeVar("T")
@@ -38,6 +39,10 @@ T = TypeVar("T")
 
 class ProvidersUnavailableError(RuntimeError):
     """All enabled marketplace providers failed to return usable data."""
+
+
+class UnsupportedCapabilityError(RuntimeError):
+    """The requested destination is outside the current landed-cost capability."""
 
 
 ADVISORY_TOOLS = [planner]
@@ -226,6 +231,10 @@ async def run_agent(
         monitor, "planner", {"query": request.query}, lambda: planner(request.query)
     )
     plan = merge_preferences(plan, remembered)
+    if not is_supported_destination(plan.destination):
+        raise UnsupportedCapabilityError(
+            f"当前仅支持配送至{SUPPORTED_DESTINATION}，暂不支持配送至{plan.destination}。"
+        )
     insight = await _call_tool(
         monitor,
         "category_insight",
@@ -347,7 +356,9 @@ async def run_agent(
             providers=providers,
             rate_source=prices.rate_source,
             rates_as_of=prices.rates_as_of,
+            exchange_rate=prices.exchange_rate,
             excluded_currencies=prices.excluded_currencies,
+            calculation_exclusions=prices.calculation_exclusions,
             shipping_basis=shipping.calculation_basis,
             unavailable_marketplaces=[
                 result.platform for result in searches if result.provider.status == "unavailable"

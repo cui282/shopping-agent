@@ -9,7 +9,8 @@ import {
 export const currencyCny = new Intl.NumberFormat("zh-CN", {
   style: "currency",
   currency: "CNY",
-  maximumFractionDigits: 0,
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
 });
 
 export function formatCount(value: number | null | undefined): string {

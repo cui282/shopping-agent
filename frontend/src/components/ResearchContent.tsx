@@ -1,10 +1,23 @@
 import { useState } from "react";
-import { AlertTriangle, ArrowUpRight, Calculator, Download, ImageOff, RotateCcw, Star, Truck } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowUpRight,
+  Calculator,
+  Download,
+  ImageOff,
+  ListOrdered,
+  RotateCcw,
+  Star,
+  Truck,
+} from "lucide-react";
 import { resolveApiUrl, safeExternalUrl } from "../api/client";
 import type { AgentState } from "../hooks/useShoppingAgent";
 import type {
   ConstraintEvaluation,
+  CalculationExclusion,
   ConstraintExclusion,
+  RankingDimension,
+  RankingProfile,
   Recommendation,
   UnverifiedCandidate,
   WorkingAssumption,
@@ -66,6 +79,18 @@ const evidenceLabels: Record<string, string> = {
   condition: "成色",
 };
 
+const rankingLabels: Record<RankingDimension, string> = {
+  landed_cost: "到手价",
+  preference_match: "偏好匹配",
+  evidence_quality: "证据质量",
+  delivery_time: "配送时效",
+};
+
+const defaultRankingProfile: RankingProfile = {
+  priority_order: ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
+  explicit: false,
+};
+
 function availabilityLabel(value: string | null): string {
   if (!value) return "未提供";
   return {
@@ -89,6 +114,14 @@ function retrievedAtLabel(value: string | null): string | null {
     minute: "2-digit",
     hour12: false,
   }).format(timestamp);
+}
+
+function estimateLabel(estimated: boolean | undefined): string {
+  return estimated === false ? "实测" : "估算";
+}
+
+function estimateSource(source: string | undefined): string {
+  return source ? `来源：${source}` : "来源未提供";
 }
 
 function ProductCard({ product }: { product: Recommendation }) {
@@ -123,6 +156,50 @@ function ProductCard({ product }: { product: Recommendation }) {
         </div>
         <h3 title={product.title}>{product.title}</h3>
         <p className={styles.reason}>{product.reason}</p>
+        <dl className={styles.costBreakdown} aria-label={`${product.title} 中国大陆到手成本`}>
+          <div>
+            <dt>商品价（原币）</dt>
+            <dd>
+              {product.currency} {product.price.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            </dd>
+          </div>
+          <div>
+            <dt>商品价（CNY）</dt>
+            <dd>{currencyCny.format(product.price_cny)}</dd>
+          </div>
+          <div>
+            <dt>运费 {estimateLabel(product.shipping_estimate?.estimated)}</dt>
+            <dd>
+              {currencyCny.format(product.shipping_cny)}
+              <small>{estimateSource(product.shipping_estimate?.source)}</small>
+            </dd>
+          </div>
+          <div>
+            <dt>关税 {estimateLabel(product.duty_estimate?.estimated)}</dt>
+            <dd>
+              {currencyCny.format(product.duty_cny)}
+              <small>{estimateSource(product.duty_estimate?.source)}</small>
+            </dd>
+          </div>
+        </dl>
+        <dl className={styles.scoreBreakdown} aria-label={`${product.title} 排序分解`}>
+          <div>
+            <dt>到手价分</dt>
+            <dd>{product.score_breakdown.landed_cost_score.toFixed(2)}</dd>
+          </div>
+          <div>
+            <dt>偏好匹配分</dt>
+            <dd>{product.score_breakdown.preference_match_score.toFixed(2)}</dd>
+          </div>
+          <div>
+            <dt>证据质量分</dt>
+            <dd>{product.score_breakdown.evidence_quality_score.toFixed(2)}</dd>
+          </div>
+          <div>
+            <dt>时效分</dt>
+            <dd>{product.score_breakdown.delivery_time_score.toFixed(2)}</dd>
+          </div>
+        </dl>
         <dl className={styles.evidence} aria-label={`${product.title} 商品证据`}>
           <div>
             <dt>抓取时间</dt>
@@ -170,9 +247,7 @@ function ProductCard({ product }: { product: Recommendation }) {
         <div className={styles.cardFooter}>
           <div>
             <span className={styles.price}>{currencyCny.format(product.landed_cny)}</span>
-            <span className={styles.priceNote}>
-              预估到手 · 商品价 {product.currency} {product.price.toLocaleString("zh-CN")}
-            </span>
+            <span className={styles.priceNote}>中国大陆到手价（估算）</span>
           </div>
           {productUrl && (
             <a
@@ -270,11 +345,12 @@ function Comparison({ state }: { state: AgentState }) {
               <th scope="col">商品</th>
               <th scope="col">平台</th>
               <th scope="col">来源</th>
-              <th scope="col">商品价</th>
-              <th scope="col">运费</th>
-              <th scope="col">税费</th>
-              <th scope="col">到手价</th>
-              <th scope="col">时效</th>
+              <th scope="col">商品价（原币）</th>
+              <th scope="col">商品价（CNY）</th>
+              <th scope="col">运费估算</th>
+              <th scope="col">关税估算</th>
+              <th scope="col">到手价（CNY）</th>
+              <th scope="col">时效估算</th>
             </tr>
           </thead>
           <tbody>
@@ -283,11 +359,14 @@ function Comparison({ state }: { state: AgentState }) {
                 <th scope="row">{row.title}</th>
                 <td>{row.platform.toUpperCase()}</td>
                 <td>{providerSourceLabel(row.source)}</td>
+                <td>{row.currency} {row.price.toFixed(2)}</td>
                 <td>{currencyCny.format(row.price_cny)}</td>
-                <td>{row.shipping_cny == null ? "待确认" : currencyCny.format(row.shipping_cny)}</td>
-                <td>{row.duty_cny == null ? "待确认" : currencyCny.format(row.duty_cny)}</td>
+                <td>
+                  {row.shipping_cny == null ? "待确认" : `${currencyCny.format(row.shipping_cny)}（估算）`}
+                </td>
+                <td>{row.duty_cny == null ? "待确认" : `${currencyCny.format(row.duty_cny)}（估算）`}</td>
                 <td className={styles.tablePrice}>{currencyCny.format(row.landed_cny ?? row.price_cny)}</td>
-                <td>{row.eta_days == null ? "待确认" : `${row.eta_days} 天`}</td>
+                <td>{row.eta_days == null ? "待确认" : `${row.eta_days} 天（估算）`}</td>
               </tr>
             ))}
           </tbody>
@@ -304,23 +383,27 @@ function Comparison({ state }: { state: AgentState }) {
             </header>
             <dl>
               <div>
-                <dt>商品价</dt>
+                <dt>商品价（原币）</dt>
+                <dd>{row.currency} {row.price.toFixed(2)}</dd>
+              </div>
+              <div>
+                <dt>商品价（CNY）</dt>
                 <dd>{currencyCny.format(row.price_cny)}</dd>
               </div>
               <div>
-                <dt>运税</dt>
-                <dd>
-                  {row.shipping_cny == null || row.duty_cny == null
-                    ? "待确认"
-                    : currencyCny.format(row.shipping_cny + row.duty_cny)}
-                </dd>
+                <dt>运费估算</dt>
+                <dd>{row.shipping_cny == null ? "待确认" : currencyCny.format(row.shipping_cny)}</dd>
               </div>
               <div>
-                <dt>到手价</dt>
+                <dt>关税估算</dt>
+                <dd>{row.duty_cny == null ? "待确认" : currencyCny.format(row.duty_cny)}</dd>
+              </div>
+              <div>
+                <dt>到手价（CNY）</dt>
                 <dd>{currencyCny.format(row.landed_cny ?? row.price_cny)}</dd>
               </div>
               <div>
-                <dt>时效</dt>
+                <dt>时效估算</dt>
                 <dd>{row.eta_days == null ? "待确认" : `${row.eta_days} 天`}</dd>
               </div>
             </dl>
@@ -455,12 +538,41 @@ function Exclusions({ exclusions }: { exclusions: ConstraintExclusion[] }) {
   );
 }
 
+function CalculationExclusions({ exclusions }: { exclusions: CalculationExclusion[] }) {
+  if (!exclusions.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="calculation-exclusion-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="calculation-exclusion-heading">计算排除</h3>
+        <span>{exclusions.length} 个候选未参与计算或排序</span>
+      </div>
+      <ul className={styles.decisionList}>
+        {exclusions.map((exclusion) => (
+          <li key={`${exclusion.platform}-${exclusion.item_id}`}>
+            <div className={styles.decisionItemHeader}>
+              <strong>{exclusion.title}</strong>
+              <span>
+                {exclusion.amount == null
+                  ? `${exclusion.currency} 原始金额不可用`
+                  : `${exclusion.currency} ${exclusion.amount.toFixed(2)}`}
+              </span>
+            </div>
+            <p>{exclusion.reason}</p>
+            <code>{exclusion.reason_code}</code>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function DecisionTransparency({ state }: { state: AgentState }) {
   const result = state.result;
   if (!result) return null;
   const assumptions = result.working_assumptions ?? [];
   const unverified = result.unverified_candidates ?? [];
   const exclusions = result.exclusions ?? [];
+  const calculationExclusions = result.calculation_exclusions ?? [];
   const suggestions = result.relaxation_suggestions ?? [];
   const isNoMatch = result.match_status === "no_match" || result.recommendations.length === 0;
 
@@ -472,6 +584,7 @@ function DecisionTransparency({ state }: { state: AgentState }) {
           <span>这是成功的 No-Match Result；平台数据可用，但没有证据充分且满足约束的推荐。</span>
         </section>
       )}
+      <CalculationExclusions exclusions={calculationExclusions} />
       <WorkingAssumptions assumptions={assumptions} />
       <UnverifiedCandidates candidates={unverified} />
       <Exclusions exclusions={exclusions} />
@@ -518,6 +631,20 @@ function ResultDisclosure({ state }: { state: AgentState }) {
       {result.data_mode === "sandbox"
         ? "本次结果仅来自显式启用的 Sandbox Result fixture。"
         : "本次结果仅来自已配置 Marketplace Gateway 的 Live Result。"}
+    </p>
+  );
+}
+
+function RankingDisclosure({ profile }: { profile: RankingProfile | undefined }) {
+  const active = profile ?? defaultRankingProfile;
+  const rankingOrder = active.priority_order.map((dimension) => rankingLabels[dimension]).join(" > ");
+  return (
+    <p className={styles.rankingNotice} role="note">
+      <ListOrdered size={16} aria-hidden="true" />
+      <span>
+        <strong>排序依据：{rankingOrder}</strong>
+        <small>{active.explicit ? "当前请求已表达优先级" : "当前请求未表达优先级，默认以到手价优先"}</small>
+      </span>
     </p>
   );
 }
@@ -614,6 +741,10 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
           <span>{result.calculation_notice}</span>
         </p>
       )}
+      <p className={styles.calculationDisclaimer} role="note">
+        运费、关税和配送时效均为估算；这不是 checkout guarantee。
+      </p>
+      <RankingDisclosure profile={result?.ranking_profile} />
       <ProviderDisclosure state={state} />
       <DecisionTransparency state={state} />
 

@@ -22,7 +22,31 @@ async def test_planner_extracts_budget_category_and_constraints() -> None:
     assert plan.category == "耳机"
     assert "轻便" in plan.soft_preferences
     assert "不含皮革" in plan.material_preferences
-    assert plan.destination == "上海"
+    assert plan.destination == "中国大陆"
+
+
+@pytest.mark.asyncio
+async def test_planner_builds_explicit_ranking_profile() -> None:
+    plan = await planner("找耳机，优先配送速度，其次偏好匹配，再看价格")
+
+    assert plan.ranking_profile.explicit is True
+    assert plan.ranking_profile.priority_order == [
+        "delivery_time",
+        "preference_match",
+        "landed_cost",
+        "evidence_quality",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_planner_normalizes_mainland_addresses_and_preserves_unsupported_destinations() -> (
+    None
+):
+    mainland = await planner("找耳机，配送至深圳市南山区")
+    unsupported = await planner("找耳机，收货地址为香港")
+
+    assert mainland.destination == "中国大陆"
+    assert unsupported.destination == "香港"
 
 
 @pytest.mark.asyncio
@@ -186,10 +210,17 @@ async def test_price_shipping_and_picker_preserve_product_fields() -> None:
     )
     prices = await price_compare([candidate])
     assert prices.ranked[0].price_cny == 718
+    assert prices.exchange_rate.source == "reference-table"
+    assert prices.exchange_rate.effective_date != "unspecified"
+    assert prices.exchange_rate.calculation_basis == "original_amount * rate_to_cny"
     shipping = await shipping_calc(prices.ranked)
     item = shipping.items[0]
     assert item.shipping_cny == 85
     assert item.duty_cny == pytest.approx(93.34)
+    assert item.shipping_estimate.estimated is True
+    assert item.shipping_estimate.source == "shipping_rules"
+    assert item.duty_estimate.estimated is True
+    assert item.delivery_estimate.estimated is True
     assert item.image_url == candidate.image_url
     plan = await planner("预算 1000 元，找轻便耳机，不要皮革")
     picks = await item_picker(shipping, plan)
@@ -242,6 +273,9 @@ async def test_price_compare_reports_or_rejects_missing_exchange_rates() -> None
     partial = await price_compare([usd, hkd])
     assert [item.item_id for item in partial.ranked] == ["usd"]
     assert partial.excluded_currencies == ["HKD"]
+    assert [(item.item_id, item.reason_code) for item in partial.calculation_exclusions] == [
+        ("hkd", "unsupported_currency")
+    ]
 
     with pytest.raises(MissingExchangeRatesError) as error:
         await price_compare([hkd])
@@ -263,6 +297,61 @@ async def test_price_compare_rejects_non_finite_exchange_rates(monkeypatch, rate
 
     with pytest.raises(ValueError, match="positive rates"):
         await price_compare([candidate])
+
+
+@pytest.mark.asyncio
+async def test_price_compare_requires_effective_date_for_custom_exchange_rates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FX_RATES_JSON", '{"USD": 7.2}')
+    monkeypatch.delenv("FX_RATES_AS_OF", raising=False)
+    candidate = Candidate(
+        item_id="usd",
+        platform="amazon",
+        title="USD item",
+        price=10,
+        currency="USD",
+        source="live",
+    )
+
+    with pytest.raises(ValueError, match="FX_RATES_AS_OF"):
+        await price_compare([candidate])
+
+
+@pytest.mark.asyncio
+async def test_price_compare_excludes_invalid_amounts_without_ranking_them() -> None:
+    invalid_negative = Candidate.model_construct(
+        item_id="negative",
+        platform="amazon",
+        title="Negative amount",
+        price=-1,
+        currency="USD",
+        source="live",
+    )
+    invalid_nan = Candidate.model_construct(
+        item_id="nan",
+        platform="amazon",
+        title="NaN amount",
+        price=float("nan"),
+        currency="USD",
+        source="live",
+    )
+    valid = Candidate(
+        item_id="valid",
+        platform="amazon",
+        title="Valid amount",
+        price=10,
+        currency="USD",
+        source="live",
+    )
+
+    result = await price_compare([invalid_negative, invalid_nan, valid])
+
+    assert [item.item_id for item in result.ranked] == ["valid"]
+    assert [(item.item_id, item.reason_code) for item in result.calculation_exclusions] == [
+        ("negative", "invalid_amount"),
+        ("nan", "invalid_amount"),
+    ]
 
 
 @pytest.mark.asyncio

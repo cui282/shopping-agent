@@ -226,10 +226,14 @@ changes it to `error` with `error_code=task_interrupted` and appends exactly one
 event instead of presenting a permanently running task.
 
 Stable task error codes include `providers_unavailable`, `fx_rates_unavailable`,
-`task_timeout`, `task_failed`, and `task_interrupted`. `fx_rates_unavailable` means every
-candidate uses a currency absent from `FX_RATES_JSON` and the built-in reference table.
-If at least one candidate can be converted, candidates with missing rates are excluded and
-`calculation_notice` discloses that partial exclusion.
+`unsupported_capability`, `task_timeout`, `task_failed`, and `task_interrupted`.
+`unsupported_capability` is emitted before marketplace search when the requested destination is
+not China mainland; China mainland is currently the only supported landed-cost destination.
+`fx_rates_unavailable` means every candidate uses a currency absent from `FX_RATES_JSON` and the
+built-in reference table. If at least one candidate can be converted, candidates with missing
+rates are excluded and `calculation_notice` discloses that partial exclusion.
+When `FX_RATES_JSON` is configured, `FX_RATES_AS_OF` is required so the response can preserve the
+effective date of the configured rates; the calculation basis is always exposed alongside it.
 
 `POST /api/task/{thread_id}/cancel` is idempotent for known terminal tasks. Active tasks return:
 
@@ -283,6 +287,17 @@ Uploaded references and user preferences are not task-owned and are therefore no
   "unverified_candidates": [],
   "exclusions": [],
   "relaxation_suggestions": [],
+  "exchange_rate": {
+    "base_currency": "CNY",
+    "source": "reference-table",
+    "effective_date": "2026-01-01",
+    "calculation_basis": "original_amount * rate_to_cny"
+  },
+  "calculation_exclusions": [],
+  "ranking_profile": {
+    "priority_order": ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
+    "explicit": false
+  },
   "providers": {
     "amazon": {
       "source": "live",
@@ -299,7 +314,7 @@ Uploaded references and user preferences are not task-owned and are therefore no
       "failure_reason": "request_failed"
     }
   },
-  "calculation_notice": "汇率来源 ...；运费与税费为估算值。"
+  "calculation_notice": "比较货币：CNY；汇率来源：内置参考汇率表；effective date：2026-01-01；calculation basis：original_amount * rate_to_cny；运费、税费与时效均为估算；这不是 checkout guarantee。"
 }
 ```
 
@@ -394,13 +409,29 @@ search link, and clients label links from `link_kind`, never by guessing from `s
 
 Recommendation-only fields are `reason` and `rank`. Both recommendations and comparison rows also
 include normalized `price_cny`, `shipping_cny`, `duty_cny`, `landed_cny`, `eta_days`, `duty_tier`,
-and nullable estimation `note`. Unknown optional Product Evidence remains `null` and is never
-filled by Agent Interpretation.
+and nullable estimation `note`. `price` and `currency` preserve the original amount; all
+comparison and ranking calculations use CNY. Every landed-cost row carries
+`shipping_estimate`, `duty_estimate`, and `delivery_estimate`, each with `estimated`, `source`,
+and `calculation_basis`. These are estimates, not checkout guarantees. Non-finite or negative
+amounts are excluded with `calculation_exclusions[].reason_code=invalid_amount`; a currency with
+no available CNY rate is excluded with `reason_code=unsupported_currency`. Excluded candidates
+never enter eligibility or ranking.
 
 Each Recommendation contains `constraint_evaluations`. Every evaluation has the normalized
 `constraint`, a three-valued `status` (`satisfied`, `violated`, or `unknown`), a stable
 `reason_code`, an explanation, and the Product Evidence or computed value supporting the result.
-Only candidates whose evaluations are all `satisfied` can appear in `recommendations`.
+Only candidates whose evaluations are all `satisfied` can appear in `recommendations`; eligibility
+is evaluated before ranking. Each Recommendation also contains a machine-readable
+`score_breakdown` for the current `ranking_profile`, including landed-cost, preference-match,
+evidence-quality, and delivery-time scores. `reason` is deterministic and may explain only Product
+Evidence plus disclosed computed landed-cost and estimate fields; the LLM cannot create prices,
+rates, evidence, eligibility, or ranking outcomes.
+
+`ranking_profile.priority_order` is the request's effective order across `landed_cost`,
+`preference_match`, `evidence_quality`, and `delivery_time`. When the request does not express a
+priority, the default is landed cost first. The same profile and CNY values are present in the API
+result, generated report, and UI disclosure. Ties use stable landed-cost, delivery-time, platform,
+and `item_id` keys after the requested dimensions.
 
 `unverified_candidates` uses the same normalized offer and landed-cost fields as a recommendation,
 plus `reason` and `constraint_evaluations`. Any `unknown` evaluation sends the candidate to this

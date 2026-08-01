@@ -98,6 +98,35 @@ def test_task_rejects_invalid_query_lengths(client: TestClient, query: str) -> N
     assert response.status_code == 422
 
 
+def test_unsupported_destination_fails_before_marketplace_search(
+    client: TestClient, monkeypatch
+) -> None:
+    searched: list[str] = []
+
+    async def unexpected_search(query, platform, top_k=20, user_id=None):
+        del top_k, user_id
+        searched.append(f"{platform}:{query}")
+        raise AssertionError("marketplace search must not run for unsupported destination")
+
+    monkeypatch.setattr("app.agent.main_agent.item_search", unexpected_search)
+    started = client.post(
+        "/api/task",
+        json={"query": "找耳机，寄到美国", "user_id": "destination-user", "upload_ids": []},
+    )
+
+    assert started.status_code == 202
+    snapshot = _wait_for_terminal_snapshot(client, started.json()["thread_id"])
+
+    assert snapshot["status"] == "error"
+    assert snapshot["error_code"] == "unsupported_capability"
+    assert "中国大陆" in snapshot["error"]
+    assert searched == []
+    assert not any(
+        event["event"] == "tool_start" and event["data"].get("tool_name") == "item_search"
+        for event in snapshot["events"]
+    )
+
+
 def test_unconfigured_live_runtime_rejects_tasks(client: TestClient, monkeypatch) -> None:
     monkeypatch.setenv("SANDBOX_MODE", "false")
 
@@ -433,10 +462,33 @@ def test_task_lifecycle_and_buffered_websocket_replay(client: TestClient) -> Non
     assert payload["status"] == "completed"
     assert payload["result"]["provider_mode"] == "sandbox"
     assert "内置参考汇率表" in payload["result"]["calculation_notice"]
-    assert "未标注日期" in payload["result"]["calculation_notice"]
+    assert "effective date：2026-01-01" in payload["result"]["calculation_notice"]
+    assert payload["result"]["exchange_rate"] == {
+        "base_currency": "CNY",
+        "source": "reference-table",
+        "effective_date": "2026-01-01",
+        "calculation_basis": "original_amount * rate_to_cny",
+    }
+    assert payload["result"]["calculation_exclusions"] == []
+    assert payload["result"]["ranking_profile"] == {
+        "priority_order": [
+            "landed_cost",
+            "preference_match",
+            "evidence_quality",
+            "delivery_time",
+        ],
+        "explicit": False,
+    }
     assert 1 <= len(payload["result"]["recommendations"]) <= 3
     for recommendation in payload["result"]["recommendations"]:
         assert recommendation["landed_cny"] >= recommendation["price_cny"]
+        assert recommendation["shipping_estimate"]["estimated"] is True
+        assert recommendation["duty_estimate"]["estimated"] is True
+        assert recommendation["delivery_estimate"]["estimated"] is True
+        assert (
+            recommendation["score_breakdown"]["priority_order"]
+            == payload["result"]["ranking_profile"]["priority_order"]
+        )
         assert recommendation["source"] == "fixture"
         assert recommendation["marketplace"] == recommendation["platform"]
         assert recommendation["offer_id"] is None

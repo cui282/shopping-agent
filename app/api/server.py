@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app import __version__
-from app.agent.main_agent import ProvidersUnavailableError, run_agent
+from app.agent.main_agent import ProvidersUnavailableError, UnsupportedCapabilityError, run_agent
 from app.api.connection import manager
 from app.api.monitor import monitor
 from app.config import get_settings
@@ -387,8 +387,18 @@ async def _execute_task(
             data={"thread_id": thread_id, "code": "providers_unavailable"},
             run_id=run_id,
         )
-    except MissingExchangeRatesError:
-        message = "候选商品币种缺少可用汇率，请配置 FX_RATES_JSON 后重试"
+    except UnsupportedCapabilityError as exc:
+        message = str(exc)
+        await monitor.emit(
+            thread_id,
+            "error",
+            message=message,
+            data={"thread_id": thread_id, "code": "unsupported_capability"},
+            run_id=run_id,
+        )
+    except MissingExchangeRatesError as exc:
+        currencies = "、".join(exc.currencies) or "未知币种"
+        message = f"候选商品币种缺少可用汇率（{currencies}），请配置 FX_RATES_JSON 后重试"
         await monitor.emit(
             thread_id,
             "error",

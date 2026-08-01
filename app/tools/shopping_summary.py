@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 
 from app.schemas import (
+    CalculationExclusion,
     DataMode,
+    ExchangeRateProvenance,
     FileLink,
     ItemPickerOutput,
     LandedCost,
@@ -31,7 +33,9 @@ async def shopping_summary(
     providers: dict[str, ProviderMetadata] | None = None,
     rate_source: str = "unspecified",
     rates_as_of: str = "unspecified",
+    exchange_rate: ExchangeRateProvenance | None = None,
     excluded_currencies: list[str] | None = None,
+    calculation_exclusions: list[CalculationExclusion] | None = None,
     shipping_basis: str = "estimated; verify at checkout",
     unavailable_marketplaces: list[str] | None = None,
     data_mode: DataMode | None = None,
@@ -41,6 +45,11 @@ async def shopping_summary(
     thread_id = get_thread_id()
     directory = get_session_dir()
     provider_details = providers or {}
+    exchange_rate = exchange_rate or ExchangeRateProvenance(
+        source=rate_source,
+        effective_date=rates_as_of,
+    )
+    calculation_exclusions = calculation_exclusions or []
     sources = {item.source for item in comparison}
     sources.update(metadata.source for metadata in provider_details.values())
     if data_mode is not None:
@@ -66,13 +75,26 @@ async def shopping_summary(
         if unavailable or provider_mode == "mixed"
         else "live"
     )
-    excluded_notice = "部分候选因缺少汇率已排除；" if excluded_currencies else ""
+    excluded_notice = "部分候选已排除；" if calculation_exclusions or excluded_currencies else ""
+    priority_labels = {
+        "landed_cost": "到手价",
+        "preference_match": "偏好匹配",
+        "evidence_quality": "证据质量",
+        "delivery_time": "配送时效",
+    }
+    ranking_basis = "、".join(
+        priority_labels.get(dimension, dimension)
+        for dimension in picks.ranking_profile.priority_order
+    )
     calculation_notice = (
-        f"汇率来源：{_rate_label(rate_source)}（{_date_label(rates_as_of)}）；{excluded_notice}"
-        f"运费、税费与时效{shipping_basis}，购买前请以平台结算页为准。"
+        f"比较货币：CNY；汇率来源：{_rate_label(exchange_rate.source)}；"
+        f"effective date：{_date_label(exchange_rate.effective_date)}；"
+        f"calculation basis：{exchange_rate.calculation_basis}；{excluded_notice}"
+        f"运费、税费与时效均为估算（{shipping_basis}）；这不是 checkout guarantee，"
+        "购买前请以平台结算页为准。"
     )
     if picks.recommendations:
-        lines = ["我按到手价、约束和评价筛选了以下选择："]
+        lines = [f"我按{ranking_basis}、硬性约束和可核验证据筛选了以下选择："]
         for item in picks.recommendations:
             lines.append(f"{item.rank}. {item.title}：{item.reason}")
         if unavailable:
@@ -92,6 +114,8 @@ async def shopping_summary(
         )
     elif picks.exclusions or comparison:
         final_answer = "当前没有满足全部硬性条件的候选。可以查看排除原因，并在确认后放宽条件。"
+    elif calculation_exclusions:
+        final_answer = "候选商品均未能完成合法的价格计算；请查看计算排除原因并检查金额或汇率配置。"
     else:
         final_answer = "已启用平台没有返回可比较的候选商品。请调整关键词后重试。"
 
@@ -104,14 +128,30 @@ async def shopping_summary(
         "",
         "## 到手价比较",
         "",
-        "| 平台 | 商品 | 商品价(CNY) | 运费 | 关税 | 到手价 | 时效 | 来源 |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| 平台 | 商品 | 商品价(原币) | 商品价(CNY) | 运费估算 | 关税估算 | 到手价 | 时效估算 | 来源 |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for item in comparison:
         markdown_lines.append(
-            f"| {item.platform} | {item.title} | {item.price_cny:.2f} | "
-            f"{item.shipping_cny:.2f} | {item.duty_cny:.2f} | {item.landed_cny:.2f} | "
-            f"{item.eta_days}天 | {item.source} |"
+            f"| {item.platform} | {item.title} | {item.currency} {item.price:.2f} | "
+            f"{item.price_cny:.2f} | {item.shipping_cny:.2f}（估算） | "
+            f"{item.duty_cny:.2f}（估算） | {item.landed_cny:.2f} | "
+            f"{item.eta_days}天（估算） | {item.source} |"
+        )
+    markdown_lines.extend(
+        [
+            "",
+            "## Ranking Profile",
+            "",
+            "优先级：" + " > ".join(picks.ranking_profile.priority_order),
+            "显式表达：" + ("是" if picks.ranking_profile.explicit else "否（默认以到手价优先）"),
+        ]
+    )
+    if calculation_exclusions:
+        markdown_lines.extend(["", "## 计算排除", ""])
+        markdown_lines.extend(
+            f"- {item.title}（{item.item_id}）：{item.reason_code}，{item.reason}"
+            for item in calculation_exclusions
         )
     if picks.working_assumptions:
         markdown_lines.extend(["", "## 工作假设", ""])
@@ -170,6 +210,9 @@ async def shopping_summary(
         provider_mode=provider_mode,
         providers=provider_details,
         calculation_notice=calculation_notice,
+        exchange_rate=exchange_rate,
+        calculation_exclusions=calculation_exclusions,
+        ranking_profile=picks.ranking_profile,
         data_mode=provider_mode,
         result_kind=result_kind,
         unavailable_marketplaces=unavailable,

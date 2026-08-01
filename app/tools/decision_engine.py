@@ -13,6 +13,9 @@ from app.schemas import (
     HardConstraint,
     ItemPickerOutput,
     LandedCost,
+    RankingDimension,
+    RankingProfile,
+    RankingScoreBreakdown,
     Recommendation,
     RememberedPreference,
     ShoppingPlan,
@@ -247,9 +250,100 @@ def _remembered_model(
     )
 
 
-def _recommendation_reason(offer: LandedCost, remembered: RememberedPreference) -> str:
-    del remembered  # Remembered Preference is a soft signal and never changes eligibility.
-    return f"全部硬性条件均已由 Product Evidence 验证；到手约¥{offer.landed_cny:.0f}，预计{offer.eta_days}天。"
+_RANKING_LABELS: dict[RankingDimension, str] = {
+    "landed_cost": "到手价",
+    "preference_match": "偏好匹配",
+    "evidence_quality": "证据质量",
+    "delivery_time": "配送时效",
+}
+
+
+def _preference_terms(intent: ShoppingPlan, remembered: RememberedPreference) -> list[str]:
+    values = [
+        *intent.style_preferences,
+        *intent.soft_preferences,
+        *remembered.material_preferences,
+        *remembered.style_preferences,
+        *remembered.soft_preferences,
+    ]
+    return list(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _product_evidence_text(offer: LandedCost) -> list[str]:
+    values = [offer.title]
+    values.extend(str(value) for value in offer.attributes.values() if value is not None)
+    values.extend(str(value) for value in offer.variant_attributes.values() if value is not None)
+    return [_normal_text(value) for value in values]
+
+
+def _preference_match_score(
+    offer: LandedCost, intent: ShoppingPlan, remembered: RememberedPreference
+) -> float:
+    terms = _preference_terms(intent, remembered)
+    if not terms:
+        return 0.5
+    evidence = _product_evidence_text(offer)
+    matched = sum(
+        1
+        for term in terms
+        if any(_normal_text(term) in evidence_value for evidence_value in evidence)
+    )
+    return round(matched / len(terms), 4)
+
+
+def _evidence_quality_score(offer: LandedCost) -> float:
+    checks = (
+        offer.source in {"live", "fixture", "curated"},
+        offer.provenance is not None,
+        bool(offer.product_url),
+        bool(offer.offer_id or any(offer.identity.model_dump().values())),
+        bool(offer.variant_attributes),
+        offer.availability is not None,
+        offer.retrieved_at is not None,
+        offer.rating is not None,
+        offer.sales is not None,
+    )
+    return round(sum(checks) / len(checks), 4)
+
+
+def _relative_lower_is_better(value: float, values: list[float]) -> float:
+    minimum = min(values)
+    maximum = max(values)
+    if maximum == minimum:
+        return 1.0
+    return round(1 - ((value - minimum) / (maximum - minimum)), 4)
+
+
+def _score_breakdown(
+    offer: LandedCost,
+    profile: RankingProfile,
+    remembered: RememberedPreference,
+    intent: ShoppingPlan,
+    eligible: list[LandedCost],
+) -> RankingScoreBreakdown:
+    landed_values = [item.landed_cny for item in eligible]
+    eta_values = [float(item.eta_days) for item in eligible]
+    return RankingScoreBreakdown(
+        priority_order=profile.priority_order,
+        landed_cost_cny=offer.landed_cny,
+        landed_cost_score=_relative_lower_is_better(offer.landed_cny, landed_values),
+        preference_match_score=_preference_match_score(offer, intent, remembered),
+        evidence_quality_score=_evidence_quality_score(offer),
+        delivery_time_days=offer.eta_days,
+        delivery_time_score=_relative_lower_is_better(float(offer.eta_days), eta_values),
+    )
+
+
+def _recommendation_reason(offer: LandedCost, profile: RankingProfile) -> str:
+    priorities = "、".join(_RANKING_LABELS[dimension] for dimension in profile.priority_order)
+    return (
+        f"全部硬性条件均已通过 Product Evidence 或确定性计算验证；按{priorities}排序。"
+        f"商品价为 {offer.currency} {offer.price:.2f}（折合 CNY {offer.price_cny:.2f}），"
+        f"运费 ¥{offer.shipping_cny:.2f}（估算，来源：{offer.shipping_estimate.source}），"
+        f"关税 ¥{offer.duty_cny:.2f}（估算，来源：{offer.duty_estimate.source}），"
+        f"到手约 ¥{offer.landed_cny:.2f}；配送 {offer.eta_days} 天"
+        f"（估算，来源：{offer.delivery_estimate.source}）。"
+    )
 
 
 def _unverified_reason(evaluations: list[ConstraintEvaluation]) -> str:
@@ -317,22 +411,40 @@ def decision_engine(
         else:
             recommendations.append((offer, evaluations))
 
-    recommendations.sort(
-        key=lambda item: (
-            item[0].landed_cny,
-            -(item[0].rating if item[0].rating is not None else 0),
-            -(item[0].sales if item[0].sales is not None else 0),
-        )
-    )
+    profile = intent.ranking_profile
+    eligible_offers = [offer for offer, _ in recommendations]
+    scored = [
+        (offer, evaluations, _score_breakdown(offer, profile, remembered, intent, eligible_offers))
+        for offer, evaluations in recommendations
+    ]
+
+    def sort_key(
+        item: tuple[LandedCost, list[ConstraintEvaluation], RankingScoreBreakdown],
+    ) -> tuple[float | str, ...]:
+        offer, _, breakdown = item
+        primary: list[float] = []
+        for dimension in profile.priority_order:
+            if dimension == "landed_cost":
+                primary.append(offer.landed_cny)
+            elif dimension == "delivery_time":
+                primary.append(float(offer.eta_days))
+            elif dimension == "preference_match":
+                primary.append(-breakdown.preference_match_score)
+            else:
+                primary.append(-breakdown.evidence_quality_score)
+        return (*primary, offer.landed_cny, float(offer.eta_days), offer.platform, offer.item_id)
+
+    scored.sort(key=sort_key)
     limit = max(1, min(max_items, 3))
     picks = [
         Recommendation(
             **offer.model_dump(),
-            reason=_recommendation_reason(offer, remembered),
+            reason=_recommendation_reason(offer, profile),
             rank=rank,
             constraint_evaluations=evaluations,
+            score_breakdown=breakdown,
         )
-        for rank, (offer, evaluations) in enumerate(recommendations[:limit], start=1)
+        for rank, (offer, evaluations, breakdown) in enumerate(scored[:limit], start=1)
     ]
     return ItemPickerOutput(
         recommendations=picks,
@@ -342,4 +454,5 @@ def decision_engine(
         relaxation_suggestions=_relaxations(exclusions),
         match_status="matched" if picks else "no_match",
         rejected_count=len(exclusions),
+        ranking_profile=profile,
     )

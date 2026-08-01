@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import re
 
-from app.schemas import HardConstraint, ShoppingPlan, WorkingAssumption
+from app.schemas import (
+    HardConstraint,
+    RankingDimension,
+    RankingProfile,
+    ShoppingPlan,
+    WorkingAssumption,
+)
+from app.tools.destination import normalize_destination
 from app.tools.query_parser import extract_budget_cny, extract_product_subject
 
 _NEGATED_VALUE = re.compile(r"(?:不要|不含|避免|排除|不考虑)\s*([^，。；,;！？!?]{1,16})")
@@ -41,6 +48,33 @@ _COLOR_TERMS = (
     "彩色",
 )
 _STYLE_TERMS = ("简约", "复古", "运动", "商务", "通勤", "专业", "休闲")
+_DEFAULT_RANKING_ORDER: tuple[RankingDimension, ...] = (
+    "landed_cost",
+    "preference_match",
+    "evidence_quality",
+    "delivery_time",
+)
+_RANKING_KEYWORDS: dict[RankingDimension, tuple[str, ...]] = {
+    "landed_cost": ("到手价", "总价", "价格", "成本", "便宜", "低价", "省钱"),
+    "preference_match": ("偏好匹配", "偏好", "需求匹配", "匹配度", "喜好"),
+    "evidence_quality": ("证据质量", "证据", "可靠性", "可信度"),
+    "delivery_time": (
+        "配送速度",
+        "配送时效",
+        "到货速度",
+        "时效",
+        "到货",
+        "配送",
+        "快递",
+        "尽快",
+    ),
+}
+_RANKING_MARKERS = ("优先", "首先", "第一", "其次", "然后", "再看", "更看重", "看重", "重视", "按")
+_DESTINATION_PATTERN = re.compile(
+    r"(?:寄到|送到|配送到|配送至|寄往|送往|发往|目的地(?:是|为)?|"
+    r"收货地(?:址)?(?:是|为)?|配送地址(?:是|为)?|送货地址(?:是|为)?)[：:\s]*"
+    r"([^，。；,;！？!?]{2,20})"
+)
 
 
 def _constraint_id(field: str, operator: str, index: int) -> str:
@@ -138,6 +172,32 @@ def _assumptions(query: str, style_preferences: list[str]) -> list[WorkingAssump
     return assumptions
 
 
+def _ranking_profile(query: str) -> RankingProfile:
+    positions: dict[RankingDimension, int] = {}
+    for dimension, keywords in _RANKING_KEYWORDS.items():
+        for keyword in keywords:
+            start = 0
+            while True:
+                position = query.find(keyword, start)
+                if position < 0:
+                    break
+                before = query[max(0, position - 8) : position]
+                after = query[position + len(keyword) : position + len(keyword) + 8]
+                if any(marker in before for marker in _RANKING_MARKERS) or "优先" in after:
+                    positions[dimension] = min(positions.get(dimension, position), position)
+                start = position + len(keyword)
+    if not positions:
+        return RankingProfile()
+    ordered = sorted(
+        _DEFAULT_RANKING_ORDER,
+        key=lambda dimension: (
+            positions.get(dimension, len(query) + 1),
+            _DEFAULT_RANKING_ORDER.index(dimension),
+        ),
+    )
+    return RankingProfile(priority_order=ordered, explicit=True)
+
+
 async def planner(query: str) -> ShoppingPlan:
     """Turn free-form Chinese shopping intent into explicit constraints."""
 
@@ -232,9 +292,9 @@ async def planner(query: str) -> ShoppingPlan:
         )
 
     destination = "中国大陆"
-    destination_match = re.search(r"(?:寄到|送到|配送到)([^，。；,;]{2,12})", query)
+    destination_match = _DESTINATION_PATTERN.search(query)
     if destination_match:
-        destination = destination_match.group(1).strip()
+        destination = normalize_destination(destination_match.group(1))
 
     return ShoppingPlan(
         budget_cny=budget,
@@ -244,5 +304,6 @@ async def planner(query: str) -> ShoppingPlan:
         hard_constraints=hard_constraints,
         soft_preferences=soft_preferences,
         destination=destination,
+        ranking_profile=_ranking_profile(query),
         working_assumptions=_assumptions(query, style_preferences),
     )
