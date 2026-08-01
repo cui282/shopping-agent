@@ -2,7 +2,13 @@ import { useState } from "react";
 import { AlertTriangle, ArrowUpRight, Calculator, Download, ImageOff, RotateCcw, Star, Truck } from "lucide-react";
 import { resolveApiUrl, safeExternalUrl } from "../api/client";
 import type { AgentState } from "../hooks/useShoppingAgent";
-import type { Recommendation } from "../types/api";
+import type {
+  ConstraintEvaluation,
+  ConstraintExclusion,
+  Recommendation,
+  UnverifiedCandidate,
+  WorkingAssumption,
+} from "../types/api";
 import { starterQueries } from "../data/starterQueries";
 import { currencyCny, formatCount } from "../utils/format";
 import {
@@ -356,6 +362,139 @@ function ProviderDisclosure({ state }: { state: AgentState }) {
   );
 }
 
+function EvaluationLine({ evaluation }: { evaluation: ConstraintEvaluation }) {
+  return (
+    <li data-status={evaluation.status}>
+      <strong>{evaluation.constraint.label}</strong>
+      <span>{evaluation.explanation}</span>
+      <code>{evaluation.reason_code}</code>
+    </li>
+  );
+}
+
+function WorkingAssumptions({ assumptions }: { assumptions: WorkingAssumption[] }) {
+  if (!assumptions.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="assumption-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="assumption-heading">工作假设</h3>
+        <span>可见默认，不是硬性条件</span>
+      </div>
+        <ul className={styles.assumptionList}>
+          {assumptions.map((assumption) => (
+            <li key={assumption.code}>
+            <strong>{evidenceLabels[assumption.field] ?? assumption.field}：{assumption.value}</strong>
+              <span>{assumption.reason}</span>
+            </li>
+          ))}
+      </ul>
+    </section>
+  );
+}
+
+function UnverifiedCandidates({ candidates }: { candidates: UnverifiedCandidate[] }) {
+  if (!candidates.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="unverified-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="unverified-heading">未验证候选</h3>
+        <span>缺证据，不参与正式推荐</span>
+      </div>
+      <ul className={styles.decisionList}>
+        {candidates.map((candidate) => (
+          <li key={`${candidate.platform}-${candidate.item_id}`}>
+            <div className={styles.decisionItemHeader}>
+              <strong>{candidate.title}</strong>
+              <span>{candidate.platform.toUpperCase()} · ¥{candidate.landed_cny.toFixed(0)}</span>
+            </div>
+            <p>{candidate.reason}</p>
+            <ul className={styles.evaluationList}>
+              {candidate.constraint_evaluations
+                .filter((evaluation) => evaluation.status === "unknown")
+                .map((evaluation) => (
+                  <EvaluationLine
+                    key={`${candidate.item_id}-${evaluation.constraint.id}`}
+                    evaluation={evaluation}
+                  />
+                ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function Exclusions({ exclusions }: { exclusions: ConstraintExclusion[] }) {
+  if (!exclusions.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="exclusion-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="exclusion-heading">排除原因</h3>
+        <span>{exclusions.length} 个候选未满足硬性条件</span>
+      </div>
+      <ul className={styles.decisionList}>
+        {exclusions.map((exclusion) => (
+          <li key={`${exclusion.platform}-${exclusion.item_id}`}>
+            <div className={styles.decisionItemHeader}>
+              <strong>{exclusion.title}</strong>
+              <span>{exclusion.violated_count} 项违反</span>
+            </div>
+            <ul className={styles.evaluationList}>
+              {exclusion.violated_constraints.map((evaluation) => (
+                <EvaluationLine
+                  key={`${exclusion.item_id}-${evaluation.constraint.id}`}
+                  evaluation={evaluation}
+                />
+              ))}
+            </ul>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function DecisionTransparency({ state }: { state: AgentState }) {
+  const result = state.result;
+  if (!result) return null;
+  const assumptions = result.working_assumptions ?? [];
+  const unverified = result.unverified_candidates ?? [];
+  const exclusions = result.exclusions ?? [];
+  const suggestions = result.relaxation_suggestions ?? [];
+  const isNoMatch = result.match_status === "no_match" || result.recommendations.length === 0;
+
+  return (
+    <div className={styles.decisionTransparency}>
+      {isNoMatch && (
+        <section className={styles.noMatch} role="status" aria-label="无匹配结果">
+          <strong>没有满足全部硬性条件的候选</strong>
+          <span>这是成功的 No-Match Result；平台数据可用，但没有证据充分且满足约束的推荐。</span>
+        </section>
+      )}
+      <WorkingAssumptions assumptions={assumptions} />
+      <UnverifiedCandidates candidates={unverified} />
+      <Exclusions exclusions={exclusions} />
+      {suggestions.length > 0 && (
+        <section className={styles.decisionSection} aria-labelledby="relaxation-heading">
+          <div className={styles.decisionSectionHeader}>
+            <h3 id="relaxation-heading">约束放宽建议</h3>
+            <span>需你确认后才会开始新任务</span>
+          </div>
+          <ul className={styles.assumptionList}>
+            {suggestions.map((suggestion) => (
+              <li key={suggestion.constraint.id}>
+                <strong>{suggestion.constraint.label}</strong>
+                <span>{suggestion.suggestion}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </div>
+  );
+}
+
 function ResultDisclosure({ state }: { state: AgentState }) {
   const result = state.result;
   if (!result) return null;
@@ -476,6 +615,7 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
         </p>
       )}
       <ProviderDisclosure state={state} />
+      <DecisionTransparency state={state} />
 
       <div
         id="result-panel"

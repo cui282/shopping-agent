@@ -400,6 +400,138 @@
   color: color-mix(in oklch, var(--warning) 68%, var(--ink));
 }
 
+.decisionTransparency {
+  display: grid;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+
+.noMatch {
+  display: grid;
+  gap: 4px;
+  padding: 13px 15px;
+  border-left: 3px solid var(--warning);
+  color: var(--ink);
+  background: var(--warning-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.noMatch span {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.decisionSection {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.decisionSectionHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+}
+
+.decisionSectionHeader h3 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.decisionSectionHeader span {
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: right;
+}
+
+.assumptionList,
+.decisionList,
+.evaluationList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.assumptionList li,
+.decisionList > li {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.assumptionList strong,
+.decisionItemHeader strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  font-weight: 680;
+  line-height: 1.5;
+}
+
+.assumptionList span,
+.decisionList p,
+.decisionItemHeader span {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.decisionItemHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.evaluationList {
+  gap: 5px;
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+
+.evaluationList li {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: baseline;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.evaluationList li[data-status="unknown"] {
+  color: var(--warning);
+}
+
+.evaluationList li[data-status="violated"] {
+  color: var(--danger);
+}
+
+.evaluationList li span {
+  min-width: 0;
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.evaluationList code {
+  color: var(--ink-muted);
+  font-size: 9px;
+  overflow-wrap: anywhere;
+}
+
 .productGrid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -844,6 +976,27 @@
 
   .providerDisclosure ul {
     grid-template-columns: 1fr;
+  }
+
+  .decisionSectionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .decisionSectionHeader span {
+    text-align: left;
+  }
+
+  .decisionItemHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .evaluationList li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1px;
   }
 
   .productGrid,

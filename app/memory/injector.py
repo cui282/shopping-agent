@@ -6,6 +6,12 @@ from typing import Any
 from app.schemas import ShoppingPlan
 
 
+def _clean_avoided_value(value: str) -> str:
+    value = re.sub(r"^[\s：:、，,。；;！？!?]+|[\s：:、，,。；;！？!?]+$", "", value)
+    value = re.split(r"的(?=[\u4e00-\u9fffA-Za-z])", value, maxsplit=1)[0]
+    return value.rstrip("的").strip()
+
+
 def merge_preferences(plan: ShoppingPlan, remembered: dict[str, Any]) -> ShoppingPlan:
     values = plan.model_dump()
     for field in ("material_preferences", "style_preferences", "soft_preferences"):
@@ -21,8 +27,9 @@ def extract_preferences(query: str, plan: ShoppingPlan) -> dict[str, Any]:
         "soft_preferences": plan.soft_preferences,
     }
     avoided = [
-        match.group(1).strip()
+        cleaned
         for match in re.finditer(r"(?:不要|不含|避免)([^，。；,;]{1,12})", query)
+        if (cleaned := _clean_avoided_value(match.group(1)))
     ]
     if avoided:
         preferences["avoid"] = avoided

@@ -3,7 +3,15 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAgentState } from "../hooks/useShoppingAgent";
-import type { ProviderMetadata, Recommendation, TaskResultData } from "../types/api";
+import type {
+  ConstraintExclusion,
+  HardConstraint,
+  ProviderMetadata,
+  Recommendation,
+  TaskResultData,
+  UnverifiedCandidate,
+  WorkingAssumption,
+} from "../types/api";
 import ResearchContent from "./ResearchContent";
 
 afterEach(cleanup);
@@ -46,10 +54,11 @@ const evidenceRecommendation: Recommendation = {
   duty_tier: "标准",
   reason: "到手价与证据完整",
   rank: 1,
+  constraint_evaluations: [],
 };
 
 function renderCompletedResult(
-  recommendation = evidenceRecommendation,
+  recommendation: Recommendation | null = evidenceRecommendation,
   resultOverrides: Partial<TaskResultData> = {},
 ) {
   render(
@@ -60,7 +69,7 @@ function renderCompletedResult(
         result: {
           thread_id: "thread-evidence",
           final_answer: "已按可核验证据整理结果。",
-          recommendations: [recommendation],
+          recommendations: recommendation ? [recommendation] : [],
           comparison: [],
           files: [],
           provider_mode: "live",
@@ -157,5 +166,79 @@ describe("Product Evidence", () => {
     expect(screen.getByText(/eBay.*不可用/)).toBeTruthy();
     expect(screen.getByText("平台网关请求失败")).toBeTruthy();
     expect(screen.getByText("平台请求失败（TimeoutException）")).toBeTruthy();
+  });
+
+  it("separates no-match, unverified candidates, exclusions, and assumptions", () => {
+    const materialConstraint: HardConstraint = {
+      id: "material_not_contains_plastic",
+      kind: "material",
+      field: "material",
+      operator: "not_contains",
+      value: "塑料",
+      unit: null,
+      label: "材质不含塑料",
+    };
+    const unverified: UnverifiedCandidate = {
+      ...evidenceRecommendation,
+      reason: "缺少可验证证据：材质不含塑料",
+      constraint_evaluations: [
+        {
+          constraint: materialConstraint,
+          status: "unknown",
+          reason_code: "missing_product_evidence",
+          explanation: "无法从 Product Evidence 验证材质不含塑料。",
+          evidence: [],
+        },
+      ],
+    };
+    const exclusion: ConstraintExclusion = {
+      item_id: "excluded-one",
+      platform: "amazon",
+      title: "塑料耳机",
+      violated_count: 1,
+      violated_constraints: [
+        {
+          constraint: materialConstraint,
+          status: "violated",
+          reason_code: "prohibited_attribute_present",
+          explanation: "材质不含塑料，证据为 attributes.material=塑料。",
+          evidence: [
+            { field_path: "attributes.material", value: "塑料", source: "product_evidence" },
+          ],
+        },
+      ],
+    };
+    const assumptions: WorkingAssumption[] = [
+      {
+        code: "optional_color_unspecified",
+        field: "color",
+        value: "不设限",
+        reason: "请求未指定颜色。",
+      },
+    ];
+
+    renderCompletedResult(null, {
+      recommendations: [],
+      match_status: "no_match",
+      unverified_candidates: [unverified],
+      exclusions: [exclusion],
+      working_assumptions: assumptions,
+      relaxation_suggestions: [
+        {
+          constraint: materialConstraint,
+          suggestion: "当前任务未自动放宽。",
+          requires_confirmation: true,
+        },
+      ],
+    });
+
+    expect(screen.getByRole("status", { name: "无匹配结果" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "未验证候选" })).toBeTruthy();
+    expect(screen.getByText("缺少可验证证据：材质不含塑料")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "排除原因" })).toBeTruthy();
+    expect(screen.getByText("塑料耳机")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "工作假设" })).toBeTruthy();
+    expect(screen.getByText((_, element) => element?.textContent === "颜色：不设限")).toBeTruthy();
+    expect(screen.getByText("当前任务未自动放宽。")).toBeTruthy();
   });
 });

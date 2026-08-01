@@ -10,6 +10,46 @@ export type ProviderFailureReason =
   | "empty_response"
   | "sandbox_forbidden";
 export type OfferLinkKind = "product_detail" | "marketplace_search";
+export type ConstraintStatus = "satisfied" | "violated" | "unknown";
+export type ConstraintKind = "budget" | "material" | "attribute" | "specification";
+export type ConstraintOperator =
+  | "lte"
+  | "gte"
+  | "equals"
+  | "not_equals"
+  | "contains"
+  | "not_contains";
+
+export interface HardConstraint {
+  id: string;
+  kind: ConstraintKind;
+  field: string;
+  operator: ConstraintOperator;
+  value: string | number;
+  unit: string | null;
+  label: string;
+}
+
+export interface WorkingAssumption {
+  code: string;
+  field: string;
+  value: string;
+  reason: string;
+}
+
+export interface ConstraintEvidence {
+  field_path: string;
+  value: string | number | boolean | null;
+  source: "product_evidence" | "computed";
+}
+
+export interface ConstraintEvaluation {
+  constraint: HardConstraint;
+  status: ConstraintStatus;
+  reason_code: string;
+  explanation: string;
+  evidence: ConstraintEvidence[];
+}
 
 export interface ProductIdentity {
   gtin: string | null;
@@ -142,6 +182,39 @@ export interface Recommendation extends ProductEvidence {
   duty_tier: "免征" | "标准" | "高税";
   reason: string;
   rank: number;
+  constraint_evaluations: ConstraintEvaluation[];
+}
+
+export interface UnverifiedCandidate extends ProductEvidence {
+  image_url: string | null;
+  price: number;
+  currency: string;
+  price_cny: number;
+  shipping_cny: number;
+  duty_cny: number;
+  landed_cny: number;
+  eta_days: number;
+  rating: number | null;
+  sales: number | null;
+  attributes: Record<string, string | number | boolean | null>;
+  note: string | null;
+  duty_tier: "免征" | "标准" | "高税";
+  reason: string;
+  constraint_evaluations: ConstraintEvaluation[];
+}
+
+export interface ConstraintExclusion {
+  item_id: string;
+  platform: Marketplace;
+  title: string;
+  violated_count: number;
+  violated_constraints: ConstraintEvaluation[];
+}
+
+export interface ConstraintRelaxationSuggestion {
+  constraint: HardConstraint;
+  suggestion: string;
+  requires_confirmation: boolean;
 }
 
 export interface ComparisonItem extends ProductEvidence {
@@ -175,6 +248,11 @@ export interface TaskResultData {
   data_mode: DataMode;
   result_kind: ResultKind;
   unavailable_marketplaces: Marketplace[];
+  unverified_candidates?: UnverifiedCandidate[];
+  exclusions?: ConstraintExclusion[];
+  working_assumptions?: WorkingAssumption[];
+  relaxation_suggestions?: ConstraintRelaxationSuggestion[];
+  match_status?: "matched" | "no_match";
 }
 
 export interface TaskRequest {

@@ -325,7 +325,7 @@ async def run_agent(
         monitor,
         "item_picker",
         {"item_count": len(shipping.items), "max_items": 3},
-        lambda: item_picker(shipping, plan),
+        lambda: item_picker(shipping, plan, remembered_preferences=remembered),
     )
     await monitor.emit(
         thread_id,

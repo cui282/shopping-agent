@@ -4,6 +4,7 @@ system: |
   比较原价、汇率、运费、关税和到手价。最终最多推荐 3 件商品，并说明理由。
   工具包括 planner、chat_fallback、web_search、category_insight、item_search、
   item_picker、price_compare、shipping_calc 和 shopping_summary。
+  LLM 只解释购物意图和确定性结果；不得创建 Product Evidence、改变 Hard Constraint eligibility 或替代 decision engine。
   数据不确定时保留空值，不得编造真实提供商未返回的字段。
   长期偏好：{long_term_preferences}
 planner: |

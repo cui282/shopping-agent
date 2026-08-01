@@ -270,7 +270,19 @@ Uploaded references and user preferences are not task-owned and are therefore no
   "provider_mode": "mixed",
   "data_mode": "mixed",
   "result_kind": "partial",
+  "match_status": "matched",
   "unavailable_marketplaces": ["ebay"],
+  "working_assumptions": [
+    {
+      "code": "optional_color_unspecified",
+      "field": "color",
+      "value": "不设限",
+      "reason": "请求未指定颜色，保留 Product Evidence 中可验证的各色候选。"
+    }
+  ],
+  "unverified_candidates": [],
+  "exclusions": [],
+  "relaxation_suggestions": [],
   "providers": {
     "amazon": {
       "source": "live",
@@ -301,6 +313,11 @@ Uploaded references and user preferences are not task-owned and are therefore no
 Evidence from at least one enabled marketplace and lists every unavailable marketplace in
 `unavailable_marketplaces` and `providers`. When all enabled marketplaces are unavailable, no
 result is emitted and the terminal error code is `providers_unavailable`.
+
+`match_status` is `matched` or `no_match` and is independent of `result_kind`: `no_match` is a
+successful result with usable marketplace data but no candidate that is both fully verified and
+compliant with every Hard Constraint. It must not be converted into a provider error. A `no_match`
+result may contain `unverified_candidates` and `exclusions` for transparent follow-up.
 
 Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or
 `unavailable`. `failure_reason` is nullable and uses the stable provider failure codes above.
@@ -379,6 +396,29 @@ Recommendation-only fields are `reason` and `rank`. Both recommendations and com
 include normalized `price_cny`, `shipping_cny`, `duty_cny`, `landed_cny`, `eta_days`, `duty_tier`,
 and nullable estimation `note`. Unknown optional Product Evidence remains `null` and is never
 filled by Agent Interpretation.
+
+Each Recommendation contains `constraint_evaluations`. Every evaluation has the normalized
+`constraint`, a three-valued `status` (`satisfied`, `violated`, or `unknown`), a stable
+`reason_code`, an explanation, and the Product Evidence or computed value supporting the result.
+Only candidates whose evaluations are all `satisfied` can appear in `recommendations`.
+
+`unverified_candidates` uses the same normalized offer and landed-cost fields as a recommendation,
+plus `reason` and `constraint_evaluations`. Any `unknown` evaluation sends the candidate to this
+separate collection; it never participates in formal recommendations.
+
+`exclusions` contains `item_id`, `platform`, `title`, `violated_count`, and
+`violated_constraints`. Each violated constraint retains its machine-readable reason and evidence.
+`working_assumptions` exposes optional defaults such as an unspecified colour or style. They are
+visible assumptions, not Blocking Ambiguities or Hard Constraints. `relaxation_suggestions` only
+describes possible changes and has `requires_confirmation=true`; the current task never applies a
+relaxation automatically.
+
+The normalized task intent represents budget, material, and specification Hard Constraints with
+`id`, `kind`, `field`, `operator`, `value`, `unit`, and `label`. Chinese negative expressions such
+as `不要塑料的` normalize to a `material` constraint with `operator=not_contains` and value `塑料`.
+Remembered Preference is passed separately and remains a soft default; it cannot add a Hard
+Constraint or override explicit current-task intent. The LLM may explain intent and results only;
+Product Evidence, eligibility, and the deterministic outcome remain outside the LLM boundary.
 
 ## Upload and files
 

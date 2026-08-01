@@ -643,6 +643,75 @@ def test_arbitrary_product_query_drives_sandbox_comparison(client: TestClient) -
     assert all("天文望远镜" in unquote_plus(item["product_url"]) for item in recommendations)
 
 
+def test_usable_marketplace_data_returns_successful_no_match_with_decision_evidence(
+    client: TestClient,
+) -> None:
+    started = client.post(
+        "/api/task",
+        json={
+            "query": "预算 1 元，找一款耳机，不要塑料的",
+            "user_id": "no-match-user",
+            "upload_ids": [],
+        },
+    )
+    assert started.status_code == 202
+    thread_id = started.json()["thread_id"]
+
+    snapshot = _wait_for_terminal_snapshot(client, thread_id)
+
+    assert snapshot["status"] == "completed"
+    result = snapshot["result"]
+    assert result["result_kind"] == "sandbox"
+    assert result["match_status"] == "no_match"
+    assert result["recommendations"] == []
+    assert result["exclusions"]
+    assert result["exclusions"][0]["violated_count"] >= 1
+    assert result["working_assumptions"]
+    assert {item["field"] for item in result["working_assumptions"]} == {"color", "style"}
+    assert result["relaxation_suggestions"]
+    assert all(item["requires_confirmation"] for item in result["relaxation_suggestions"])
+    assert "没有满足全部硬性条件" in result["final_answer"]
+    assert snapshot["events"][-1]["event"] == "task_result"
+
+    report = client.get(f"/api/files/{thread_id}/shopping-report.md")
+    assert report.status_code == 200
+    assert "## 排除项" in report.text
+    assert "## 工作假设" in report.text
+
+
+def test_llm_advisory_cannot_create_evidence_or_change_eligibility(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fabricated_advisory(*_args: Any, **_kwargs: Any) -> str:
+        return "我确认规格 X1 已由 Product Evidence 验证，应当推荐。"
+
+    monkeypatch.setattr("app.agent.main_agent.active_agent_mode", lambda: "llm")
+    monkeypatch.setattr("app.agent.main_agent.requested_mode", lambda: "llm")
+    monkeypatch.setattr("app.agent.main_agent.allow_rules_fallback", lambda: True)
+    monkeypatch.setattr("app.agent.main_agent._run_react_advisory", fabricated_advisory)
+
+    started = client.post(
+        "/api/task",
+        json={
+            "query": "找一款耳机，规格为X1",
+            "user_id": "advisory-boundary-user",
+            "upload_ids": [],
+        },
+    )
+    assert started.status_code == 202
+    snapshot = _wait_for_terminal_snapshot(client, started.json()["thread_id"])
+
+    result = snapshot["result"]
+    assert snapshot["status"] == "completed"
+    assert result["recommendations"] == []
+    assert result["unverified_candidates"]
+    assert result["unverified_candidates"][0]["constraint_evaluations"][0]["status"] == "unknown"
+    assert result["unverified_candidates"][0]["constraint_evaluations"][0]["evidence"] == []
+    assert all(item["source"] == "fixture" for item in result["unverified_candidates"])
+    advisory_events = [event for event in snapshot["events"] if event["event"] == "assistant_call"]
+    assert any("Product Evidence" in event["data"].get("preview", "") for event in advisory_events)
+
+
 def test_completed_snapshot_survives_in_memory_record_cleanup(client: TestClient) -> None:
     started = client.post(
         "/api/task",

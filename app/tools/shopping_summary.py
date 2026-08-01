@@ -85,8 +85,13 @@ async def shopping_summary(
                 )
             )
         final_answer = "\n".join(lines)
-    elif comparison:
-        final_answer = "当前候选都不满足预算或材质约束。建议提高预算或放宽一项条件。"
+    elif picks.unverified_candidates:
+        final_answer = (
+            f"当前没有可验证的推荐；{len(picks.unverified_candidates)} 个候选缺少硬性条件证据。"
+            "补充商品材质或规格证据后再判断。"
+        )
+    elif picks.exclusions or comparison:
+        final_answer = "当前没有满足全部硬性条件的候选。可以查看排除原因，并在确认后放宽条件。"
     else:
         final_answer = "已启用平台没有返回可比较的候选商品。请调整关键词后重试。"
 
@@ -108,6 +113,32 @@ async def shopping_summary(
             f"{item.shipping_cny:.2f} | {item.duty_cny:.2f} | {item.landed_cny:.2f} | "
             f"{item.eta_days}天 | {item.source} |"
         )
+    if picks.working_assumptions:
+        markdown_lines.extend(["", "## 工作假设", ""])
+        markdown_lines.extend(
+            f"- {assumption.field}：{assumption.value}。{assumption.reason}"
+            for assumption in picks.working_assumptions
+        )
+    if picks.unverified_candidates:
+        markdown_lines.extend(["", "## 未验证候选", ""])
+        for candidate in picks.unverified_candidates:
+            markdown_lines.append(f"- {candidate.title}：{candidate.reason}")
+            for evaluation in candidate.constraint_evaluations:
+                if evaluation.status == "unknown":
+                    markdown_lines.append(
+                        f"  - {evaluation.constraint.label}：{evaluation.reason_code}"
+                    )
+    if picks.exclusions:
+        markdown_lines.extend(["", "## 排除项", ""])
+        for exclusion in picks.exclusions:
+            reasons = "；".join(
+                f"{item.constraint.label}（{item.reason_code}）"
+                for item in exclusion.violated_constraints
+            )
+            markdown_lines.append(f"- {exclusion.title}：{reasons}")
+    if picks.relaxation_suggestions:
+        markdown_lines.extend(["", "## 约束放宽建议", ""])
+        markdown_lines.extend(f"- {item.suggestion}" for item in picks.relaxation_suggestions)
     if provider_details:
         markdown_lines.extend(
             [
@@ -142,6 +173,11 @@ async def shopping_summary(
         data_mode=provider_mode,
         result_kind=result_kind,
         unavailable_marketplaces=unavailable,
+        unverified_candidates=picks.unverified_candidates,
+        exclusions=picks.exclusions,
+        working_assumptions=picks.working_assumptions,
+        relaxation_suggestions=picks.relaxation_suggestions,
+        match_status=picks.match_status,
     )
     json_path.write_text(
         json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",

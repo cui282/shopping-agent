@@ -16,6 +16,17 @@ ProviderFailureReason = Literal[
     "sandbox_forbidden",
 ]
 OfferLinkKind = Literal["product_detail", "marketplace_search"]
+ConstraintStatus = Literal["satisfied", "violated", "unknown"]
+ConstraintKind = Literal["budget", "material", "attribute", "specification"]
+ConstraintOperator = Literal[
+    "lte",
+    "gte",
+    "equals",
+    "not_equals",
+    "contains",
+    "not_contains",
+]
+ConstraintEvidenceSource = Literal["product_evidence", "computed"]
 EventName = Literal[
     "session_created",
     "assistant_call",
@@ -173,14 +184,39 @@ class MonitorEvent(StrictModel):
         return {**value, "data": validated.model_dump(mode="json")}
 
 
+class HardConstraint(StrictModel):
+    id: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    kind: ConstraintKind
+    field: str = Field(min_length=1)
+    operator: ConstraintOperator
+    value: str | int | float
+    unit: str | None = None
+    label: str = Field(min_length=1)
+
+
+class WorkingAssumption(StrictModel):
+    code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    field: str = Field(min_length=1)
+    value: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class RememberedPreference(StrictModel):
+    material_preferences: list[str] = Field(default_factory=list)
+    style_preferences: list[str] = Field(default_factory=list)
+    soft_preferences: list[str] = Field(default_factory=list)
+    avoid: list[str] = Field(default_factory=list)
+
+
 class ShoppingPlan(StrictModel):
     budget_cny: float | None = None
     category: str
     material_preferences: list[str] = Field(default_factory=list)
     style_preferences: list[str] = Field(default_factory=list)
-    hard_constraints: list[str] = Field(default_factory=list)
+    hard_constraints: list[HardConstraint] = Field(default_factory=list)
     soft_preferences: list[str] = Field(default_factory=list)
     destination: str = "中国大陆"
+    working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
     source: ProviderSource = "computed"
 
 
@@ -310,6 +346,39 @@ class LandedCost(PricePoint):
     duty_tier: Literal["免征", "标准", "高税"]
 
 
+class ConstraintEvidence(StrictModel):
+    field_path: str = Field(min_length=1)
+    value: str | int | float | bool | None = None
+    source: ConstraintEvidenceSource
+
+
+class ConstraintEvaluation(StrictModel):
+    constraint: HardConstraint
+    status: ConstraintStatus
+    reason_code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    explanation: str = Field(min_length=1)
+    evidence: list[ConstraintEvidence] = Field(default_factory=list)
+
+
+class ConstraintExclusion(StrictModel):
+    item_id: str
+    platform: Platform
+    title: str
+    violated_count: int = Field(ge=1)
+    violated_constraints: list[ConstraintEvaluation] = Field(min_length=1)
+
+
+class ConstraintRelaxationSuggestion(StrictModel):
+    constraint: HardConstraint
+    suggestion: str = Field(min_length=1)
+    requires_confirmation: bool = True
+
+
+class UnverifiedCandidate(LandedCost):
+    reason: str = Field(min_length=1)
+    constraint_evaluations: list[ConstraintEvaluation] = Field(min_length=1)
+
+
 class ShippingCalcOutput(StrictModel):
     destination: str
     items: list[LandedCost]
@@ -320,10 +389,16 @@ class ShippingCalcOutput(StrictModel):
 class Recommendation(LandedCost):
     reason: str
     rank: int
+    constraint_evaluations: list[ConstraintEvaluation]
 
 
 class ItemPickerOutput(StrictModel):
     recommendations: list[Recommendation]
+    unverified_candidates: list[UnverifiedCandidate] = Field(default_factory=list)
+    exclusions: list[ConstraintExclusion] = Field(default_factory=list)
+    working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
+    relaxation_suggestions: list[ConstraintRelaxationSuggestion] = Field(default_factory=list)
+    match_status: Literal["matched", "no_match"] = "matched"
     rejected_count: int
 
 
@@ -344,6 +419,11 @@ class ShoppingSummaryOutput(StrictModel):
     data_mode: DataMode = "live"
     result_kind: ResultKind = "live"
     unavailable_marketplaces: list[Platform] = Field(default_factory=list)
+    unverified_candidates: list[UnverifiedCandidate] = Field(default_factory=list)
+    exclusions: list[ConstraintExclusion] = Field(default_factory=list)
+    working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
+    relaxation_suggestions: list[ConstraintRelaxationSuggestion] = Field(default_factory=list)
+    match_status: Literal["matched", "no_match"] = "matched"
 
     @model_validator(mode="after")
     def normalize_result_contract(self) -> ShoppingSummaryOutput:
