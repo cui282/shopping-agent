@@ -2,6 +2,7 @@ export type Marketplace = "amazon" | "shopee" | "aliexpress" | "ebay" | string;
 
 export type ProviderSource = "live" | "curated" | "fixture" | "computed";
 export type DataMode = "live" | "sandbox" | "mixed";
+export type ReportFormat = "markdown" | "json" | "pdf";
 export type ProviderMode = DataMode | "unverified";
 export type ResearchMode = "product_research" | "exact_offer_comparison";
 export type ResultKind = "live" | "sandbox" | "partial";
@@ -246,6 +247,7 @@ export type MonitorEventName =
   | "tool_start"
   | "tool_end"
   | "fork"
+  | "report_generated"
   | "task_result"
   | "task_cancelled"
   | "clarification_required"
@@ -296,6 +298,12 @@ export interface MonitorEventDataMap {
   tool_start: { tool_name: string; args: Record<string, unknown>; data_mode: DataMode };
   tool_end: ToolEndEventData;
   fork: ForkEventData;
+  report_generated: {
+    snapshot_id: string;
+    snapshot_effective_at: string;
+    files: GeneratedFile[];
+    data_mode: DataMode;
+  };
   task_result: TaskResultData;
   task_cancelled: { thread_id: string; data_mode: DataMode };
   clarification_required: ClarificationPrompt & { data_mode: DataMode };
@@ -424,8 +432,11 @@ export interface ComparisonItem extends ProductEvidence {
 }
 
 export interface GeneratedFile {
+  file_id: string | null;
+  format: ReportFormat | null;
   name: string;
   url: string;
+  content_type: string | null;
 }
 
 export interface TaskResultData {
@@ -536,6 +547,34 @@ export interface TaskRerunResponse {
 
 export interface RecentResearchResponse {
   snapshots: TaskSnapshot[];
+}
+
+export interface ReportNotice {
+  code: string;
+  message: string;
+}
+
+export interface ResearchReportSnapshot extends TaskResultData {
+  report_schema_version: "1";
+  snapshot_id: string;
+  snapshot_effective_at: string;
+  snapshot_created_at: string;
+  snapshot_status: "completed";
+  user_id: string;
+  query: string;
+  lineage: SnapshotLineage | null;
+  notices: ReportNotice[];
+}
+
+export interface ReportListResponse {
+  status: "ready";
+  snapshot_id: string;
+  snapshot_effective_at: string;
+  files: GeneratedFile[];
+}
+
+export interface ReportGenerationResponse extends ReportListResponse {
+  idempotent: boolean;
 }
 
 export interface UploadResponse {

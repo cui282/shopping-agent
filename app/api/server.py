@@ -42,6 +42,11 @@ from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.commands import execute_memory_commands
 from app.memory.store import PreferenceStore, PreferenceStoreError, build_preference_store
+from app.reports import (
+    ReportGenerationError,
+    generate_reports,
+    report_file_links,
+)
 from app.schemas import (
     ClarificationCommand,
     ClarificationCommandResponse,
@@ -62,6 +67,9 @@ from app.schemas import (
     ProviderCapability,
     ReadinessResponse,
     RememberedPreference,
+    ReportGeneratedEventData,
+    ReportGenerationResponse,
+    ReportListResponse,
     RerunCommand,
     ResearchHistoryResponse,
     ShoppingPlan,
@@ -344,6 +352,82 @@ async def request_id_middleware(request: Request, call_next):
     return response
 
 
+def _record_task_result(
+    record: TaskRecord,
+    thread_id: str,
+    message: str,
+    data: dict[str, Any],
+    event_id: str,
+    timestamp: str,
+) -> tuple[MonitorEvent, MonitorEvent]:
+    task_data_mode = record.snapshot.data_mode
+    result = ShoppingSummaryOutput.model_validate(data)
+    if result.data_mode != task_data_mode:
+        raise RuntimeError(
+            f"task result data mode {result.data_mode} does not match task mode {task_data_mode}"
+        )
+    files = report_file_links(record.snapshot)
+    result = result.model_copy(update={"files": files})
+    terminal_snapshot = record.snapshot.model_copy(
+        update={
+            "status": "completed",
+            "updated_at": timestamp,
+            "result": result,
+            "snapshot_id": record.snapshot.snapshot_id or thread_id,
+            "resolved_query": result.resolved_query or record.snapshot.resolved_query,
+            "resolved_intent": result.resolved_intent or record.snapshot.resolved_intent,
+            "mode": result.mode,
+            "working_assumptions": result.working_assumptions,
+            "applied_preferences": result.applied_preferences,
+            "task_overrides": result.task_overrides,
+            "constraint_relaxations": result.constraint_relaxations,
+            "provider_coverage": result.providers,
+            "product_evidence": result.product_evidence,
+            "exchange_rate": result.exchange_rate,
+            "report_references": files,
+            "error_code": None,
+            "error": None,
+        }
+    )
+    try:
+        generate_reports(terminal_snapshot, session_dir(thread_id))
+    except ReportGenerationError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    previous_sequence = record.snapshot.events[-1].sequence if record.snapshot.events else 0
+    report_event = MonitorEvent(
+        event_id=f"evt-{uuid.uuid4().hex}",
+        thread_id=thread_id,
+        run_id=record.run_id,
+        sequence=previous_sequence + 1,
+        event="report_generated",
+        message="研究报告已生成",
+        data=ReportGeneratedEventData(
+            snapshot_id=terminal_snapshot.snapshot_id,
+            snapshot_effective_at=timestamp,
+            files=files,
+            data_mode=task_data_mode,
+        ).model_dump(mode="json"),
+        timestamp=timestamp,
+    )
+    envelope = MonitorEvent(
+        event_id=event_id,
+        thread_id=thread_id,
+        run_id=record.run_id,
+        sequence=previous_sequence + 2,
+        event="task_result",
+        message=message,
+        data={**result.model_dump(mode="json"), "data_mode": task_data_mode},
+        timestamp=timestamp,
+    )
+    snapshot = terminal_snapshot.model_copy(
+        update={"events": [*record.snapshot.events, report_event, envelope]}
+    )
+    _persist_snapshot(snapshot)
+    record.snapshot = snapshot
+    return report_event, envelope
+
+
 def _record_event(
     thread_id: str,
     event: EventName,
@@ -352,7 +436,7 @@ def _record_event(
     event_id: str,
     timestamp: str,
     emitted_run_id: str | None,
-) -> MonitorEvent:
+) -> MonitorEvent | tuple[MonitorEvent, MonitorEvent]:
     record = records.get(thread_id)
     if record is None:
         raise RuntimeError(f"cannot record an event for unknown task {thread_id}")
@@ -366,6 +450,7 @@ def _record_event(
         "tool_start": {"running"},
         "tool_end": {"running"},
         "fork": {"running"},
+        "report_generated": {"completed"},
         "task_result": {"running"},
         "task_cancelled": {"running", "awaiting_clarification"},
         "clarification_required": {"running"},
@@ -378,6 +463,9 @@ def _record_event(
         raise RuntimeError(
             f"event {event} cannot transition task {thread_id} from {current_status}"
         )
+
+    if event == "task_result":
+        return _record_task_result(record, thread_id, message, data, event_id, timestamp)
 
     sequence = record.snapshot.events[-1].sequence + 1 if record.snapshot.events else 1
     task_data_mode = record.snapshot.data_mode
@@ -396,31 +484,7 @@ def _record_event(
         "events": [*record.snapshot.events, envelope],
         "updated_at": timestamp,
     }
-    if event == "task_result":
-        result = ShoppingSummaryOutput.model_validate(data)
-        if result.data_mode != task_data_mode:
-            raise RuntimeError(
-                f"task result data mode {result.data_mode} does not match task mode {task_data_mode}"
-            )
-        changes.update(
-            status="completed",
-            result=result,
-            snapshot_id=record.snapshot.snapshot_id or thread_id,
-            resolved_query=result.resolved_query or record.snapshot.resolved_query,
-            resolved_intent=result.resolved_intent or record.snapshot.resolved_intent,
-            mode=result.mode,
-            working_assumptions=result.working_assumptions,
-            applied_preferences=result.applied_preferences,
-            task_overrides=result.task_overrides,
-            constraint_relaxations=result.constraint_relaxations,
-            provider_coverage=result.providers,
-            product_evidence=result.product_evidence,
-            exchange_rate=result.exchange_rate,
-            report_references=result.files,
-            error_code=None,
-            error=None,
-        )
-    elif event == "intent_resolved":
+    if event == "intent_resolved":
         resolved = IntentResolvedEventData.model_validate(event_data)
         changes.update(
             resolved_query=resolved.resolved_query,
@@ -1002,6 +1066,70 @@ async def recent_research(
 @app.get("/api/research/{thread_id}", response_model=TaskSnapshot)
 async def get_research_snapshot(thread_id: str) -> TaskSnapshot:
     return await get_task(thread_id)
+
+
+def _load_report_snapshot(thread_id: str, *, rebuild_missing: bool = True) -> TaskSnapshot:
+    record = records.get(thread_id)
+    snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "research_snapshot_not_found",
+                "message": "Research Snapshot not found",
+            },
+        )
+    if snapshot.status != "completed" or snapshot.result is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "reports_not_available",
+                "message": "Reports are available only for a completed Research Snapshot",
+            },
+        )
+    files = report_file_links(snapshot)
+    result = snapshot.result.model_copy(update={"files": files})
+    effective = snapshot.model_copy(update={"result": result, "report_references": files})
+    directory = safe_join(output_root(), thread_id)
+    missing = [file for file in files if not (directory / file.name).is_file()]
+    if missing and rebuild_missing:
+        try:
+            generate_reports(effective, directory)
+        except ReportGenerationError as exc:
+            logger.exception("failed to rebuild reports", extra={"thread_id": thread_id})
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "report_generation_failed", "message": str(exc)},
+            ) from exc
+    return effective
+
+
+@app.get("/api/task/{thread_id}/reports", response_model=ReportListResponse)
+@app.get("/api/reports/{thread_id}", response_model=ReportListResponse)
+async def list_reports(thread_id: str) -> ReportListResponse:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="invalid thread id")
+    snapshot = _load_report_snapshot(thread_id)
+    assert snapshot.result is not None
+    return ReportListResponse(
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_effective_at=snapshot.updated_at,
+        files=snapshot.result.files,
+    )
+
+
+@app.post("/api/task/{thread_id}/reports", response_model=ReportGenerationResponse)
+async def generate_task_reports(thread_id: str) -> ReportGenerationResponse:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="invalid thread id")
+    snapshot = _load_report_snapshot(thread_id)
+    assert snapshot.result is not None
+    return ReportGenerationResponse(
+        snapshot_id=snapshot.snapshot_id,
+        snapshot_effective_at=snapshot.updated_at,
+        files=snapshot.result.files,
+        idempotent=True,
+    )
 
 
 @app.post("/api/task/{thread_id}/rerun", response_model=TaskRerunResponse)
@@ -1632,12 +1760,18 @@ async def upload_reference(file: Annotated[UploadFile, File()]) -> UploadRespons
 
 @app.get("/api/files/{thread_id}/{name}")
 async def download_file(thread_id: str, name: str) -> FileResponse:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="invalid thread id")
+    if not name or "/" in name or "\\" in name or name in {".", ".."}:
+        raise HTTPException(status_code=400, detail="invalid file path")
     record = records.get(thread_id)
-    snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
-    if snapshot is None or snapshot.result is None:
+    original = record.snapshot if record is not None else _load_snapshot(thread_id)
+    if original is None or original.result is None or original.status != "completed":
         raise HTTPException(status_code=404, detail="file not found")
-    allowed_names = {file.name for file in snapshot.result.files}
-    if name not in allowed_names:
+    snapshot = _load_report_snapshot(thread_id)
+    assert snapshot.result is not None
+    file_ref = next((file for file in snapshot.result.files if file.name == name), None)
+    if file_ref is None:
         raise HTTPException(status_code=404, detail="file not found")
     try:
         path = safe_join(output_root(), thread_id, name)
@@ -1645,7 +1779,12 @@ async def download_file(thread_id: str, name: str) -> FileResponse:
         raise HTTPException(status_code=400, detail="invalid file path") from exc
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(path, filename=path.name)
+    return FileResponse(
+        path,
+        filename=file_ref.name,
+        media_type=file_ref.content_type or "application/octet-stream",
+        headers={"X-Report-ID": file_ref.file_id or f"{snapshot.snapshot_id}:{file_ref.format}"},
+    )
 
 
 def _preference_record(value: dict[str, Any]) -> dict[str, list[str]]:

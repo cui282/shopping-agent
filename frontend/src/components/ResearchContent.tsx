@@ -18,6 +18,7 @@ import type {
   ConstraintEvaluation,
   CalculationExclusion,
   ConstraintExclusion,
+  GeneratedFile,
   IdentityEvidence,
   PreferenceDecision,
   RankingDimension,
@@ -38,6 +39,53 @@ import {
 import styles from "./ResearchContent.module.css";
 
 export type ResultView = "recommendations" | "comparison";
+
+const reportFormatLabels: Record<string, string> = {
+  markdown: "Markdown",
+  json: "JSON",
+  pdf: "PDF",
+};
+
+function reportFormat(file: GeneratedFile): string {
+  if (file.format) return file.format;
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  return extension === "md" ? "markdown" : extension ?? "report";
+}
+
+function ReportDownloads({ files }: { files: GeneratedFile[] }) {
+  const [status, setStatus] = useState(
+    files.length ? `${files.length} 种格式已准备` : "暂无报告可下载",
+  );
+  return (
+    <div className={styles.downloads} aria-label="研究报告">
+      <span>研究报告</span>
+      <span className={styles.downloadStatus} role="status" aria-label="研究报告下载" aria-live="polite">
+        {status}
+      </span>
+      {files.map((file) => {
+        const format = reportFormat(file);
+        const label = reportFormatLabels[format] ?? file.name;
+        const url = resolveApiUrl(file.url);
+        return url ? (
+          <a
+            className={styles.downloadLink}
+            key={file.file_id ?? file.url}
+            href={url}
+            download={file.name}
+            aria-label={`下载 ${label} 报告`}
+            onClick={() => setStatus(`${label} 下载已开始`)}
+          >
+            <Download size={16} aria-hidden="true" /> {label}
+          </a>
+        ) : (
+          <span className={styles.invalidDownload} role="alert" key={file.file_id ?? file.url}>
+            {label} 报告链接不可用
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 interface ResearchContentProps {
   state: AgentState;
@@ -968,23 +1016,7 @@ export default function ResearchContent({
         )}
       </div>
 
-      {result?.files.length ? (
-        <div className={styles.downloads} aria-label="研究报告">
-          <span>研究报告</span>
-          {result.files.map((file) => {
-            const url = resolveApiUrl(file.url);
-            return url ? (
-              <a key={file.url} href={url} download>
-                <Download size={16} aria-hidden="true" /> {file.name}
-              </a>
-            ) : (
-              <span className={styles.invalidDownload} key={file.url}>
-                {file.name} 链接不可用
-              </span>
-            );
-          })}
-        </div>
-      ) : null}
+      {result?.files.length ? <ReportDownloads files={result.files} /> : null}
     </section>
   );
 }

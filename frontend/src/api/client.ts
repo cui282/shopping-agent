@@ -4,6 +4,8 @@ import type {
   PreferenceDeleteResponse,
   PreferencesResponse,
   ReadinessResponse,
+  ReportGenerationResponse,
+  ReportListResponse,
   ClarificationCommandResponse,
   ConstraintRelaxationChange,
   RecentResearchResponse,
@@ -106,6 +108,13 @@ export const api = {
     requestJson<TaskSnapshot>(`/api/task/${encodeURIComponent(threadId)}`, control),
   recentResearch: (userId: string, control: RequestControl = {}) =>
     requestJson<RecentResearchResponse>(`/api/research?user_id=${encodeURIComponent(userId)}`, control),
+  listReports: (threadId: string, control: RequestControl = {}) =>
+    requestJson<ReportListResponse>(`/api/task/${encodeURIComponent(threadId)}/reports`, control),
+  generateReports: (threadId: string, control: RequestControl = {}) =>
+    requestJson<ReportGenerationResponse>(`/api/task/${encodeURIComponent(threadId)}/reports`, {
+      method: "POST",
+      ...control,
+    }),
   rerunTask: (threadId: string, userId: string, idempotencyKey: string, control: RequestControl = {}) =>
     requestJson<TaskRerunResponse>(`/api/task/${encodeURIComponent(threadId)}/rerun`, {
       method: "POST",

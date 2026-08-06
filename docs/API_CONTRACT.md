@@ -167,6 +167,7 @@ Supported events:
 | `tool_start` | A typed tool started |
 | `tool_end` | A typed tool completed, including duration, `outcome`, source, provider status, failure reason, and fallback reason |
 | `fork` | A marketplace branch started with explicit `platform` and `demand` |
+| `report_generated` | Deterministic Markdown, JSON, and PDF artifacts were generated from the completed Research Snapshot; `data.files` carries stable file IDs and content types |
 | `intent_resolved` | The immutable task intent, Working Assumptions, applied Remembered Preference, Task Override, and any confirmed constraint changes were saved |
 | `task_result` | Terminal success; `data` is `ShoppingSummaryOutput` |
 | `task_cancelled` | Terminal cancellation |
@@ -291,6 +292,60 @@ authentication or authorization; a hosted deployment must enforce ownership at a
 `GET /api/research/{thread_id}` opens one snapshot and has no side effects. The existing
 `GET /api/task/{thread_id}` is the equivalent task-scoped read. Legacy snapshots missing the
 newer additive fields are normalized only in the response; the stored bytes are not rewritten.
+
+### Snapshot reports
+
+Completed snapshots expose one typed `ResearchReportSnapshot` projection. Markdown, JSON, and PDF
+are deterministic renderings of that same projection; report generation never calls a Marketplace
+Gateway, preference recall, an LLM, or an exchange-rate source. The projection keeps
+`snapshot_effective_at` and `lineage`, so reopening an older report does not describe it as current
+market state.
+
+The JSON download is a structured serialization of that projection (not a hand-built string). Its
+root fields retain the terminal `ShoppingSummaryOutput` contract plus `report_schema_version`,
+`snapshot_id`, `snapshot_effective_at`, `snapshot_created_at`, `snapshot_status`, `user_id`,
+`query`, `lineage`, and typed `notices`. Markdown and PDF surface the same notices and result
+evidence in human-readable sections.
+
+`GET /api/task/{thread_id}/reports` and its alias `GET /api/reports/{thread_id}` list the files:
+
+```json
+{
+  "status": "ready",
+  "snapshot_id": "thread-7b8cb4a9c23f",
+  "snapshot_effective_at": "2026-07-30T12:00:03Z",
+  "files": [
+    {
+      "file_id": "thread-7b8cb4a9c23f:markdown",
+      "format": "markdown",
+      "name": "shopping-report.md",
+      "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.md",
+      "content_type": "text/markdown; charset=utf-8"
+    },
+    {
+      "file_id": "thread-7b8cb4a9c23f:json",
+      "format": "json",
+      "name": "shopping-report.json",
+      "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.json",
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "file_id": "thread-7b8cb4a9c23f:pdf",
+      "format": "pdf",
+      "name": "shopping-report.pdf",
+      "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.pdf",
+      "content_type": "application/pdf"
+    }
+  ]
+}
+```
+
+`POST /api/task/{thread_id}/reports` is an idempotent report-generation command. It accepts no
+shopping input, requires `status=completed`, returns the same `files` list with `idempotent=true`,
+and may rebuild missing artifacts from the immutable snapshot. An unfinished task returns HTTP
+409 with `detail.code=reports_not_available`. The completed task timeline contains
+`report_generated` before the terminal `task_result` event; its `data` repeats the stable file
+list and effective time.
 
 `POST /api/task/{thread_id}/rerun` is the explicit Research Rerun command. Its required body is:
 
@@ -440,7 +495,27 @@ Uploaded references and user preferences are not task-owned and are therefore no
   "matching_offers": [],
   "alternative_candidates": [],
   "files": [
-    {"name": "shopping-report.md", "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.md"}
+    {
+      "file_id": "thread-7b8cb4a9c23f:markdown",
+      "format": "markdown",
+      "name": "shopping-report.md",
+      "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.md",
+      "content_type": "text/markdown; charset=utf-8"
+    },
+    {
+      "file_id": "thread-7b8cb4a9c23f:json",
+      "format": "json",
+      "name": "shopping-report.json",
+      "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.json",
+      "content_type": "application/json; charset=utf-8"
+    },
+    {
+      "file_id": "thread-7b8cb4a9c23f:pdf",
+      "format": "pdf",
+      "name": "shopping-report.pdf",
+      "url": "/api/files/thread-7b8cb4a9c23f/shopping-report.pdf",
+      "content_type": "application/pdf"
+    }
   ],
   "provider_mode": "mixed",
   "data_mode": "mixed",
@@ -733,7 +808,12 @@ return an identity clue for display or query assistance, but it cannot populate 
 identifiers, create `Identity Evidence`, or make an offer a Matching Offer; the same deterministic
 matcher remains the sole exact-mode eligibility gate.
 
-`GET /api/files/{thread_id}/{name}` serves only report files listed in the completed result. Paths outside a task directory and internal task state files are rejected.
+`GET /api/files/{thread_id}/{name}` serves only the stable report files listed in the completed
+result. It returns the file's declared `content_type`, `Content-Disposition: attachment` with the
+safe generated filename, and `X-Report-ID` with the stable `file_id`. Paths outside a task
+directory, traversal names, and internal task state files are rejected. If a completed report file
+is missing after a restart, the service deterministically rebuilds it from the Research Snapshot;
+this never starts shopping research.
 
 ## Preferences
 

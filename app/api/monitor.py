@@ -18,6 +18,7 @@ _MESSAGES = {
     "tool_start": "正在调用工具",
     "tool_end": "工具调用完成",
     "fork": "已创建并行检索分支",
+    "report_generated": "研究报告已生成",
     "task_result": "购物建议已生成",
     "task_cancelled": "购物任务已取消",
     "clarification_required": "等待澄清",
@@ -27,7 +28,7 @@ _MESSAGES = {
 
 EventRecorder = Callable[
     [str, EventName, str, dict[str, Any], str, str, str | None],
-    MonitorEvent,
+    MonitorEvent | tuple[MonitorEvent, ...],
 ]
 
 
@@ -62,7 +63,7 @@ class Monitor:
             event_data = data or {}
             event_run_id = run_id or get_run_id()
             if self._event_recorder is not None:
-                envelope = self._event_recorder(
+                recorded = self._event_recorder(
                     thread_id,
                     event,
                     event_message,
@@ -73,7 +74,7 @@ class Monitor:
                 )
             else:
                 self._sequences[thread_id] += 1
-                envelope = MonitorEvent(
+                recorded = MonitorEvent(
                     event_id=event_id,
                     thread_id=thread_id,
                     run_id=event_run_id or self._run_ids[thread_id],
@@ -83,8 +84,10 @@ class Monitor:
                     data=event_data,
                     timestamp=timestamp,
                 )
-            await self.connections.send_to_thread(thread_id, envelope.model_dump(mode="json"))
-        return envelope
+            envelopes = recorded if isinstance(recorded, tuple) else (recorded,)
+            for envelope in envelopes:
+                await self.connections.send_to_thread(thread_id, envelope.model_dump(mode="json"))
+        return envelopes[-1]
 
 
 monitor = Monitor()

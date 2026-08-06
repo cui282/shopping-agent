@@ -18,6 +18,7 @@ IdentityEvidenceBasis = Literal[
     "identifier", "material_variant_attributes", "insufficient", "not_required"
 ]
 ResultKind = Literal["live", "sandbox", "partial"]
+ReportFormat = Literal["markdown", "json", "pdf"]
 ProviderFailureReason = Literal[
     "not_configured",
     "request_failed",
@@ -66,6 +67,7 @@ EventName = Literal[
     "tool_start",
     "tool_end",
     "fork",
+    "report_generated",
     "task_result",
     "task_cancelled",
     "clarification_required",
@@ -250,6 +252,7 @@ class MonitorEvent(StrictModel):
             "tool_start": ToolStartEventData,
             "tool_end": ToolEndEventData,
             "fork": ForkEventData,
+            "report_generated": ReportGeneratedEventData,
             "task_cancelled": TaskCancelledEventData,
             "clarification_required": ClarificationRequiredEventData,
             "clarification_resolved": ClarificationResolvedEventData,
@@ -597,6 +600,36 @@ class LandedCost(PricePoint):
     delivery_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
 
 
+class ReportEvidence(StrictModel):
+    """Stable evidence projection shared by the human-readable report renderers."""
+
+    item_id: str
+    platform: Platform
+    marketplace: Platform
+    offer_id: str | None = None
+    title: str
+    original_price: float
+    original_currency: str
+    price_cny: float | None = None
+    shipping_cny: float | None = None
+    duty_cny: float | None = None
+    landed_cny: float | None = None
+    eta_days: int | None = None
+    rating: float | None = None
+    sales: int | None = None
+    image_url: str | None = None
+    attributes: dict[str, JsonValue] = Field(default_factory=dict)
+    identity: ProductIdentity = Field(default_factory=ProductIdentity)
+    identity_evidence: IdentityEvidence | None = None
+    variant_attributes: dict[str, str | int | float | bool | None] = Field(default_factory=dict)
+    availability: str | None = None
+    provenance: OfferProvenance | None = None
+    source: ProviderSource
+    retrieved_at: str | None = None
+    link_kind: OfferLinkKind | None = None
+    product_url: str | None = None
+
+
 class ConstraintEvidence(StrictModel):
     field_path: str = Field(min_length=1)
     value: str | int | float | bool | None = None
@@ -672,8 +705,43 @@ class ItemPickerOutput(StrictModel):
 
 
 class FileLink(StrictModel):
-    name: str
+    file_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:-]{1,180}$")
+    format: ReportFormat | None = None
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
     url: str
+    content_type: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_file_metadata(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        name = payload.get("name")
+        inferred = {
+            ".md": ("markdown", "text/markdown; charset=utf-8"),
+            ".json": ("json", "application/json; charset=utf-8"),
+            ".pdf": ("pdf", "application/pdf"),
+        }
+        if isinstance(name, str):
+            suffix = f".{name.rsplit('.', 1)[-1]}" if "." in name else ""
+            format_and_type = inferred.get(suffix)
+            if format_and_type is not None:
+                payload.setdefault("format", format_and_type[0])
+                payload.setdefault("content_type", format_and_type[1])
+        return payload
+
+
+class ReportNotice(StrictModel):
+    code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class ReportGeneratedEventData(StrictModel):
+    snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    snapshot_effective_at: str = Field(min_length=1)
+    files: list[FileLink] = Field(min_length=1)
+    data_mode: DataMode = "live"
 
 
 class ShoppingSummaryOutput(StrictModel):
@@ -823,6 +891,39 @@ class TaskSnapshot(StrictModel):
         if self.report_references and self.report_references != self.result.files:
             raise ValueError("snapshot and result report references must match")
         return self
+
+
+class ResearchReportSnapshot(ShoppingSummaryOutput):
+    """Immutable report projection built from one completed Research Snapshot."""
+
+    report_schema_version: Literal["1"] = "1"
+    snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    snapshot_effective_at: str = Field(min_length=1)
+    snapshot_created_at: str = Field(min_length=1)
+    snapshot_status: Literal["completed"] = "completed"
+    user_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    query: str = Field(min_length=1, max_length=4000)
+    lineage: SnapshotLineage | None = None
+    notices: list[ReportNotice] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_snapshot_projection(self) -> ResearchReportSnapshot:
+        if self.snapshot_id != self.thread_id:
+            raise ValueError("report snapshot and result thread IDs must match")
+        if self.resolved_intent is not None and self.resolved_intent.mode != self.mode:
+            raise ValueError("report snapshot and resolved intent modes must match")
+        return self
+
+
+class ReportListResponse(StrictModel):
+    status: Literal["ready"] = "ready"
+    snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    snapshot_effective_at: str = Field(min_length=1)
+    files: list[FileLink] = Field(min_length=1)
+
+
+class ReportGenerationResponse(ReportListResponse):
+    idempotent: bool = True
 
 
 class TaskSnapshotMessage(StrictModel):

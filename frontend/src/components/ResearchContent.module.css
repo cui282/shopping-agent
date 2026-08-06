@@ -1152,6 +1152,11 @@
   font-weight: 620;
 }
 
+.downloads .downloadStatus {
+  color: var(--accent);
+  font-weight: 620;
+}
+
 .downloads a {
   display: inline-flex;
   min-height: 40px;
@@ -1164,6 +1169,10 @@
   background: var(--surface);
   font-weight: 620;
   text-decoration: none;
+}
+
+.downloads .downloadLink {
+  overflow-wrap: anywhere;
 }
 
 .downloads .invalidDownload {

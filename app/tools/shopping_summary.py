@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import json
-
 from app.schemas import (
     CalculationExclusion,
     Candidate,
     ConstraintRelaxation,
     DataMode,
     ExchangeRateProvenance,
-    FileLink,
     ItemPickerOutput,
     LandedCost,
     PreferenceDecision,
@@ -18,7 +15,7 @@ from app.schemas import (
     ShoppingSummaryOutput,
     TaskOverride,
 )
-from app.utils.thread_ctx import get_session_dir, get_thread_id
+from app.utils.thread_ctx import get_thread_id
 
 
 def _rate_label(value: str) -> str:
@@ -53,10 +50,9 @@ async def shopping_summary(
     constraint_relaxations: list[ConstraintRelaxation] | None = None,
     product_evidence: list[Candidate] | None = None,
 ) -> ShoppingSummaryOutput:
-    """Create the terminal result and persist Markdown and JSON reports."""
+    """Create the typed terminal result; the API materializes reports from its snapshot."""
 
     thread_id = get_thread_id()
-    directory = get_session_dir()
     provider_details = providers or {}
     exchange_rate = exchange_rate or ExchangeRateProvenance(
         source=rate_source,
@@ -187,110 +183,6 @@ async def shopping_summary(
     else:
         final_answer = f"已启用平台没有返回可比较的候选商品。请调整关键词后重试。\n{rationale}"
 
-    markdown_lines = [
-        "# Shopping Agent 购物研究报告",
-        "",
-        final_answer,
-        "",
-        f"## Research Mode\n\n{mode_label}（{picks.mode}）",
-        "",
-        f"> {calculation_notice}",
-        "",
-        "## Matching Offer / 到手价比较",
-        "",
-        "| 平台 | 商品 | 商品价(原币) | 商品价(CNY) | 运费估算 | 关税估算 | 到手价 | 时效估算 | 来源 |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
-    ]
-    for item in comparison:
-        markdown_lines.append(
-            f"| {item.platform} | {item.title} | {item.currency} {item.price:.2f} | "
-            f"{item.price_cny:.2f} | {item.shipping_cny:.2f}（估算） | "
-            f"{item.duty_cny:.2f}（估算） | {item.landed_cny:.2f} | "
-            f"{item.eta_days}天（估算） | {item.source} |"
-        )
-    markdown_lines.extend(
-        [
-            "",
-            "## Ranking Profile",
-            "",
-            "优先级：" + " > ".join(picks.ranking_profile.priority_order),
-            "显式表达：" + ("是" if picks.ranking_profile.explicit else "否（默认以到手价优先）"),
-        ]
-    )
-    markdown_lines.extend(["", "## 偏好处理", ""])
-    if preference_decisions:
-        markdown_lines.extend(
-            f"- {preference_labels[item.status]}：{item.value}；"
-            f"来源：{'当前请求' if item.source == 'current_request' else 'Remembered Preference'}；"
-            f"{item.reason}"
-            for item in preference_decisions
-        )
-    else:
-        markdown_lines.append("- 本任务没有可应用的 Remembered Preference 或显式软偏好。")
-    if calculation_exclusions:
-        markdown_lines.extend(["", "## 计算排除", ""])
-        markdown_lines.extend(
-            f"- {item.title}（{item.item_id}）：{item.reason_code}，{item.reason}"
-            for item in calculation_exclusions
-        )
-    if picks.alternative_candidates:
-        markdown_lines.extend(["", "## Alternative Candidate", ""])
-        for candidate in picks.alternative_candidates:
-            evidence = candidate.identity_evidence
-            markdown_lines.append(
-                f"- {candidate.title}（{candidate.platform}）：{candidate.reason}"
-            )
-            markdown_lines.append(
-                f"  - Identity Evidence：{evidence.basis}；"
-                f"matched={', '.join(evidence.matched_fields) or '-'}；"
-                f"missing={', '.join(evidence.missing_fields) or '-'}；"
-                f"conflicting={', '.join(evidence.conflicting_fields) or '-'}"
-            )
-    if picks.working_assumptions:
-        markdown_lines.extend(["", "## 工作假设", ""])
-        markdown_lines.extend(
-            f"- {assumption.field}：{assumption.value}。{assumption.reason}"
-            for assumption in picks.working_assumptions
-        )
-    if picks.unverified_candidates:
-        markdown_lines.extend(["", "## 未验证候选", ""])
-        for candidate in picks.unverified_candidates:
-            markdown_lines.append(f"- {candidate.title}：{candidate.reason}")
-            for evaluation in candidate.constraint_evaluations:
-                if evaluation.status == "unknown":
-                    markdown_lines.append(
-                        f"  - {evaluation.constraint.label}：{evaluation.reason_code}"
-                    )
-    if picks.exclusions:
-        markdown_lines.extend(["", "## 排除项", ""])
-        for exclusion in picks.exclusions:
-            reasons = "；".join(
-                f"{item.constraint.label}（{item.reason_code}）"
-                for item in exclusion.violated_constraints
-            )
-            markdown_lines.append(f"- {exclusion.title}：{reasons}")
-    if picks.relaxation_suggestions:
-        markdown_lines.extend(["", "## 约束放宽建议", ""])
-        markdown_lines.extend(f"- {item.suggestion}" for item in picks.relaxation_suggestions)
-    if provider_details:
-        markdown_lines.extend(
-            [
-                "",
-                "## 数据提供方",
-                "",
-                "| 平台 | 状态 | 数据类型 | 稳定失败原因 | 说明 |",
-                "| --- | --- | --- | --- | --- |",
-            ]
-        )
-        for name, metadata in provider_details.items():
-            markdown_lines.append(
-                f"| {name} | {metadata.status} | {metadata.source} | "
-                f"{metadata.failure_reason or '-'} | {metadata.fallback_reason or '-'} |"
-            )
-    markdown_path = directory / "shopping-report.md"
-    json_path = directory / "shopping-report.json"
-    markdown_path.write_text("\n".join(markdown_lines) + "\n", encoding="utf-8")
-
     result = ShoppingSummaryOutput(
         thread_id=thread_id,
         final_answer=final_answer,
@@ -305,10 +197,7 @@ async def shopping_summary(
         mode=picks.mode,
         matching_offers=picks.matching_offers,
         alternative_candidates=picks.alternative_candidates,
-        files=[
-            FileLink(name=markdown_path.name, url=f"/api/files/{thread_id}/{markdown_path.name}"),
-            FileLink(name=json_path.name, url=f"/api/files/{thread_id}/{json_path.name}"),
-        ],
+        files=[],
         provider_mode=provider_mode,
         providers=provider_details,
         calculation_notice=calculation_notice,
@@ -324,9 +213,5 @@ async def shopping_summary(
         relaxation_suggestions=picks.relaxation_suggestions,
         match_status=picks.match_status,
         preference_decisions=preference_decisions,
-    )
-    json_path.write_text(
-        json.dumps(result.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
     return result

@@ -99,6 +99,7 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
     tool_start: tool ? `开始${toolLabel}` : "开始处理",
     tool_end: tool ? `${toolLabel}已完成` : "处理已完成",
     fork: "并行检索",
+    report_generated: "研究报告已生成",
     task_result: "推荐已生成",
     task_cancelled: "研究已取消",
     clarification_required: "等待确认",

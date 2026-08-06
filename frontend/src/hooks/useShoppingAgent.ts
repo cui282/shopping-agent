@@ -162,6 +162,15 @@ function snapshotAfterEvent(snapshot: TaskSnapshot | null, event: MonitorEvent):
       error: null,
     };
   }
+  if (event.event === "report_generated") {
+    return {
+      ...base,
+      report_references: event.data.files,
+      result: snapshot?.result
+        ? { ...snapshot.result, files: event.data.files }
+        : snapshot?.result ?? null,
+    };
+  }
   if (event.event === "task_cancelled") {
     return { ...base, status: "cancelled", result: null, clarification: null, error_code: null, error: null };
   }

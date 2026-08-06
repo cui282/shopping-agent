@@ -7,6 +7,7 @@ import type {
   AlternativeCandidate,
   CalculationExclusion,
   ConstraintExclusion,
+  GeneratedFile,
   HardConstraint,
   IdentityEvidence,
   ProviderMetadata,
@@ -189,6 +190,61 @@ describe("Product Evidence", () => {
     fireEvent.click(screen.getByRole("button", { name: "Research Rerun" }));
 
     expect(onRerun).toHaveBeenCalledOnce();
+  });
+
+  it("offers accessible downloads for every generated report format", () => {
+    const files: GeneratedFile[] = [
+      {
+        file_id: "thread-evidence:markdown",
+        format: "markdown",
+        name: "shopping-report.md",
+        url: "/api/files/thread-evidence/shopping-report.md",
+        content_type: "text/markdown; charset=utf-8",
+      },
+      {
+        file_id: "thread-evidence:json",
+        format: "json",
+        name: "shopping-report.json",
+        url: "/api/files/thread-evidence/shopping-report.json",
+        content_type: "application/json; charset=utf-8",
+      },
+      {
+        file_id: "thread-evidence:pdf",
+        format: "pdf",
+        name: "shopping-report.pdf",
+        url: "/api/files/thread-evidence/shopping-report.pdf",
+        content_type: "application/pdf",
+      },
+    ];
+    renderCompletedResult(evidenceRecommendation, { files });
+
+    expect(screen.getByRole("status", { name: "研究报告下载" }).textContent).toContain("3 种格式已准备");
+    const markdown = screen.getByRole("link", { name: "下载 Markdown 报告" });
+    const json = screen.getByRole("link", { name: "下载 JSON 报告" });
+    const pdf = screen.getByRole("link", { name: "下载 PDF 报告" });
+    expect(markdown.getAttribute("download")).toBe("shopping-report.md");
+    expect(json.getAttribute("download")).toBe("shopping-report.json");
+    expect(pdf.getAttribute("download")).toBe("shopping-report.pdf");
+    fireEvent.click(pdf);
+    expect(screen.getByRole("status", { name: "研究报告下载" }).textContent).toContain("PDF");
+    pdf.focus();
+    expect(document.activeElement).toBe(pdf);
+  });
+
+  it("discloses an invalid report link instead of exposing an unsafe download", () => {
+    renderCompletedResult(evidenceRecommendation, {
+      files: [
+        {
+          file_id: "thread-evidence:markdown",
+          format: "markdown",
+          name: "shopping-report.md",
+          url: "data:text/plain,unsafe",
+          content_type: "text/markdown; charset=utf-8",
+        },
+      ],
+    });
+
+    expect(screen.getByRole("alert").textContent).toContain("Markdown 报告链接不可用");
   });
 
   it("renders typed link semantics and verifiable offer evidence", () => {

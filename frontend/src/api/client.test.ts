@@ -113,6 +113,30 @@ describe("request lifecycle", () => {
     });
   });
 
+  it("lists and idempotently generates snapshot reports", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response(
+          JSON.stringify({
+            status: "ready",
+            snapshot_id: "thread-1",
+            snapshot_effective_at: "2026-08-06T00:00:00Z",
+            files: [],
+            idempotent: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.listReports("thread-1");
+    await api.generateReports("thread-1");
+
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/task/thread-1/reports");
+    expect(fetchMock.mock.calls[1][0]).toContain("/api/task/thread-1/reports");
+    expect(fetchMock.mock.calls[1][1]).toMatchObject({ method: "POST" });
+  });
+
   it("sends an explicit future preference command", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

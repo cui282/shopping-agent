@@ -73,6 +73,37 @@ function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
 }
 
 describe("agentReducer", () => {
+  it("folds the durable report generation event without changing task status", () => {
+    const initial = agentReducer(initialAgentState, {
+      type: "snapshot",
+      snapshot: taskSnapshot(),
+    });
+    const files = [
+      {
+        file_id: "thread-live:pdf",
+        format: "pdf",
+        name: "shopping-report.pdf",
+        url: "/api/files/thread-live/shopping-report.pdf",
+        content_type: "application/pdf",
+      },
+    ];
+    const next = agentReducer(initial, {
+      type: "event",
+      event: {
+        ...timelineEvent(1, "report_generated", {
+          snapshot_id: "thread-live",
+          snapshot_effective_at: "2026-07-30T12:00:00Z",
+          files,
+          data_mode: "live",
+        }),
+        thread_id: "thread-live",
+      },
+    });
+
+    expect(next.status).toBe("running");
+    expect(next.snapshot?.report_references).toEqual(files);
+  });
+
   it("folds a buffered task result into a completed snapshot", () => {
     const result: TaskResultData = {
       thread_id: "thread-42",

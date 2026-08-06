@@ -16,7 +16,7 @@ Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用�
 - AGUI 风格 WebSocket 事件，支持连接前缓冲和断线重连
 - Live Result、Sandbox Result 与 Partial Result；开发诊断模式会额外披露 mixed source
 - Redis 偏好存储、OpenSearch 类目知识库、Faiss 与三塔召回扩展边界
-- Markdown、JSON 报告和受控文件下载
+- Markdown、JSON、PDF 报告和受控文件下载
 - GitHub Actions、Dependabot 和统一的 `make verify` 质量门禁
 
 图片上传接口会校验 MIME、文件签名和大小，但当前没有接通图像理解链路。`/api/readiness` 因此返回 `image_analysis=false`，前端不会把上传入口展示成可用搜索能力。
