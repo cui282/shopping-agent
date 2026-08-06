@@ -64,6 +64,10 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
 }
 ```
 
+When `thread_id` identifies a running or awaiting task, the new request replaces that active run.
+A terminal Research Snapshot is immutable and cannot be replaced with the same `thread_id`; the
+service returns HTTP 409 with `detail.code=thread_id_immutable`.
+
 - `query`: 1 to 4000 characters after trimming leading and trailing whitespace; empty or
   whitespace-only values are rejected.
 - `thread_id`: optional, 1 to 80 ASCII letters, digits, `_`, or `-`.
@@ -98,12 +102,24 @@ durable snapshot, even when the process-local event buffer is empty:
 {
   "type": "task_snapshot",
   "snapshot": {
+    "snapshot_id": "thread-7b8cb4a9c23f",
     "thread_id": "thread-7b8cb4a9c23f",
     "run_id": "d41d8cd98f004204e9800998ecf8427e",
     "status": "running",
     "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
     "user_id": "browser-7f3c1f7a",
     "data_mode": "live",
+    "resolved_query": null,
+    "resolved_intent": null,
+    "mode": null,
+    "working_assumptions": [],
+    "applied_preferences": {"material_preferences": [], "style_preferences": [], "soft_preferences": [], "avoid": []},
+    "task_overrides": [],
+    "constraint_relaxations": [],
+    "provider_coverage": {},
+    "product_evidence": [],
+    "exchange_rate": null,
+    "report_references": [],
     "created_at": "2026-07-30T12:00:00Z",
     "updated_at": "2026-07-30T12:00:01Z",
     "events": [],
@@ -151,6 +167,7 @@ Supported events:
 | `tool_start` | A typed tool started |
 | `tool_end` | A typed tool completed, including duration, `outcome`, source, provider status, failure reason, and fallback reason |
 | `fork` | A marketplace branch started with explicit `platform` and `demand` |
+| `intent_resolved` | The immutable task intent, Working Assumptions, applied Remembered Preference, Task Override, and any confirmed constraint changes were saved |
 | `task_result` | Terminal success; `data` is `ShoppingSummaryOutput` |
 | `task_cancelled` | Terminal cancellation |
 | `clarification_required` | Non-terminal blocking ambiguity; `data` contains one `field`, stable `reason_code`, and one `question` |
@@ -195,12 +212,24 @@ another task. A still-running first snapshot is not treated as the end of recove
 
 ```json
 {
+  "snapshot_id": "thread-7b8cb4a9c23f",
   "thread_id": "thread-7b8cb4a9c23f",
   "run_id": "d41d8cd98f004204e9800998ecf8427e",
   "status": "running",
   "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
   "user_id": "browser-7f3c1f7a",
   "data_mode": "live",
+  "resolved_query": null,
+  "resolved_intent": null,
+  "mode": null,
+  "working_assumptions": [],
+  "applied_preferences": {"material_preferences": [], "style_preferences": [], "soft_preferences": [], "avoid": []},
+  "task_overrides": [],
+  "constraint_relaxations": [],
+  "provider_coverage": {},
+  "product_evidence": [],
+  "exchange_rate": null,
+  "report_references": [],
   "created_at": "2026-07-30T12:00:00Z",
   "updated_at": "2026-07-30T12:00:03Z",
   "events": [
@@ -241,6 +270,75 @@ If a process restart leaves an `awaiting_clarification` snapshot without an owni
 returned unchanged so the question can be answered. A `running` snapshot without an owning worker
 is instead atomically changed to `error` with `error_code=task_interrupted` and appends exactly one persistent `error`
 event instead of presenting a permanently running task.
+An active worker holds the task's durable owner lock; a reader in another worker returns the running
+snapshot unchanged while that lock is held and performs recovery only after ownership is available.
+
+### Research Snapshot, Research Rerun, and Constraint Relaxation
+
+Every completed task is also a `Research Snapshot`. `snapshot_id` is stable for the task and the
+top-level fields preserve the resolved query and intent, research mode, Working Assumptions,
+applied Remembered Preference, Task Override, provider coverage, complete Product Evidence with
+each `retrieved_at`, exchange-rate provenance and effective date, report references, terminal
+result, and the complete ordered event timeline. The data is written to the durable task boundary
+before it is broadcast; reopening a completed snapshot is read-only and must not call a marketplace
+gateway, preference recall, exchange-rate source, or recalculation path.
+
+`GET /api/research?user_id=browser-7f3c1f7a` (also available as
+`GET /api/research/snapshots?user_id=browser-7f3c1f7a`) returns
+`{"snapshots": [TaskSnapshot, ...]}` from durable storage, ordered by most recently updated and
+limited to the same Anonymous Shopper ID supplied by the caller. The ID is an association key, not
+authentication or authorization; a hosted deployment must enforce ownership at a trusted gateway.
+`GET /api/research/{thread_id}` opens one snapshot and has no side effects. The existing
+`GET /api/task/{thread_id}` is the equivalent task-scoped read. Legacy snapshots missing the
+newer additive fields are normalized only in the response; the stored bytes are not rewritten.
+
+`POST /api/task/{thread_id}/rerun` is the explicit Research Rerun command. Its required body is:
+
+```json
+{"user_id": "browser-7f3c1f7a", "idempotency_key": "rerun-2026-07-30-01"}
+```
+
+The command requires a completed snapshot with a resolved intent. It creates a new `thread_id`,
+reuses the saved query, resolved intent, constraints, and applied preferences as inputs, and
+returns:
+
+```json
+{
+  "status": "started",
+  "thread_id": "thread-new-child",
+  "parent_snapshot_id": "thread-7b8cb4a9c23f",
+  "lineage": {
+    "relation": "rerun",
+    "parent_snapshot_id": "thread-7b8cb4a9c23f",
+    "parent_thread_id": "thread-7b8cb4a9c23f",
+    "parent_run_id": "d41d8cd98f004204e9800998ecf8427e",
+    "root_snapshot_id": "thread-7b8cb4a9c23f",
+    "depth": 1,
+    "command_idempotency_key": "rerun-2026-07-30-01",
+    "changed_constraints": []
+  },
+  "idempotent": false
+}
+```
+
+The child is a separate snapshot even when it fails, is cancelled, or returns a partial result;
+the parent snapshot, events, result, reports, and provenance never change. Repeating the same
+`idempotency_key` for the same parent returns the existing child with `idempotent=true`. Omitting
+the key creates a new command each time. Idempotency is scoped to the parent snapshot, command
+relation, and key; requests for one parent are serialized by the task command boundary, so
+concurrent retries cannot create two children for the same keyed command.
+
+`POST /api/task/{thread_id}/relaxation` accepts the same required `user_id` and is the only command that can apply a
+`relaxation_suggestion`. It requires `confirmed: true` and selected `constraint_ids`; optional
+`changes` can replace a constraint while retaining its stable ID. The response uses the same
+`TaskRerunResponse` shape, with `lineage.relation=constraint_relaxation` and
+`lineage.changed_constraints` recording each previous constraint, replacement/removal action, and
+reason. An unconfirmed command returns `409 constraint_relaxation_confirmation_required` and never
+creates a task. Constraint Relaxation is therefore a new task, never an in-place edit.
+
+Clarification answers resume the same `thread_id` and event timeline, so clarification does not
+create another Recent Research history item. Only Research Rerun and confirmed Constraint
+Relaxation create new history items and lineage edges.
 
 ### Blocking clarification
 
@@ -318,6 +416,24 @@ Uploaded references and user preferences are not task-owned and are therefore no
 {
   "thread_id": "thread-7b8cb4a9c23f",
   "final_answer": "...",
+  "resolved_query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
+  "resolved_intent": {
+    "mode": "exact_offer_comparison",
+    "budget_cny": 1200,
+    "category": "降噪耳机",
+    "material_preferences": [],
+    "style_preferences": [],
+    "hard_constraints": [],
+    "soft_preferences": [],
+    "destination": "中国大陆",
+    "ranking_profile": {"priority_order": ["landed_cost", "preference_match", "evidence_quality", "delivery_time"], "explicit": false},
+    "working_assumptions": [],
+    "source": "computed"
+  },
+  "applied_preferences": {"material_preferences": [], "style_preferences": [], "soft_preferences": [], "avoid": []},
+  "task_overrides": [],
+  "constraint_relaxations": [],
+  "product_evidence": [],
   "mode": "exact_offer_comparison",
   "recommendations": [],
   "comparison": [],
@@ -577,6 +693,19 @@ separate collection; it never participates in formal recommendations.
 visible assumptions, not Blocking Ambiguities or Hard Constraints. `relaxation_suggestions` only
 describes possible changes and has `requires_confirmation=true`; the current task never applies a
 relaxation automatically.
+
+`resolved_query`, `resolved_intent`, `applied_preferences`, `task_overrides`,
+`constraint_relaxations`, and `product_evidence` are copied into the durable Research Snapshot as
+well as the terminal result. `product_evidence` is the complete candidate evidence set, including
+the source, provider provenance, stable identity fields, variant attributes, and retrieval time;
+it is not a newly fetched view when an old snapshot is reopened. `report_references` at the snapshot
+level points to the same generated files listed in `result.files`.
+
+Each `product_evidence` item uses the normalized candidate fields (`item_id`, `platform`, `marketplace`,
+`offer_id`, title, original price/currency, attributes, identity, variant attributes, availability,
+`retrieved_at`, provenance, link kind, source, and nullable `identity_evidence`) from the same Pydantic
+contract used by result rows. `identity_evidence` is nullable for raw Product Evidence until the
+deterministic exact-mode matcher has evaluated it.
 
 The normalized task intent represents budget, material, and specification Hard Constraints with
 `id`, `kind`, `field`, `operator`, `value`, `unit`, and `label`. Chinese negative expressions such

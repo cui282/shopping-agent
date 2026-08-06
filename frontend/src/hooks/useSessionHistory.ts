@@ -42,12 +42,31 @@ export function useSessionHistory() {
   );
 
   const updateStatus = useCallback(
-    (threadId: string, status: TaskStatus, providerMode?: string) => {
+    (
+      threadId: string,
+      status: TaskStatus,
+      providerMode?: string,
+      lineage?: SessionHistoryItem["lineage"],
+      mode?: SessionHistoryItem["mode"],
+    ) => {
       commit((current) =>
         current.map((entry) => {
           if (entry.threadId !== threadId) return entry;
-          if (entry.status === status && (!providerMode || entry.providerMode === providerMode)) return entry;
-          return { ...entry, status, providerMode: providerMode ?? entry.providerMode };
+          if (
+            entry.status === status &&
+            (!providerMode || entry.providerMode === providerMode) &&
+            entry.lineage === lineage &&
+            entry.mode === mode
+          ) {
+            return entry;
+          }
+          return {
+            ...entry,
+            status,
+            providerMode: providerMode ?? entry.providerMode,
+            lineage: lineage ?? entry.lineage,
+            mode: mode ?? entry.mode,
+          };
         }),
       );
     },

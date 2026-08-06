@@ -130,6 +130,7 @@ async def price_compare(
                 retrieved_at=item.retrieved_at,
                 provenance=item.provenance,
                 link_kind=item.link_kind,
+                identity_evidence=item.identity_evidence,
             )
         )
     unsupported_count = sum(

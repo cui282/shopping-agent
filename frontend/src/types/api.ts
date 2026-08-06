@@ -26,6 +26,7 @@ export type MemoryAction = "remember" | "forget";
 export type PreferenceDecisionStatus = "applied" | "ignored" | "overridden";
 export type PreferenceDecisionSource = "current_request" | "remembered_preference";
 export type PreferenceDurability = "local_evaluation" | "durable";
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
 export interface MemoryCommand {
   action: MemoryAction;
@@ -39,6 +40,20 @@ export interface PreferenceDecision {
   value: string;
   status: PreferenceDecisionStatus;
   source: PreferenceDecisionSource;
+  reason: string;
+}
+
+export interface RememberedPreference {
+  material_preferences: string[];
+  style_preferences: string[];
+  soft_preferences: string[];
+  avoid: string[];
+}
+
+export interface TaskOverride {
+  field: PreferenceField;
+  value: string;
+  overridden_values: string[];
   reason: string;
 }
 
@@ -57,6 +72,34 @@ export interface HardConstraint {
   value: string | number;
   unit: string | null;
   label: string;
+}
+
+export interface ConstraintRelaxation {
+  constraint_id: string;
+  previous: HardConstraint;
+  replacement: HardConstraint | null;
+  action: "removed" | "replaced";
+  reason: string;
+}
+
+export interface ConstraintRelaxationChange {
+  constraint_id: string;
+  replacement?: HardConstraint | null;
+  reason?: string;
+}
+
+export interface ShoppingPlan {
+  mode: ResearchMode;
+  budget_cny: number | null;
+  category: string;
+  material_preferences: string[];
+  style_preferences: string[];
+  hard_constraints: HardConstraint[];
+  soft_preferences: string[];
+  destination: string;
+  ranking_profile: RankingProfile;
+  working_assumptions: WorkingAssumption[];
+  source: ProviderSource;
 }
 
 export interface WorkingAssumption {
@@ -146,6 +189,12 @@ export interface ProductEvidence {
   marketplace: Marketplace;
   offer_id: string | null;
   title: string;
+  price: number;
+  currency: string;
+  rating?: number | null;
+  sales?: number | null;
+  image_url?: string | null;
+  attributes: Record<string, JsonValue>;
   product_url: string | null;
   link_kind: OfferLinkKind | null;
   identity: ProductIdentity;
@@ -192,6 +241,7 @@ export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecti
 
 export type MonitorEventName =
   | "session_created"
+  | "intent_resolved"
   | "assistant_call"
   | "tool_start"
   | "tool_end"
@@ -234,6 +284,14 @@ export interface ToolEndEventData {
 
 export interface MonitorEventDataMap {
   session_created: { thread_id: string; reference_images: Record<string, unknown>[]; data_mode: DataMode };
+  intent_resolved: {
+    resolved_query: string;
+    resolved_intent: ShoppingPlan;
+    applied_preferences: RememberedPreference;
+    task_overrides: TaskOverride[];
+    constraint_relaxations: ConstraintRelaxation[];
+    data_mode: DataMode;
+  };
   assistant_call: AssistantCallEventData;
   tool_start: { tool_name: string; args: Record<string, unknown>; data_mode: DataMode };
   tool_end: ToolEndEventData;
@@ -278,7 +336,7 @@ export interface Recommendation extends ProductEvidence {
   eta_days: number;
   rating: number | null;
   sales: number | null;
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, JsonValue>;
   note: string | null;
   duty_tier: "免征" | "标准" | "高税";
   shipping_estimate: EstimateDisclosure;
@@ -303,7 +361,7 @@ export interface UnverifiedCandidate extends ProductEvidence {
   eta_days: number;
   rating: number | null;
   sales: number | null;
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, JsonValue>;
   note: string | null;
   duty_tier: "免征" | "标准" | "高税";
   shipping_estimate: EstimateDisclosure;
@@ -324,7 +382,7 @@ export interface AlternativeCandidate extends ProductEvidence {
   eta_days: number;
   rating: number | null;
   sales: number | null;
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, JsonValue>;
   note: string | null;
   duty_tier: "免征" | "标准" | "高税";
   shipping_estimate: EstimateDisclosure;
@@ -358,7 +416,7 @@ export interface ComparisonItem extends ProductEvidence {
   rating?: number | null;
   currency: string;
   price_local?: number;
-  attributes: Record<string, string | number | boolean | null>;
+  attributes: Record<string, JsonValue>;
   note?: string | null;
   shipping_estimate?: EstimateDisclosure;
   duty_estimate?: EstimateDisclosure;
@@ -373,6 +431,12 @@ export interface GeneratedFile {
 export interface TaskResultData {
   thread_id: string;
   final_answer: string;
+  resolved_query: string | null;
+  resolved_intent: ShoppingPlan | null;
+  applied_preferences: RememberedPreference;
+  task_overrides: TaskOverride[];
+  constraint_relaxations: ConstraintRelaxation[];
+  product_evidence: ProductEvidence[];
   mode: ResearchMode;
   recommendations: Recommendation[];
   comparison: ComparisonItem[];
@@ -409,6 +473,7 @@ export interface TaskStartResponse {
 }
 
 export interface TaskSnapshot {
+  snapshot_id: string;
   thread_id: string;
   run_id: string;
   status: "running" | "awaiting_clarification" | "completed" | "cancelled" | "error";
@@ -417,6 +482,18 @@ export interface TaskSnapshot {
   data_mode: DataMode;
   created_at: string;
   updated_at: string;
+  lineage: SnapshotLineage | null;
+  resolved_query: string | null;
+  resolved_intent: ShoppingPlan | null;
+  mode: ResearchMode | null;
+  working_assumptions: WorkingAssumption[];
+  applied_preferences: RememberedPreference;
+  task_overrides: TaskOverride[];
+  constraint_relaxations: ConstraintRelaxation[];
+  provider_coverage: Record<string, ProviderMetadata>;
+  product_evidence: ProductEvidence[];
+  exchange_rate: ExchangeRateProvenance | null;
+  report_references: GeneratedFile[];
   events: MonitorEvent[];
   result: TaskResultData | null;
   clarification: ClarificationPrompt | null;
@@ -436,6 +513,29 @@ export interface TaskSnapshotMessage {
   type: "task_snapshot";
   snapshot: TaskSnapshot;
   timestamp: string;
+}
+
+export interface SnapshotLineage {
+  relation: "rerun" | "constraint_relaxation";
+  parent_snapshot_id: string;
+  parent_thread_id: string;
+  parent_run_id: string;
+  root_snapshot_id: string;
+  depth: number;
+  command_idempotency_key: string;
+  changed_constraints: ConstraintRelaxation[];
+}
+
+export interface TaskRerunResponse {
+  status: "started";
+  thread_id: string;
+  parent_snapshot_id: string;
+  lineage: SnapshotLineage;
+  idempotent: boolean;
+}
+
+export interface RecentResearchResponse {
+  snapshots: TaskSnapshot[];
 }
 
 export interface UploadResponse {
@@ -494,4 +594,6 @@ export interface SessionHistoryItem {
   status: TaskStatus;
   createdAt: string;
   providerMode?: string;
+  lineage?: SnapshotLineage | null;
+  mode?: ResearchMode;
 }

@@ -13,6 +13,7 @@ from app.utils.thread_ctx import get_run_id
 
 _MESSAGES = {
     "session_created": "购物任务已创建",
+    "intent_resolved": "研究意图已保存",
     "assistant_call": "Agent 正在分析",
     "tool_start": "正在调用工具",
     "tool_end": "工具调用完成",

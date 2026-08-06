@@ -36,6 +36,7 @@ function timelineEvent(
 
 function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
   return {
+    snapshot_id: "thread-live",
     thread_id: "thread-live",
     run_id: "1".repeat(32),
     status: "running",
@@ -44,6 +45,23 @@ function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     data_mode: "live",
     created_at: "2026-07-30T12:00:00Z",
     updated_at: "2026-07-30T12:00:00Z",
+    lineage: null,
+    resolved_query: null,
+    resolved_intent: null,
+    mode: null,
+    working_assumptions: [],
+    applied_preferences: {
+      material_preferences: [],
+      style_preferences: [],
+      soft_preferences: [],
+      avoid: [],
+    },
+    task_overrides: [],
+    constraint_relaxations: [],
+    provider_coverage: {},
+    product_evidence: [],
+    exchange_rate: null,
+    report_references: [],
     events: [],
     result: null,
     clarification: null,
@@ -59,6 +77,17 @@ describe("agentReducer", () => {
     const result: TaskResultData = {
       thread_id: "thread-42",
       final_answer: "已找到两款候选",
+      resolved_query: null,
+      resolved_intent: null,
+      applied_preferences: {
+        material_preferences: [],
+        style_preferences: [],
+        soft_preferences: [],
+        avoid: [],
+      },
+      task_overrides: [],
+      constraint_relaxations: [],
+      product_evidence: [],
       mode: "product_research",
       recommendations: [],
       comparison: [],
@@ -98,6 +127,37 @@ describe("agentReducer", () => {
     });
     expect(state.status).toBe("running");
     expect(state.query).toBe("test");
+  });
+
+  it("folds resolved intent fields into the authoritative snapshot", () => {
+    const loaded = agentReducer(initialAgentState, {
+      type: "snapshot",
+      snapshot: taskSnapshot({ thread_id: "thread-timeline" }),
+    });
+    const event = timelineEvent(1, "intent_resolved", {
+      resolved_query: "预算 1200 元找耳机",
+      resolved_intent: {
+        mode: "product_research",
+        working_assumptions: [],
+      },
+      applied_preferences: {
+        material_preferences: [],
+        style_preferences: ["简约"],
+        soft_preferences: [],
+        avoid: [],
+      },
+      task_overrides: [],
+      constraint_relaxations: [],
+      data_mode: "live",
+    });
+
+    const next = agentReducer(loaded, { type: "event", event });
+
+    expect(next.snapshot).toMatchObject({
+      resolved_query: "预算 1200 元找耳机",
+      mode: "product_research",
+      applied_preferences: { style_preferences: ["简约"] },
+    });
   });
 
   it("enters and leaves the durable clarification state through ordered events", () => {

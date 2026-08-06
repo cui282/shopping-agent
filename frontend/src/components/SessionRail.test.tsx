@@ -55,4 +55,38 @@ describe("SessionRail", () => {
 
     expect(markup.match(/disabled=""/g)).toHaveLength(2);
   });
+
+  it("shows lineage for a rerun in Recent Research", () => {
+    const markup = renderToStaticMarkup(
+      <MemoryRouter>
+        <SessionRail
+          history={[
+            {
+              threadId: "thread-rerun",
+              query: "找一款适合长辈使用的手机",
+              status: "completed",
+              createdAt: "2026-07-30T08:00:00Z",
+              lineage: {
+                relation: "rerun",
+                parent_snapshot_id: "thread-parent",
+                parent_thread_id: "thread-parent",
+                parent_run_id: "a".repeat(32),
+                root_snapshot_id: "thread-parent",
+                depth: 1,
+                command_idempotency_key: "rerun-1",
+                changed_constraints: [],
+              },
+            },
+          ]}
+          activeThreadId={null}
+          providerMode="sandbox"
+          onNew={vi.fn()}
+          onSelect={vi.fn()}
+          onDelete={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(markup).toContain("Research Rerun · 第 1 代");
+  });
 });

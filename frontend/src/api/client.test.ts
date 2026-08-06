@@ -82,6 +82,37 @@ describe("request lifecycle", () => {
     );
   });
 
+  it("scopes recent research and commands to the anonymous shopper", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Response(JSON.stringify({ snapshots: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.recentResearch("browser-user");
+    await api.rerunTask("thread-1", "browser-user", "rerun-1");
+    await api.relaxTask("thread-1", "browser-user", {
+      confirmed: true,
+      constraint_ids: ["constraint-1"],
+      idempotency_key: "relax-1",
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toContain("/api/research?user_id=browser-user");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({
+      user_id: "browser-user",
+      idempotency_key: "rerun-1",
+    });
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body as string)).toEqual({
+      user_id: "browser-user",
+      confirmed: true,
+      constraint_ids: ["constraint-1"],
+      idempotency_key: "relax-1",
+    });
+  });
+
   it("sends an explicit future preference command", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

@@ -168,7 +168,7 @@ def test_repeated_clarification_response_is_idempotent_and_other_states_are_reje
     assert rejected.json()["detail"]["code"] == "clarification_not_awaiting"
 
 
-def test_repeated_response_remains_idempotent_after_the_next_question_is_open(
+def test_response_reused_for_a_different_pending_question_is_rejected(
     client: TestClient,
 ) -> None:
     waiting = start_and_wait_for_clarification(
@@ -189,13 +189,8 @@ def test_repeated_response_remains_idempotent_after_the_next_question_is_open(
         json={"response": "同一款"},
     )
 
-    assert duplicate.status_code == 200
-    assert duplicate.json() == {
-        "status": "resumed",
-        "thread_id": thread_id,
-        "field": "mode",
-        "idempotent": True,
-    }
+    assert duplicate.status_code == 422
+    assert duplicate.json()["detail"]["code"] == "clarification_invalid_response"
     assert client.get(f"/api/task/{thread_id}").json()["status"] == "awaiting_clarification"
 
 

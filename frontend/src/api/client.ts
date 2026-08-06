@@ -5,6 +5,9 @@ import type {
   PreferencesResponse,
   ReadinessResponse,
   ClarificationCommandResponse,
+  ConstraintRelaxationChange,
+  RecentResearchResponse,
+  TaskRerunResponse,
   TaskRequest,
   TaskSnapshot,
   TaskStartResponse,
@@ -101,6 +104,25 @@ export const api = {
     }),
   taskSnapshot: (threadId: string, control: RequestControl = {}) =>
     requestJson<TaskSnapshot>(`/api/task/${encodeURIComponent(threadId)}`, control),
+  recentResearch: (userId: string, control: RequestControl = {}) =>
+    requestJson<RecentResearchResponse>(`/api/research?user_id=${encodeURIComponent(userId)}`, control),
+  rerunTask: (threadId: string, userId: string, idempotencyKey: string, control: RequestControl = {}) =>
+    requestJson<TaskRerunResponse>(`/api/task/${encodeURIComponent(threadId)}/rerun`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, idempotency_key: idempotencyKey }),
+      ...control,
+    }),
+  relaxTask: (
+    threadId: string,
+    userId: string,
+    payload: { confirmed: boolean; constraint_ids: string[]; changes?: ConstraintRelaxationChange[]; idempotency_key?: string },
+    control: RequestControl = {},
+  ) =>
+    requestJson<TaskRerunResponse>(`/api/task/${encodeURIComponent(threadId)}/relaxation`, {
+      method: "POST",
+      body: JSON.stringify({ ...payload, user_id: userId }),
+      ...control,
+    }),
   cancelTask: (threadId: string, control: RequestControl = {}) =>
     requestJson<{ status: string; thread_id?: string }>(`/api/task/${encodeURIComponent(threadId)}/cancel`, {
       method: "POST",

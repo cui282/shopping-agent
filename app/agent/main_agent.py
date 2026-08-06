@@ -9,22 +9,28 @@ from app.agent.dispatch_tool import dispatch_tool
 from app.agent.llm import active_agent_mode, allow_rules_fallback, get_llm, requested_mode
 from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import Monitor
-from app.config import get_settings
+from app.config import MARKETPLACES, get_settings
 from app.memory.commands import (
     execute_memory_commands,
     parse_memory_commands,
     remembered_for_task,
     strip_memory_commands,
 )
+from app.memory.injector import resolve_preferences
 from app.memory.store import PreferenceStore
 from app.schemas import (
+    ConstraintRelaxation,
+    ConstraintRelaxationChange,
     DataMode,
+    HardConstraint,
     ItemSearchOutput,
     Platform,
     ProviderFailureReason,
     ProviderMetadata,
     RememberedPreference,
+    ShoppingPlan,
     ShoppingSummaryOutput,
+    TaskOverride,
     TaskRequest,
     ToolEndEventData,
 )
@@ -65,6 +71,63 @@ class BlockingAmbiguityError(RuntimeError):
 
 
 ADVISORY_TOOLS = [planner]
+
+
+def _apply_constraint_relaxations(
+    plan: ShoppingPlan,
+    changes: list[ConstraintRelaxationChange],
+) -> tuple[ShoppingPlan, list[ConstraintRelaxation]]:
+    if not changes:
+        return plan, []
+
+    by_id = {constraint.id: constraint for constraint in plan.hard_constraints}
+    applied: list[ConstraintRelaxation] = []
+    replacements = {change.constraint_id: change for change in changes}
+    unknown = sorted(set(replacements) - set(by_id))
+    if unknown:
+        raise ValueError(f"unknown hard constraint: {', '.join(unknown)}")
+
+    next_constraints: list[HardConstraint] = []
+    for constraint in plan.hard_constraints:
+        change = replacements.get(constraint.id)
+        if change is None:
+            next_constraints.append(constraint)
+            continue
+        replacement = change.replacement
+        if replacement is not None and replacement.id != constraint.id:
+            raise ValueError("a relaxed constraint replacement must keep the original id")
+        applied.append(
+            ConstraintRelaxation(
+                constraint_id=constraint.id,
+                previous=constraint,
+                replacement=replacement,
+                action="replaced" if replacement is not None else "removed",
+                reason=change.reason,
+            )
+        )
+        if replacement is not None:
+            next_constraints.append(replacement)
+
+    return plan.model_copy(update={"hard_constraints": next_constraints}), applied
+
+
+def _task_overrides(decisions) -> list[TaskOverride]:
+    overridden_by_field: dict[str, list[str]] = {}
+    for decision in decisions:
+        if decision.status == "overridden" and decision.source == "remembered_preference":
+            overridden_by_field.setdefault(decision.field, []).append(decision.value)
+    return [
+        TaskOverride(
+            field=decision.field,
+            value=decision.value,
+            overridden_values=overridden_by_field.get(decision.field, []),
+            reason=decision.reason,
+        )
+        for decision in decisions
+        if decision.status == "applied"
+        and decision.source == "current_request"
+        and overridden_by_field.get(decision.field)
+    ]
 
 
 async def _call_tool(
@@ -197,34 +260,70 @@ async def run_agent(
     reference_images: list[dict[str, Any]] | None = None,
     data_mode: DataMode | None = None,
     clarification_answers: dict[str, str] | None = None,
+    resolved_intent: ShoppingPlan | None = None,
+    resolved_query: str | None = None,
+    applied_preferences: RememberedPreference | None = None,
+    constraint_relaxation_changes: list[ConstraintRelaxationChange] | None = None,
 ) -> ShoppingSummaryOutput:
     thread_id = get_thread_id()
     settings = get_settings()
     task_data_mode = data_mode or settings.data_mode
     answers = clarification_answers or {}
-    query = strip_memory_commands(apply_clarification_context(request.query, answers))
-
-    plan = await _call_tool(monitor, "planner", {"query": query}, lambda: planner(query))
-    ambiguity = detect_blocking_ambiguity(
-        request.query,
-        plan,
-        resolved_fields=set(answers),
+    query = resolved_query or strip_memory_commands(
+        apply_clarification_context(request.query, answers)
     )
-    if ambiguity is not None:
-        raise BlockingAmbiguityError(ambiguity)
+    constraint_relaxations: list[ConstraintRelaxation] = []
+    if resolved_intent is None:
+        plan = await _call_tool(monitor, "planner", {"query": query}, lambda: planner(query))
+        ambiguity = detect_blocking_ambiguity(
+            request.query,
+            plan,
+            resolved_fields=set(answers),
+        )
+        if ambiguity is not None:
+            raise BlockingAmbiguityError(ambiguity)
+    else:
+        plan, constraint_relaxations = _apply_constraint_relaxations(
+            resolved_intent.model_copy(deep=True), constraint_relaxation_changes or []
+        )
     if not is_supported_destination(plan.destination):
         raise UnsupportedCapabilityError(
             f"当前仅支持配送至{SUPPORTED_DESTINATION}，暂不支持配送至{plan.destination}。"
         )
 
-    stored_preferences = await store.get(request.user_id)
-    remembered = RememberedPreference.model_validate(
-        {field: stored_preferences.get(field, []) for field in RememberedPreference.model_fields}
+    if resolved_intent is None:
+        stored_preferences = await store.get(request.user_id)
+        remembered = RememberedPreference.model_validate(
+            {
+                field: stored_preferences.get(field, [])
+                for field in RememberedPreference.model_fields
+            }
+        )
+        memory_commands = parse_memory_commands(request.query)
+        if memory_commands:
+            await execute_memory_commands(store, request.user_id, memory_commands)
+        remembered = remembered_for_task(remembered, memory_commands)
+    else:
+        remembered = applied_preferences or RememberedPreference()
+
+    preference_resolution = resolve_preferences(plan, remembered)
+    task_overrides = _task_overrides(preference_resolution.decisions)
+
+    await monitor.emit(
+        thread_id,
+        "intent_resolved",
+        message="已保存本次研究的意图和约束",
+        data={
+            "resolved_query": query,
+            "resolved_intent": plan.model_dump(mode="json"),
+            "applied_preferences": remembered.model_dump(mode="json"),
+            "task_overrides": [item.model_dump(mode="json") for item in task_overrides],
+            "constraint_relaxations": [
+                item.model_dump(mode="json") for item in constraint_relaxations
+            ],
+            "data_mode": task_data_mode,
+        },
     )
-    memory_commands = parse_memory_commands(request.query)
-    if memory_commands:
-        await execute_memory_commands(store, request.user_id, memory_commands)
-    remembered = remembered_for_task(remembered, memory_commands)
 
     await monitor.emit(
         thread_id,
@@ -334,6 +433,20 @@ async def run_agent(
     )
     candidates = [candidate for result in searches for candidate in result.candidates]
     providers = {result.platform: result.provider for result in searches}
+    if task_data_mode != "sandbox":
+        for platform in MARKETPLACES:
+            if platform in providers:
+                continue
+            providers[platform] = ProviderMetadata(
+                source="live",
+                provider=platform,
+                status="unavailable",
+                fallback_reason=(
+                    f"{platform.upper()}_API_ENDPOINT and {platform.upper()}_API_KEY "
+                    "are not fully configured"
+                ),
+                failure_reason="not_configured",
+            )
 
     await monitor.emit(
         thread_id,
@@ -396,10 +509,18 @@ async def run_agent(
             calculation_exclusions=prices.calculation_exclusions,
             shipping_basis=shipping.calculation_basis,
             unavailable_marketplaces=[
-                result.platform for result in searches if result.provider.status == "unavailable"
+                name
+                for name, metadata in providers.items()
+                if metadata.status == "unavailable" or metadata.failure_reason is not None
             ],
             data_mode=task_data_mode,
             preference_decisions=picks.preference_decisions,
+            resolved_query=query,
+            resolved_intent=plan,
+            applied_preferences=remembered,
+            task_overrides=task_overrides,
+            constraint_relaxations=constraint_relaxations,
+            product_evidence=candidates,
         ),
     )
     return result

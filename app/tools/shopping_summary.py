@@ -4,6 +4,8 @@ import json
 
 from app.schemas import (
     CalculationExclusion,
+    Candidate,
+    ConstraintRelaxation,
     DataMode,
     ExchangeRateProvenance,
     FileLink,
@@ -11,7 +13,10 @@ from app.schemas import (
     LandedCost,
     PreferenceDecision,
     ProviderMetadata,
+    RememberedPreference,
+    ShoppingPlan,
     ShoppingSummaryOutput,
+    TaskOverride,
 )
 from app.utils.thread_ctx import get_session_dir, get_thread_id
 
@@ -41,6 +46,12 @@ async def shopping_summary(
     unavailable_marketplaces: list[str] | None = None,
     data_mode: DataMode | None = None,
     preference_decisions: list[PreferenceDecision] | None = None,
+    resolved_query: str | None = None,
+    resolved_intent: ShoppingPlan | None = None,
+    applied_preferences: RememberedPreference | None = None,
+    task_overrides: list[TaskOverride] | None = None,
+    constraint_relaxations: list[ConstraintRelaxation] | None = None,
+    product_evidence: list[Candidate] | None = None,
 ) -> ShoppingSummaryOutput:
     """Create the terminal result and persist Markdown and JSON reports."""
 
@@ -53,6 +64,10 @@ async def shopping_summary(
     )
     calculation_exclusions = calculation_exclusions or []
     preference_decisions = preference_decisions or []
+    task_overrides = task_overrides or []
+    constraint_relaxations = constraint_relaxations or []
+    product_evidence = product_evidence or []
+    applied_preferences = applied_preferences or RememberedPreference()
     sources = {item.source for item in comparison}
     sources.update(metadata.source for metadata in provider_details.values())
     if data_mode is not None:
@@ -279,6 +294,12 @@ async def shopping_summary(
     result = ShoppingSummaryOutput(
         thread_id=thread_id,
         final_answer=final_answer,
+        resolved_query=resolved_query,
+        resolved_intent=resolved_intent,
+        applied_preferences=applied_preferences,
+        task_overrides=task_overrides,
+        constraint_relaxations=constraint_relaxations,
+        product_evidence=product_evidence,
         recommendations=picks.recommendations,
         comparison=comparison,
         mode=picks.mode,

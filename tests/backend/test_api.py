@@ -277,9 +277,10 @@ def test_live_partial_result_keeps_successful_evidence_and_failed_provider_reaso
     assert result["data_mode"] == "live"
     assert result["provider_mode"] == "live"
     assert result["result_kind"] == "partial"
-    assert result["unavailable_marketplaces"] == ["ebay"]
+    assert result["unavailable_marketplaces"] == ["aliexpress", "ebay", "shopee"]
     assert result["providers"]["amazon"]["status"] == "ok"
     assert result["providers"]["ebay"]["failure_reason"] == "request_failed"
+    assert result["providers"]["shopee"]["failure_reason"] == "not_configured"
     assert result["recommendations"]
 
 
@@ -396,7 +397,7 @@ def test_mixed_source_requires_diagnostic_configuration_and_stays_out_of_normal_
     assert snapshot["result"]["data_mode"] == "mixed"
     assert snapshot["result"]["provider_mode"] == "mixed"
     assert snapshot["result"]["result_kind"] == "partial"
-    assert snapshot["result"]["unavailable_marketplaces"] == ["ebay"]
+    assert snapshot["result"]["unavailable_marketplaces"] == ["aliexpress", "ebay", "shopee"]
     assert all(event["data"].get("data_mode") == "mixed" for event in snapshot["events"])
 
 
@@ -1094,7 +1095,9 @@ def test_websocket_bootstraps_from_the_durable_snapshot_after_memory_reset(
     assert first["snapshot"]["events"][-1]["event"] == "task_result"
 
 
-def test_legacy_sandbox_snapshot_migrates_its_data_mode(client: TestClient) -> None:
+def test_legacy_sandbox_snapshot_is_normalized_without_rewriting_storage(
+    client: TestClient,
+) -> None:
     thread_id = "legacy-sandbox-snapshot"
     created_at = server._now()
     snapshot = TaskSnapshot(
@@ -1149,6 +1152,7 @@ def test_legacy_sandbox_snapshot_migrates_its_data_mode(client: TestClient) -> N
     for event in payload["events"]:
         event["data"].pop("data_mode")
     path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
 
     restored = client.get(f"/api/task/{thread_id}")
 
@@ -1156,7 +1160,7 @@ def test_legacy_sandbox_snapshot_migrates_its_data_mode(client: TestClient) -> N
     assert restored.json()["data_mode"] == "sandbox"
     assert all(event["data"]["data_mode"] == "sandbox" for event in restored.json()["events"])
     assert restored.json()["result"]["data_mode"] == "sandbox"
-    assert json.loads(path.read_text(encoding="utf-8"))["data_mode"] == "sandbox"
+    assert path.read_bytes() == before
 
 
 def test_orphaned_running_snapshot_is_marked_interrupted(client: TestClient) -> None:

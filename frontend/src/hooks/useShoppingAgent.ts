@@ -30,6 +30,7 @@ export interface AgentState {
   connection: ConnectionStatus;
   events: MonitorEvent[];
   result: TaskResultData | null;
+  snapshot: TaskSnapshot | null;
   clarification: ClarificationPrompt | null;
   error: string | null;
   providerMode: ProviderMode;
@@ -47,6 +48,7 @@ export const initialAgentState: AgentState = {
   connection: "idle",
   events: [],
   result: null,
+  snapshot: null,
   clarification: null,
   error: null,
   providerMode: "unverified",
@@ -124,6 +126,85 @@ function timelineStatus(events: MonitorEvent[]): TaskStatus | null {
   return status;
 }
 
+function snapshotAfterEvent(snapshot: TaskSnapshot | null, event: MonitorEvent): TaskSnapshot | null {
+  if (!snapshot || snapshot.thread_id !== event.thread_id || snapshot.run_id !== event.run_id) return snapshot;
+  const base = { ...snapshot, updated_at: event.timestamp };
+  if (event.event === "intent_resolved") {
+    return {
+      ...base,
+      resolved_query: event.data.resolved_query,
+      resolved_intent: event.data.resolved_intent,
+      mode: event.data.resolved_intent.mode,
+      working_assumptions: event.data.resolved_intent.working_assumptions,
+      applied_preferences: event.data.applied_preferences,
+      task_overrides: event.data.task_overrides,
+      constraint_relaxations: event.data.constraint_relaxations,
+    };
+  }
+  if (event.event === "task_result") {
+    const result = event.data;
+    return {
+      ...base,
+      status: "completed",
+      resolved_query: result.resolved_query ?? base.resolved_query,
+      resolved_intent: result.resolved_intent ?? base.resolved_intent,
+      mode: result.mode,
+      working_assumptions: result.working_assumptions ?? base.working_assumptions,
+      applied_preferences: result.applied_preferences ?? base.applied_preferences,
+      task_overrides: result.task_overrides ?? base.task_overrides,
+      constraint_relaxations: result.constraint_relaxations ?? base.constraint_relaxations,
+      provider_coverage: result.providers,
+      product_evidence: result.product_evidence ?? base.product_evidence,
+      exchange_rate: result.exchange_rate,
+      report_references: result.files,
+      result,
+      error_code: null,
+      error: null,
+    };
+  }
+  if (event.event === "task_cancelled") {
+    return { ...base, status: "cancelled", result: null, clarification: null, error_code: null, error: null };
+  }
+  if (event.event === "error") {
+    return {
+      ...base,
+      status: "error",
+      result: null,
+      clarification: null,
+      error_code: event.data.code,
+      error: event.message,
+    };
+  }
+  if (event.event === "clarification_required") {
+    return {
+      ...base,
+      status: "awaiting_clarification",
+      result: null,
+      clarification: {
+        field: event.data.field,
+        reason_code: event.data.reason_code,
+        question: event.data.question,
+      },
+      error_code: null,
+      error: null,
+    };
+  }
+  if (event.event === "clarification_resolved") {
+    return {
+      ...base,
+      status: "running",
+      clarification: null,
+      clarification_answers: {
+        ...base.clarification_answers,
+        [event.data.field]: event.data.resolved_value ?? event.data.response,
+      },
+      error_code: null,
+      error: null,
+    };
+  }
+  return base;
+}
+
 type Action =
   | { type: "service_checking" }
   | { type: "service_loaded"; health: HealthResponse; readiness: ReadinessResponse }
@@ -167,6 +248,7 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         runId: null,
         events: [],
         result: null,
+        snapshot: null,
         clarification: null,
         error: null,
         providerMode: "unverified",
@@ -197,6 +279,7 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         events,
         status: nextStatus,
         result,
+        snapshot: snapshotAfterEvent(state.snapshot, action.event),
         clarification,
         error:
           terminal === "error"
@@ -235,6 +318,7 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         connection: status === "running" || status === "awaiting_clarification" ? state.connection : "idle",
         events,
         result,
+        snapshot,
         clarification: snapshot.clarification ?? timelineClarification(events),
         providerMode: normalizeProviderMode(result?.provider_mode),
         error: snapshot.error ?? timelineError(events),

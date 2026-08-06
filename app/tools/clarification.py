@@ -76,6 +76,18 @@ _DESTINATION_CLAUSE_PATTERN = re.compile(
     r"[^，。；,;！？!?]{2,20}"
 )
 _VAGUE_RESPONSES = {"都可以", "随便", "不限", "不设限", "不知道", "不确定", "都行"}
+_VARIANT_MODE_RESPONSES = {
+    "比较不同产品",
+    "比较不同商品",
+    "不同产品",
+    "不同商品",
+    "不同款",
+    "多款",
+    "各款",
+    "同一款",
+    "同款",
+    "同型号",
+}
 
 
 def _is_explicit_comparison(query: str) -> bool:
@@ -173,6 +185,9 @@ def normalize_clarification_response(
         if is_supported_destination(normalized):
             return SUPPORTED_DESTINATION
         raise InvalidClarificationResponse(field, f"当前只支持配送至{SUPPORTED_DESTINATION}")
+
+    if value in _VARIANT_MODE_RESPONSES:
+        raise InvalidClarificationResponse(field, "请提供具体的型号、版本或容量")
 
     return value
 

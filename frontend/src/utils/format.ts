@@ -94,6 +94,7 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
   }
   const labels: Record<MonitorEvent["event"], string> = {
     session_created: "会话已建立",
+    intent_resolved: "意图与约束已保存",
     assistant_call: stage === "thinking" ? "正在分析需求" : "分析需求",
     tool_start: tool ? `开始${toolLabel}` : "开始处理",
     tool_end: tool ? `${toolLabel}已完成` : "处理已完成",

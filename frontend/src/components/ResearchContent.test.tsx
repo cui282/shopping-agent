@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { initialAgentState } from "../hooks/useShoppingAgent";
 import type {
@@ -124,6 +124,7 @@ const matchingOffer: Recommendation = {
 function renderCompletedResult(
   recommendation: Recommendation | null = evidenceRecommendation,
   resultOverrides: Partial<TaskResultData> = {},
+  actions: { onRerun?: () => void; onRelax?: (constraintId: string) => void } = {},
 ) {
   render(
     <ResearchContent
@@ -133,6 +134,17 @@ function renderCompletedResult(
         result: {
           thread_id: "thread-evidence",
           final_answer: "已按可核验证据整理结果。",
+          resolved_query: null,
+          resolved_intent: null,
+          applied_preferences: {
+            material_preferences: [],
+            style_preferences: [],
+            soft_preferences: [],
+            avoid: [],
+          },
+          task_overrides: [],
+          constraint_relaxations: [],
+          product_evidence: [],
           mode: "product_research",
           recommendations: recommendation ? [recommendation] : [],
           comparison: [],
@@ -163,11 +175,22 @@ function renderCompletedResult(
       onViewChange={vi.fn()}
       onUseStarter={vi.fn()}
       onReset={vi.fn()}
+      onRerun={actions.onRerun}
+      onRelax={actions.onRelax}
     />,
   );
 }
 
 describe("Product Evidence", () => {
+  it("offers an explicit Research Rerun command for a completed result", () => {
+    const onRerun = vi.fn();
+    renderCompletedResult(evidenceRecommendation, {}, { onRerun });
+
+    fireEvent.click(screen.getByRole("button", { name: "Research Rerun" }));
+
+    expect(onRerun).toHaveBeenCalledOnce();
+  });
+
   it("renders typed link semantics and verifiable offer evidence", () => {
     renderCompletedResult();
 

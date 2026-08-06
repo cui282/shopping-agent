@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { CirclePlus, History, LoaderCircle, Trash2 } from "lucide-react";
+import { CirclePlus, GitBranch, History, LoaderCircle, Trash2 } from "lucide-react";
 import type { SessionHistoryItem } from "../types/api";
 import { formatRelativeTime, statusLabel } from "../utils/format";
 import { providerModeLabel } from "../utils/trust";
@@ -62,6 +62,13 @@ export default function SessionRail({
                   aria-current={session.threadId === activeThreadId ? "page" : undefined}
                 >
                   <span className={styles.query}>{session.query}</span>
+                  {session.lineage && (
+                    <span className={styles.lineage}>
+                      <GitBranch size={12} aria-hidden="true" />
+                      {session.lineage.relation === "constraint_relaxation" ? "放宽约束" : "Research Rerun"}
+                      {` · 第 ${session.lineage.depth} 代`}
+                    </span>
+                  )}
                   <span className={styles.meta}>
                     <span className={styles.statusDot} data-status={session.status} aria-hidden="true" />
                     {statusLabel(session.status)} · {formatRelativeTime(session.createdAt)}

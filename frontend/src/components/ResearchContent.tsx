@@ -6,6 +6,7 @@ import {
   Download,
   ImageOff,
   ListOrdered,
+  RefreshCw,
   RotateCcw,
   Star,
   Truck,
@@ -44,6 +45,8 @@ interface ResearchContentProps {
   onViewChange: (view: ResultView) => void;
   onUseStarter: (query: string) => void;
   onReset: () => void;
+  onRerun?: () => void;
+  onRelax?: (constraintId: string) => void;
 }
 
 function ProductImage({ product }: { product: Recommendation }) {
@@ -712,7 +715,7 @@ function PreferenceRationale({ decisions }: { decisions: PreferenceDecision[] })
   );
 }
 
-function DecisionTransparency({ state }: { state: AgentState }) {
+function DecisionTransparency({ state, onRelax }: { state: AgentState; onRelax?: (constraintId: string) => void }) {
   const result = state.result;
   if (!result) return null;
   const assumptions = result.working_assumptions ?? [];
@@ -758,6 +761,11 @@ function DecisionTransparency({ state }: { state: AgentState }) {
               <li key={suggestion.constraint.id}>
                 <strong>{suggestion.constraint.label}</strong>
                 <span>{suggestion.suggestion}</span>
+                {onRelax && (
+                  <button type="button" onClick={() => onRelax(suggestion.constraint.id)}>
+                    确认放宽并开始新研究
+                  </button>
+                )}
               </li>
             ))}
           </ul>
@@ -808,7 +816,15 @@ function RankingDisclosure({ profile }: { profile: RankingProfile | undefined })
   );
 }
 
-export default function ResearchContent({ state, view, onViewChange, onUseStarter, onReset }: ResearchContentProps) {
+export default function ResearchContent({
+  state,
+  view,
+  onViewChange,
+  onUseStarter,
+  onReset,
+  onRerun,
+  onRelax,
+}: ResearchContentProps) {
   if (state.status === "idle") return <StarterState onUseStarter={onUseStarter} />;
   if (["starting", "connecting", "running", "awaiting_clarification"].includes(state.status)) {
     return <WaitingState eventCount={state.events.length} />;
@@ -855,7 +871,14 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
           <span className={styles.modeBadge}>{researchModeLabel(result?.mode)}</span>
           <h2 id="result-heading">购物建议</h2>
         </div>
-        <div className={styles.segmented} role="tablist" aria-label="结果视图">
+        <div className={styles.resultActions}>
+          {onRerun && (
+            <button className={styles.rerunButton} type="button" onClick={onRerun}>
+              <RefreshCw size={15} aria-hidden="true" />
+              Research Rerun
+            </button>
+          )}
+          <div className={styles.segmented} role="tablist" aria-label="结果视图">
           <button
             id="recommendations-tab"
             type="button"
@@ -892,8 +915,18 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
           >
             价格对比
           </button>
+          </div>
         </div>
       </div>
+
+      {state.snapshot?.lineage && (
+        <p className={styles.lineageNotice} role="status">
+          {state.snapshot.lineage.relation === "constraint_relaxation"
+            ? "本次研究来自已确认的 Constraint Relaxation"
+            : "本次研究是 Research Rerun"}
+          {` · parent snapshot ${state.snapshot.lineage.parent_snapshot_id}`}
+        </p>
+      )}
 
       {result?.final_answer && <p className={styles.summary}>{result.final_answer}</p>}
       <ResultDisclosure state={state} />
@@ -908,7 +941,7 @@ export default function ResearchContent({ state, view, onViewChange, onUseStarte
       </p>
       <RankingDisclosure profile={result?.ranking_profile} />
       <ProviderDisclosure state={state} />
-      <DecisionTransparency state={state} />
+      <DecisionTransparency state={state} onRelax={onRelax} />
 
       <div
         id="result-panel"

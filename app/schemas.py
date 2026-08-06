@@ -4,11 +4,16 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing_extensions import TypeAliasType
 
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
 DataMode = Literal["live", "sandbox", "mixed"]
 ResearchMode = Literal["product_research", "exact_offer_comparison"]
+JsonValue = TypeAliasType(
+    "JsonValue",
+    str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"],
+)
 IdentityEvidenceBasis = Literal[
     "identifier", "material_variant_attributes", "insufficient", "not_required"
 ]
@@ -56,6 +61,7 @@ ClarificationReasonCode = Literal[
 ]
 EventName = Literal[
     "session_created",
+    "intent_resolved",
     "assistant_call",
     "tool_start",
     "tool_end",
@@ -239,6 +245,7 @@ class MonitorEvent(StrictModel):
         event = value.get("event")
         models = {
             "session_created": SessionCreatedEventData,
+            "intent_resolved": IntentResolvedEventData,
             "assistant_call": AssistantCallEventData,
             "tool_start": ToolStartEventData,
             "tool_end": ToolEndEventData,
@@ -266,6 +273,22 @@ class HardConstraint(StrictModel):
     value: str | int | float
     unit: str | None = None
     label: str = Field(min_length=1)
+
+
+class ConstraintRelaxationChange(StrictModel):
+    constraint_id: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    replacement: HardConstraint | None = None
+    reason: str = Field(
+        default="购物者明确确认后修改这项 Hard Constraint。", min_length=1, max_length=4000
+    )
+
+
+class ConstraintRelaxation(StrictModel):
+    constraint_id: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    previous: HardConstraint
+    replacement: HardConstraint | None = None
+    action: Literal["removed", "replaced"]
+    reason: str = Field(min_length=1, max_length=4000)
 
 
 class RankingProfile(StrictModel):
@@ -366,6 +389,39 @@ class PreferenceDecision(StrictModel):
     reason: str = Field(min_length=1)
 
 
+class TaskOverride(StrictModel):
+    field: PreferenceField
+    value: str = Field(min_length=1)
+    overridden_values: list[str] = Field(default_factory=list)
+    reason: str = Field(min_length=1)
+
+
+class RerunCommand(StrictModel):
+    user_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    idempotency_key: str | None = Field(
+        default=None, min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
+
+
+class ConstraintRelaxationCommand(StrictModel):
+    user_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    confirmed: bool = False
+    constraint_ids: list[str] = Field(default_factory=list, max_length=20)
+    changes: list[ConstraintRelaxationChange] = Field(default_factory=list, max_length=20)
+    idempotency_key: str | None = Field(
+        default=None, min_length=1, max_length=120, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
+
+    @model_validator(mode="after")
+    def normalize_constraint_ids(self) -> ConstraintRelaxationCommand:
+        ids = [*self.constraint_ids, *(change.constraint_id for change in self.changes)]
+        self.constraint_ids = list(dict.fromkeys(ids))
+        for change in self.changes:
+            if change.replacement is not None and change.replacement.id != change.constraint_id:
+                raise ValueError("a relaxed constraint replacement must keep the original id")
+        return self
+
+
 class PreferenceBackendStatus(StrictModel):
     requested_backend: Literal["memory", "redis"]
     backend: Literal["memory", "redis"]
@@ -397,6 +453,15 @@ class ShoppingPlan(StrictModel):
     ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
     working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
     source: ProviderSource = "computed"
+
+
+class IntentResolvedEventData(StrictModel):
+    resolved_query: str = Field(min_length=1, max_length=4000)
+    resolved_intent: ShoppingPlan
+    applied_preferences: RememberedPreference = Field(default_factory=RememberedPreference)
+    task_overrides: list[TaskOverride] = Field(default_factory=list)
+    constraint_relaxations: list[ConstraintRelaxation] = Field(default_factory=list)
+    data_mode: DataMode = "live"
 
 
 class SearchResult(StrictModel):
@@ -448,7 +513,7 @@ class Candidate(StrictModel):
     sales: int | None = None
     image_url: str | None = None
     product_url: str | None = None
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source: ProviderSource
     marketplace: Platform | None = None
     offer_id: str | None = None
@@ -458,6 +523,7 @@ class Candidate(StrictModel):
     retrieved_at: str | None = None
     provenance: OfferProvenance | None = None
     link_kind: OfferLinkKind | None = None
+    identity_evidence: IdentityEvidence | None = None
 
     @model_validator(mode="after")
     def normalize_marketplace(self) -> Candidate:
@@ -487,7 +553,7 @@ class PricePoint(StrictModel):
     sales: int | None = None
     image_url: str | None = None
     product_url: str | None = None
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    attributes: dict[str, JsonValue] = Field(default_factory=dict)
     source: ProviderSource
     note: str | None = None
     marketplace: Platform | None = None
@@ -613,6 +679,12 @@ class FileLink(StrictModel):
 class ShoppingSummaryOutput(StrictModel):
     thread_id: str
     final_answer: str
+    resolved_query: str | None = None
+    resolved_intent: ShoppingPlan | None = None
+    applied_preferences: RememberedPreference = Field(default_factory=RememberedPreference)
+    task_overrides: list[TaskOverride] = Field(default_factory=list)
+    constraint_relaxations: list[ConstraintRelaxation] = Field(default_factory=list)
+    product_evidence: list[Candidate] = Field(default_factory=list)
     mode: ResearchMode = "product_research"
     recommendations: list[Recommendation]
     comparison: list[LandedCost]
@@ -639,9 +711,18 @@ class ShoppingSummaryOutput(StrictModel):
     def normalize_result_contract(self) -> ShoppingSummaryOutput:
         if not self.matching_offers:
             self.matching_offers = list(self.comparison)
-        evidence_sources = {item.source for item in [*self.recommendations, *self.comparison]} | {
-            metadata.source for metadata in self.providers.values()
-        }
+        product_evidence_sources = {item.source for item in self.product_evidence}
+        result_item_sources = {item.source for item in [*self.recommendations, *self.comparison]}
+        provider_sources = {metadata.source for metadata in self.providers.values()}
+        if self.provider_mode == "live" and any(
+            source != "live" for source in product_evidence_sources
+        ):
+            raise ValueError("live result cannot contain non-live Product Evidence")
+        if self.provider_mode == "sandbox" and any(
+            source != "fixture" for source in product_evidence_sources
+        ):
+            raise ValueError("sandbox result cannot contain non-fixture Product Evidence")
+        evidence_sources = product_evidence_sources | result_item_sources | provider_sources
         if self.provider_mode == "live" and "fixture" in evidence_sources:
             raise ValueError("live result cannot contain fixture evidence")
         if self.provider_mode == "sandbox" and any(
@@ -667,7 +748,19 @@ class ShoppingSummaryOutput(StrictModel):
         return self
 
 
+class SnapshotLineage(StrictModel):
+    relation: Literal["rerun", "constraint_relaxation"]
+    parent_snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    parent_thread_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    parent_run_id: str = Field(pattern=r"^(?:legacy|[0-9a-f]{32})$")
+    root_snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    depth: int = Field(ge=1)
+    command_idempotency_key: str = Field(min_length=1, max_length=120)
+    changed_constraints: list[ConstraintRelaxation] = Field(default_factory=list)
+
+
 class TaskSnapshot(StrictModel):
+    snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
     thread_id: str
     run_id: str = Field(default="legacy", pattern=r"^(?:legacy|[0-9a-f]{32})$")
     status: Literal["running", "awaiting_clarification", "completed", "cancelled", "error"]
@@ -676,12 +769,60 @@ class TaskSnapshot(StrictModel):
     data_mode: DataMode = "live"
     created_at: str
     updated_at: str
+    lineage: SnapshotLineage | None = None
+    resolved_query: str | None = None
+    resolved_intent: ShoppingPlan | None = None
+    mode: ResearchMode | None = None
+    working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
+    applied_preferences: RememberedPreference = Field(default_factory=RememberedPreference)
+    task_overrides: list[TaskOverride] = Field(default_factory=list)
+    constraint_relaxations: list[ConstraintRelaxation] = Field(default_factory=list)
+    provider_coverage: dict[str, ProviderMetadata] = Field(default_factory=dict)
+    product_evidence: list[Candidate] = Field(default_factory=list)
+    exchange_rate: ExchangeRateProvenance | None = None
+    report_references: list[FileLink] = Field(default_factory=list)
     events: list[MonitorEvent] = Field(default_factory=list)
     result: ShoppingSummaryOutput | None = None
     clarification: ClarificationPrompt | None = None
     clarification_answers: dict[ClarificationField, str] = Field(default_factory=dict)
     error_code: str | None = None
     error: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_snapshot_id(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        if value.get("snapshot_id") is None and value.get("thread_id"):
+            return {**value, "snapshot_id": value["thread_id"]}
+        return value
+
+    @model_validator(mode="after")
+    def validate_result_contract(self) -> TaskSnapshot:
+        evidence_sources = {item.source for item in self.product_evidence}
+        if self.data_mode == "live" and any(source != "live" for source in evidence_sources):
+            raise ValueError("live snapshot cannot contain non-live Product Evidence")
+        if self.data_mode == "sandbox" and any(source != "fixture" for source in evidence_sources):
+            raise ValueError("sandbox snapshot cannot contain non-fixture Product Evidence")
+        if self.result is None:
+            return self
+        if self.result.data_mode != self.data_mode:
+            raise ValueError("snapshot and result data modes must match")
+        if self.mode is not None and self.mode != self.result.mode:
+            raise ValueError("snapshot and result research modes must match")
+        if (
+            self.resolved_intent is not None
+            and self.result.resolved_intent is not None
+            and self.resolved_intent != self.result.resolved_intent
+        ):
+            raise ValueError("snapshot and result resolved intents must match")
+        if self.product_evidence and self.product_evidence != self.result.product_evidence:
+            raise ValueError("snapshot and result Product Evidence must match")
+        if self.provider_coverage and self.provider_coverage != self.result.providers:
+            raise ValueError("snapshot and result provider coverage must match")
+        if self.report_references and self.report_references != self.result.files:
+            raise ValueError("snapshot and result report references must match")
+        return self
 
 
 class TaskSnapshotMessage(StrictModel):
@@ -690,6 +831,18 @@ class TaskSnapshotMessage(StrictModel):
     timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     )
+
+
+class TaskRerunResponse(StrictModel):
+    status: Literal["started"] = "started"
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    parent_snapshot_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    lineage: SnapshotLineage
+    idempotent: bool = False
+
+
+class ResearchHistoryResponse(StrictModel):
+    snapshots: list[TaskSnapshot] = Field(default_factory=list)
 
 
 class UploadResponse(StrictModel):

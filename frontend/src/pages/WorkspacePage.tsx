@@ -39,6 +39,10 @@ export default function WorkspacePage() {
   const [composerResetKey, setComposerResetKey] = useState(0);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [commandPending, setCommandPending] = useState<"rerun" | "relaxation" | null>(null);
+  const rerunCommandKeysRef = useRef(new Map<string, string>());
+  const relaxationCommandKeysRef = useRef(new Map<string, string>());
+  const historyLengthRef = useRef(history.length);
   const wasAwaitingClarificationRef = useRef(false);
   const busy = ["starting", "connecting", "running"].includes(state.status);
   const canCancel = Boolean(state.threadId) && ["connecting", "running", "awaiting_clarification"].includes(state.status);
@@ -60,8 +64,66 @@ export default function WorkspacePage() {
   }, [state.query, state.status]);
 
   useEffect(() => {
-    if (state.threadId) updateStatus(state.threadId, state.status, state.providerMode);
-  }, [state.threadId, state.status, state.providerMode, updateStatus]);
+    if (state.threadId) {
+      updateStatus(
+        state.threadId,
+        state.status,
+        state.providerMode,
+        state.snapshot?.lineage,
+        state.result?.mode ?? state.snapshot?.resolved_intent?.mode ?? undefined,
+      );
+    }
+  }, [
+    state.threadId,
+    state.status,
+    state.providerMode,
+    state.snapshot?.lineage,
+    state.result?.mode,
+    state.snapshot?.resolved_intent?.mode,
+    updateStatus,
+  ]);
+
+  useEffect(() => {
+    historyLengthRef.current = history.length;
+  }, [history.length]);
+
+  useEffect(() => {
+    let active = true;
+    void api.recentResearch(userId)
+      .then((response) => {
+        if (!active) return;
+        for (const snapshot of [...response.snapshots].reverse()) {
+          upsert({
+            threadId: snapshot.thread_id,
+            query: snapshot.query,
+            status: snapshot.status,
+            createdAt: snapshot.created_at,
+            providerMode: snapshot.result?.provider_mode ?? snapshot.data_mode,
+            lineage: snapshot.lineage,
+            mode: snapshot.result?.mode ?? snapshot.resolved_intent?.mode,
+          });
+        }
+      })
+      .catch(() => {
+        if (active && historyLengthRef.current === 0) setHistoryError("无法加载最近研究，请刷新后重试");
+      });
+    return () => {
+      active = false;
+    };
+  }, [upsert, userId]);
+
+  useEffect(() => {
+    if (!state.threadId || !state.query) return;
+    upsert({
+      threadId: state.threadId,
+      query: state.query,
+      status: state.status,
+      createdAt: state.snapshot?.created_at ?? new Date().toISOString(),
+      providerMode: state.result?.provider_mode ?? state.providerMode,
+      lineage: state.snapshot?.lineage,
+      mode: state.result?.mode ?? state.snapshot?.resolved_intent?.mode,
+    });
+  }, [state.threadId, state.query, state.status, state.providerMode, state.result, state.snapshot, upsert]);
 
   const clearWorkspace = () => {
     setDraft("");
@@ -117,6 +179,68 @@ export default function WorkspacePage() {
 
   const submitClarification = (response: string) => respondToClarification(response);
 
+  const idempotencyKey = () =>
+    typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+
+  const rerunResearch = async () => {
+    if (!state.threadId || state.status !== "completed" || commandPending) return;
+    const parentThreadId = state.threadId;
+    const commandKey = rerunCommandKeysRef.current.get(parentThreadId) ?? idempotencyKey();
+    rerunCommandKeysRef.current.set(parentThreadId, commandKey);
+    setCommandPending("rerun");
+    setHistoryError(null);
+    try {
+      const response = await api.rerunTask(state.threadId, userId, commandKey);
+      upsert({
+        threadId: response.thread_id,
+        query: state.query,
+        status: "running",
+        createdAt: new Date().toISOString(),
+        providerMode: state.providerMode,
+        lineage: response.lineage,
+        mode: state.result?.mode,
+      });
+      await loadThread(response.thread_id, state.query);
+      setMobileView("workspace");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Research Rerun 启动失败");
+    } finally {
+      setCommandPending(null);
+    }
+  };
+
+  const relaxConstraint = async (constraintId: string) => {
+    if (!state.threadId || state.status !== "completed" || commandPending) return;
+    if (!window.confirm("确认放宽这项 Hard Constraint 并开始新的 Shopping Research Task？")) return;
+    const commandScope = `${state.threadId}:${constraintId}`;
+    const commandKey = relaxationCommandKeysRef.current.get(commandScope) ?? idempotencyKey();
+    relaxationCommandKeysRef.current.set(commandScope, commandKey);
+    setCommandPending("relaxation");
+    setHistoryError(null);
+    try {
+      const response = await api.relaxTask(state.threadId, userId, {
+        confirmed: true,
+        constraint_ids: [constraintId],
+        idempotency_key: commandKey,
+      });
+      upsert({
+        threadId: response.thread_id,
+        query: state.query,
+        status: "running",
+        createdAt: new Date().toISOString(),
+        providerMode: state.providerMode,
+        lineage: response.lineage,
+        mode: state.result?.mode,
+      });
+      await loadThread(response.thread_id, state.query);
+      setMobileView("workspace");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Constraint Relaxation 启动失败");
+    } finally {
+      setCommandPending(null);
+    }
+  };
+
   const currentTitle = state.query || "新的购物研究";
   return (
     <div className={styles.app}>
@@ -169,6 +293,8 @@ export default function WorkspacePage() {
                 window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('textarea[name="shopping-query"]')?.focus(), 0);
               }}
               onReset={newResearch}
+              onRerun={state.status === "completed" && !commandPending ? () => void rerunResearch() : undefined}
+              onRelax={state.status === "completed" && !commandPending ? (constraintId) => void relaxConstraint(constraintId) : undefined}
             />
           </div>
           {state.status === "awaiting_clarification" && state.clarification ? (
