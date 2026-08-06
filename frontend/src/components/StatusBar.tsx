@@ -1,4 +1,4 @@
-import { AlertCircle, CheckCircle2, Cloud, CloudOff, LoaderCircle, Radio } from "lucide-react";
+import { AlertCircle, CheckCircle2, CircleHelp, Cloud, CloudOff, LoaderCircle, Radio } from "lucide-react";
 import type { AgentState } from "../hooks/useShoppingAgent";
 import { statusLabel } from "../utils/format";
 import styles from "./StatusBar.module.css";
@@ -8,6 +8,8 @@ export default function StatusBar({ state, onReconnect }: { state: AgentState; o
   const StatusIcon =
     state.status === "completed"
       ? CheckCircle2
+      : state.status === "awaiting_clarification"
+        ? CircleHelp
       : state.status === "error"
         ? AlertCircle
         : active

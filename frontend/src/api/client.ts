@@ -4,6 +4,7 @@ import type {
   PreferenceDeleteResponse,
   PreferencesResponse,
   ReadinessResponse,
+  ClarificationCommandResponse,
   TaskRequest,
   TaskSnapshot,
   TaskStartResponse,
@@ -103,6 +104,12 @@ export const api = {
   cancelTask: (threadId: string, control: RequestControl = {}) =>
     requestJson<{ status: string; thread_id?: string }>(`/api/task/${encodeURIComponent(threadId)}/cancel`, {
       method: "POST",
+      ...control,
+    }),
+  clarifyTask: (threadId: string, response: string, control: RequestControl = {}) =>
+    requestJson<ClarificationCommandResponse>(`/api/task/${encodeURIComponent(threadId)}/clarification`, {
+      method: "POST",
+      body: JSON.stringify({ response }),
       ...control,
     }),
   deleteTask: (threadId: string, control: RequestControl = {}) =>

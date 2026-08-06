@@ -15,7 +15,7 @@ def test_exact_offer_result_exposes_mode_matching_offers_and_alternatives(client
     started = client.post(
         "/api/task",
         json={
-            "query": "比价同款耳机，比较不同平台价格",
+            "query": "比价同款耳机，型号 Sony WH-1000XM5，比较不同平台价格",
             "user_id": "exact-api-user",
             "upload_ids": [],
         },

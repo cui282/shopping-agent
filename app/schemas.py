@@ -48,6 +48,12 @@ PreferenceDecisionStatus = Literal["applied", "ignored", "overridden"]
 PreferenceDecisionSource = Literal["current_request", "remembered_preference"]
 PreferenceDurability = Literal["local_evaluation", "durable"]
 CalculationExclusionReason = Literal["unsupported_currency", "invalid_amount"]
+ClarificationField = Literal["mode", "product_variant", "destination"]
+ClarificationReasonCode = Literal[
+    "mode_ambiguous",
+    "product_variant_ambiguous",
+    "destination_ambiguous",
+]
 EventName = Literal[
     "session_created",
     "assistant_call",
@@ -56,6 +62,8 @@ EventName = Literal[
     "fork",
     "task_result",
     "task_cancelled",
+    "clarification_required",
+    "clarification_resolved",
     "error",
 ]
 
@@ -176,6 +184,40 @@ class ErrorEventData(TaskCancelledEventData):
     code: str = Field(min_length=1)
 
 
+class ClarificationPrompt(StrictModel):
+    field: ClarificationField
+    reason_code: ClarificationReasonCode
+    question: str = Field(min_length=1, max_length=4000)
+
+
+class ClarificationRequiredEventData(ClarificationPrompt):
+    data_mode: DataMode = "live"
+
+
+class ClarificationResolvedEventData(StrictModel):
+    field: ClarificationField
+    reason_code: ClarificationReasonCode
+    response: str = Field(min_length=1, max_length=4000)
+    resolved_value: str | None = Field(default=None, min_length=1, max_length=4000)
+    data_mode: DataMode = "live"
+
+
+class ClarificationCommand(StrictModel):
+    response: str = Field(max_length=4000)
+
+    @field_validator("response", mode="before")
+    @classmethod
+    def normalize_response(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+
+class ClarificationCommandResponse(StrictModel):
+    status: Literal["resumed"] = "resumed"
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    field: ClarificationField
+    idempotent: bool = False
+
+
 class MonitorEvent(StrictModel):
     type: Literal["monitor_event"] = "monitor_event"
     event_id: str = Field(pattern=r"^evt-[0-9a-f]{32}$")
@@ -202,6 +244,8 @@ class MonitorEvent(StrictModel):
             "tool_end": ToolEndEventData,
             "fork": ForkEventData,
             "task_cancelled": TaskCancelledEventData,
+            "clarification_required": ClarificationRequiredEventData,
+            "clarification_resolved": ClarificationResolvedEventData,
             "error": ErrorEventData,
         }
         model = models.get(event)
@@ -626,7 +670,7 @@ class ShoppingSummaryOutput(StrictModel):
 class TaskSnapshot(StrictModel):
     thread_id: str
     run_id: str = Field(default="legacy", pattern=r"^(?:legacy|[0-9a-f]{32})$")
-    status: Literal["running", "completed", "cancelled", "error"]
+    status: Literal["running", "awaiting_clarification", "completed", "cancelled", "error"]
     query: str
     user_id: str
     data_mode: DataMode = "live"
@@ -634,6 +678,8 @@ class TaskSnapshot(StrictModel):
     updated_at: str
     events: list[MonitorEvent] = Field(default_factory=list)
     result: ShoppingSummaryOutput | None = None
+    clarification: ClarificationPrompt | None = None
+    clarification_answers: dict[ClarificationField, str] = Field(default_factory=dict)
     error_code: str | None = None
     error: str | None = None
 

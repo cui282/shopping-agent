@@ -62,6 +62,26 @@ describe("request lifecycle", () => {
     );
   });
 
+  it("posts a clarification response to the existing task", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ status: "resumed", thread_id: "thread-1", field: "mode", idempotent: false }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.clarifyTask("thread-1", "比较不同产品");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(/\/api\/task\/thread-1\/clarification$/),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ response: "比较不同产品" }),
+      }),
+    );
+  });
+
   it("sends an explicit future preference command", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(

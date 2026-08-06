@@ -28,13 +28,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from app import __version__
-from app.agent.main_agent import ProvidersUnavailableError, UnsupportedCapabilityError, run_agent
+from app.agent.main_agent import (
+    BlockingAmbiguityError,
+    ProvidersUnavailableError,
+    UnsupportedCapabilityError,
+    run_agent,
+)
 from app.api.connection import manager
 from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.commands import execute_memory_commands
 from app.memory.store import PreferenceStore, PreferenceStoreError, build_preference_store
 from app.schemas import (
+    ClarificationCommand,
+    ClarificationCommandResponse,
+    ClarificationPrompt,
+    ClarificationRequiredEventData,
+    ClarificationResolvedEventData,
     DataMode,
     EventName,
     HealthResponse,
@@ -52,6 +62,7 @@ from app.schemas import (
     TaskStarted,
     UploadResponse,
 )
+from app.tools.clarification import InvalidClarificationResponse, normalize_clarification_response
 from app.tools.price_compare import MissingExchangeRatesError
 from app.utils.path_utils import output_root, safe_join, session_dir, upload_root
 from app.utils.thread_ctx import thread_scope
@@ -262,8 +273,25 @@ def _record_event(
         raise RuntimeError(f"cannot record an event for unknown task {thread_id}")
     if emitted_run_id is not None and emitted_run_id != record.run_id:
         raise RuntimeError(f"cannot record an event from a superseded run for {thread_id}")
-    if record.snapshot.status != "running":
-        raise RuntimeError(f"cannot record an event for terminal task {thread_id}")
+    current_status = record.snapshot.status
+    allowed_statuses = {
+        "session_created": {"running"},
+        "assistant_call": {"running"},
+        "tool_start": {"running"},
+        "tool_end": {"running"},
+        "fork": {"running"},
+        "task_result": {"running"},
+        "task_cancelled": {"running", "awaiting_clarification"},
+        "clarification_required": {"running"},
+        "clarification_resolved": {"awaiting_clarification"},
+        "error": {"running"},
+    }
+    if current_status not in allowed_statuses[event]:
+        if current_status in {"completed", "cancelled", "error"}:
+            raise RuntimeError(f"cannot record an event for terminal task {thread_id}")
+        raise RuntimeError(
+            f"event {event} cannot transition task {thread_id} from {current_status}"
+        )
 
     sequence = record.snapshot.events[-1].sequence + 1 if record.snapshot.events else 1
     task_data_mode = record.snapshot.data_mode
@@ -295,11 +323,47 @@ def _record_event(
             error=None,
         )
     elif event == "task_cancelled":
-        changes.update(status="cancelled", result=None, error_code=None, error=None)
+        changes.update(
+            status="cancelled",
+            result=None,
+            clarification=None,
+            error_code=None,
+            error=None,
+        )
+    elif event == "clarification_required":
+        required = ClarificationRequiredEventData.model_validate(event_data)
+        changes.update(
+            status="awaiting_clarification",
+            result=None,
+            clarification=ClarificationPrompt(
+                field=required.field,
+                reason_code=required.reason_code,
+                question=required.question,
+            ),
+            error_code=None,
+            error=None,
+        )
+    elif event == "clarification_resolved":
+        resolved = ClarificationResolvedEventData.model_validate(event_data)
+        resolved_value = resolved.resolved_value or normalize_clarification_response(
+            resolved.field,
+            resolved.response,
+        )
+        changes.update(
+            status="running",
+            clarification=None,
+            clarification_answers={
+                **record.snapshot.clarification_answers,
+                resolved.field: resolved_value,
+            },
+            error_code=None,
+            error=None,
+        )
     elif event == "error":
         changes.update(
             status="error",
             result=None,
+            clarification=None,
             error_code=str(data.get("code") or "task_failed"),
             error=message,
         )
@@ -330,6 +394,9 @@ async def _execute_task(
     run_id: str,
     directory: Path,
     reference_images: list[dict[str, Any]],
+    *,
+    resume: bool = False,
+    clarification_answers: dict[str, str] | None = None,
 ) -> None:
     thread_id = request.thread_id
     assert thread_id is not None
@@ -340,15 +407,16 @@ async def _execute_task(
     try:
         async with task_slots:
             with thread_scope(thread_id, directory, run_id):
-                await monitor.emit(
-                    thread_id,
-                    "session_created",
-                    data={
-                        "thread_id": thread_id,
-                        "reference_images": reference_images,
-                        "data_mode": task_data_mode,
-                    },
-                )
+                if not resume:
+                    await monitor.emit(
+                        thread_id,
+                        "session_created",
+                        data={
+                            "thread_id": thread_id,
+                            "reference_images": reference_images,
+                            "data_mode": task_data_mode,
+                        },
+                    )
                 result = await asyncio.wait_for(
                     run_agent(
                         request,
@@ -356,6 +424,7 @@ async def _execute_task(
                         preference_store,
                         reference_images,
                         data_mode=task_data_mode,
+                        clarification_answers=clarification_answers,
                     ),
                     timeout=get_settings().task_timeout_seconds,
                 )
@@ -374,6 +443,19 @@ async def _execute_task(
                 run_id=run_id,
             )
         raise
+    except BlockingAmbiguityError as exc:
+        ambiguity = exc.ambiguity
+        await monitor.emit(
+            thread_id,
+            "clarification_required",
+            message=ambiguity.question,
+            data={
+                "field": ambiguity.field,
+                "reason_code": ambiguity.reason_code,
+                "question": ambiguity.question,
+            },
+            run_id=run_id,
+        )
     except asyncio.TimeoutError:
         message = "研究任务超过运行时限，请缩小范围后重试"
         await monitor.emit(
@@ -442,11 +524,21 @@ async def _execute(
     run_id: str,
     directory: Path,
     reference_images: list[dict[str, Any]],
+    *,
+    resume: bool = False,
+    clarification_answers: dict[str, str] | None = None,
 ) -> None:
     thread_id = request.thread_id
     assert thread_id is not None
     try:
-        await _execute_task(request, run_id, directory, reference_images)
+        await _execute_task(
+            request,
+            run_id,
+            directory,
+            reference_images,
+            resume=resume,
+            clarification_answers=clarification_answers,
+        )
     except SnapshotPersistenceError:
         logger.exception(
             "task timeline persistence failed; releasing worker ownership",
@@ -593,6 +685,136 @@ async def get_task(thread_id: str) -> TaskSnapshot:
     raise HTTPException(status_code=404, detail="task not found")
 
 
+def _reference_images(snapshot: TaskSnapshot) -> list[dict[str, Any]]:
+    for event in snapshot.events:
+        if event.event != "session_created":
+            continue
+        references = event.data.get("reference_images")
+        if isinstance(references, list) and all(isinstance(item, dict) for item in references):
+            return references
+    return []
+
+
+def _is_duplicate_clarification_response(
+    snapshot: TaskSnapshot, response: str
+) -> tuple[str, bool] | None:
+    normalized_response = response.strip()
+    for event in reversed(snapshot.events):
+        if event.event != "clarification_resolved":
+            continue
+        try:
+            resolved = ClarificationResolvedEventData.model_validate(event.data)
+            normalized = normalize_clarification_response(resolved.field, normalized_response)
+            recorded = resolved.resolved_value or normalize_clarification_response(
+                resolved.field,
+                resolved.response,
+            )
+        except (InvalidClarificationResponse, ValueError):
+            continue
+        if normalized == recorded:
+            return resolved.field, True
+    return None
+
+
+@app.post(
+    "/api/task/{thread_id}/clarification",
+    response_model=ClarificationCommandResponse,
+)
+async def clarify_task(
+    thread_id: str,
+    command: ClarificationCommand,
+) -> ClarificationCommandResponse:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="invalid thread id")
+
+    async with _task_lock(thread_id):
+        record = records.get(thread_id)
+        snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="task not found")
+        duplicate = _is_duplicate_clarification_response(snapshot, command.response)
+        if duplicate is not None:
+            field, _ = duplicate
+            return ClarificationCommandResponse(
+                thread_id=thread_id,
+                field=field,
+                idempotent=True,
+            )
+        if snapshot.status != "awaiting_clarification":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clarification_not_awaiting",
+                    "message": "The task is not awaiting clarification",
+                },
+            )
+
+        pending = snapshot.clarification
+        if pending is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "clarification_state_missing",
+                    "message": "The task has no pending clarification",
+                },
+            )
+        try:
+            normalized_response = normalize_clarification_response(
+                pending.field,
+                command.response,
+            )
+        except InvalidClarificationResponse as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "clarification_invalid_response",
+                    "field": exc.field,
+                    "message": str(exc),
+                },
+            ) from exc
+
+        if record is None:
+            record = TaskRecord(
+                run_id=snapshot.run_id, snapshot=snapshot, task=asyncio.current_task()
+            )
+            records[thread_id] = record
+
+        await monitor.emit(
+            thread_id,
+            "clarification_resolved",
+            message=f"已补充{pending.field}信息，继续研究",
+            data={
+                "field": pending.field,
+                "reason_code": pending.reason_code,
+                "response": command.response,
+                "resolved_value": normalized_response,
+            },
+            run_id=record.run_id,
+        )
+        request = TaskRequest(
+            query=snapshot.query,
+            thread_id=thread_id,
+            user_id=snapshot.user_id,
+            upload_ids=[],
+        )
+        record.task = asyncio.create_task(
+            _execute(
+                request,
+                record.run_id,
+                session_dir(thread_id),
+                _reference_images(snapshot),
+                resume=True,
+                clarification_answers=record.snapshot.clarification_answers,
+            ),
+            name=f"shopping-agent:resume:{thread_id}",
+        )
+        return ClarificationCommandResponse(
+            thread_id=thread_id,
+            field=pending.field,
+            idempotent=False,
+        )
+
+
 @app.delete("/api/task/{thread_id}")
 async def delete_task(thread_id: str) -> dict[str, str]:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
@@ -626,8 +848,22 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
             persisted = _load_snapshot(thread_id)
             if persisted is None:
                 raise HTTPException(status_code=404, detail="task not found")
-            if persisted.status != "running":
+            if persisted.status not in {"running", "awaiting_clarification"}:
                 return {"status": persisted.status, "thread_id": thread_id}
+            if persisted.status == "awaiting_clarification":
+                record = TaskRecord(
+                    run_id=persisted.run_id,
+                    snapshot=persisted,
+                    task=asyncio.current_task(),
+                )
+                records[thread_id] = record
+                await monitor.emit(
+                    thread_id,
+                    "task_cancelled",
+                    data={"thread_id": thread_id},
+                    run_id=record.run_id,
+                )
+                return {"status": "cancelled", "thread_id": thread_id}
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -635,6 +871,14 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
                     "message": "The task snapshot exists, but no active worker owns it",
                 },
             )
+        if record.snapshot.status == "awaiting_clarification":
+            await monitor.emit(
+                thread_id,
+                "task_cancelled",
+                data={"thread_id": thread_id},
+                run_id=record.run_id,
+            )
+            return {"status": "cancelled", "thread_id": thread_id}
         if record.snapshot.status != "running" or record.task.done():
             return {"status": record.snapshot.status, "thread_id": thread_id}
         record.task.cancel()

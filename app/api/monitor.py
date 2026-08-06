@@ -19,6 +19,8 @@ _MESSAGES = {
     "fork": "已创建并行检索分支",
     "task_result": "购物建议已生成",
     "task_cancelled": "购物任务已取消",
+    "clarification_required": "等待澄清",
+    "clarification_resolved": "已收到澄清回答",
     "error": "购物任务执行失败",
 }
 

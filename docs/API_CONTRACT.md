@@ -108,6 +108,8 @@ durable snapshot, even when the process-local event buffer is empty:
     "updated_at": "2026-07-30T12:00:01Z",
     "events": [],
     "result": null,
+    "clarification": null,
+    "clarification_answers": {},
     "error_code": null,
     "error": null
   },
@@ -151,6 +153,8 @@ Supported events:
 | `fork` | A marketplace branch started with explicit `platform` and `demand` |
 | `task_result` | Terminal success; `data` is `ShoppingSummaryOutput` |
 | `task_cancelled` | Terminal cancellation |
+| `clarification_required` | Non-terminal blocking ambiguity; `data` contains one `field`, stable `reason_code`, and one `question` |
+| `clarification_resolved` | Non-terminal answer recorded for the same task; `data` contains the field, submitted response, and canonical `resolved_value` |
 | `error` | Terminal failure; `data.code` is stable for client handling |
 
 `tool_end.data.outcome` is `success`, `degraded`, or `failure`. A failed tool emits `tool_end`
@@ -184,8 +188,8 @@ late non-terminal event roll back a terminal task state. A WebSocket for an unkn
 deleted task is rejected with close code `1008`.
 
 After the bounded WebSocket reconnect budget is exhausted, clients poll this durable snapshot at
-low frequency until it becomes terminal or the user selects another task. A still-running first
-snapshot is not treated as the end of recovery.
+low frequency until it becomes terminal, enters `awaiting_clarification`, or the user selects
+another task. A still-running first snapshot is not treated as the end of recovery.
 
 `GET /api/task/{thread_id}` returns a durable snapshot:
 
@@ -213,23 +217,63 @@ snapshot is not treated as the end of recovery.
     }
   ],
   "result": null,
+  "clarification": null,
+  "clarification_answers": {},
   "error_code": null,
   "error": null
 }
 ```
 
-Snapshot status is `running`, `completed`, `cancelled`, or `error`. `events` is the complete,
+Snapshot status is `running`, `awaiting_clarification`, `completed`, `cancelled`, or `error`. `events` is the complete,
 untruncated activity history owned by the task run. Clients discard events from a different task or
 `run_id`, but merge a reconnect snapshot with newer events already received for the same run.
+When status is `awaiting_clarification`, `clarification` contains the one pending question and
+`clarification_answers` contains canonical answers already recorded for this task. This is a
+non-terminal state: the task can be cancelled or deleted, and the same `thread_id`, `run_id`, and
+event history continue after a valid answer.
 Terminal status, result/error fields, and the terminal event are persisted together before
 broadcast. A snapshot write failure aborts publication rather than exposing an event that cannot be
 recovered. If persistence remains unavailable, the worker releases process-local ownership and
 closes the active WebSocket with code `1011`; once storage is writable again, the next snapshot read
 converts the last durable `running` state into `task_interrupted`.
 
-If a process restart leaves a `running` snapshot without an owning worker, the next read atomically
-changes it to `error` with `error_code=task_interrupted` and appends exactly one persistent `error`
+If a process restart leaves an `awaiting_clarification` snapshot without an owning worker, it is
+returned unchanged so the question can be answered. A `running` snapshot without an owning worker
+is instead atomically changed to `error` with `error_code=task_interrupted` and appends exactly one persistent `error`
 event instead of presenting a permanently running task.
+
+### Blocking clarification
+
+The deterministic planner checks blocking ambiguity before Remembered Preference recall, marketplace
+gateway calls, or price and landed-cost calculations. The supported fields and stable reason codes
+are `mode/mode_ambiguous`, `product_variant/product_variant_ambiguous`, and
+`destination/destination_ambiguous`. Missing optional color or style produces the visible
+`Working Assumption` entries in the eventual result and does not enter this state.
+
+`clarification_required.data` has this shape:
+
+```json
+{
+  "field": "mode",
+  "reason_code": "mode_ambiguous",
+  "question": "你要比较不同产品，还是同一 Product Variant 的跨平台报价？",
+  "data_mode": "sandbox"
+}
+```
+
+Only `POST /api/task/{thread_id}/clarification` accepts a clarification response, and only while
+the snapshot is `awaiting_clarification`:
+
+```json
+{"response": "比较不同产品"}
+```
+
+The successful response is `{"status":"resumed","thread_id":"...","field":"mode","idempotent":false}`.
+The server persists `clarification_resolved` before starting the continuation. A repeated response
+for the same recorded field is answered with the same shape and `idempotent=true` without creating
+another task or event. Responses in any other task state return HTTP 409 with stable
+`detail.code=clarification_not_awaiting`; invalid answers return HTTP 422 with
+`detail.code=clarification_invalid_response` and leave the task awaiting.
 
 Stable task error codes include `providers_unavailable`, `fx_rates_unavailable`,
 `unsupported_capability`, `task_timeout`, `task_failed`, and `task_interrupted`.
@@ -241,7 +285,9 @@ rates are excluded and `calculation_notice` discloses that partial exclusion.
 When `FX_RATES_JSON` is configured, `FX_RATES_AS_OF` is required so the response can preserve the
 effective date of the configured rates; the calculation basis is always exposed alongside it.
 
-`POST /api/task/{thread_id}/cancel` is idempotent for known terminal tasks. Active tasks return:
+`POST /api/task/{thread_id}/cancel` is idempotent for known terminal tasks and accepts both
+`running` and `awaiting_clarification` tasks. An awaiting task records `task_cancelled` without
+starting marketplace work. Active tasks return:
 
 ```json
 {"status": "cancelled", "thread_id": "thread-7b8cb4a9c23f"}

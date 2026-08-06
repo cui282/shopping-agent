@@ -46,6 +46,8 @@ function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     updated_at: "2026-07-30T12:00:00Z",
     events: [],
     result: null,
+    clarification: null,
+    clarification_answers: {},
     error_code: null,
     error: null,
     ...overrides,
@@ -96,6 +98,48 @@ describe("agentReducer", () => {
     });
     expect(state.status).toBe("running");
     expect(state.query).toBe("test");
+  });
+
+  it("enters and leaves the durable clarification state through ordered events", () => {
+    const required = timelineEvent(1, "clarification_required", {
+      field: "mode",
+      reason_code: "mode_ambiguous",
+      question: "请选择比较模式",
+      data_mode: "sandbox",
+    });
+    const waiting = agentReducer(initialAgentState, { type: "event", event: required });
+
+    expect(waiting.status).toBe("awaiting_clarification");
+    expect(waiting.clarification).toEqual({
+      field: "mode",
+      reason_code: "mode_ambiguous",
+      question: "请选择比较模式",
+    });
+
+    const resolved = timelineEvent(2, "clarification_resolved", {
+      field: "mode",
+      reason_code: "mode_ambiguous",
+      response: "比较不同产品",
+      resolved_value: "product_research",
+      data_mode: "sandbox",
+    });
+    const resumed = agentReducer(waiting, { type: "event", event: resolved });
+    expect(resumed.status).toBe("running");
+    expect(resumed.clarification).toBeNull();
+  });
+
+  it("restores an awaiting question from a durable snapshot", () => {
+    const snapshot = taskSnapshot({
+      status: "awaiting_clarification",
+      clarification: {
+        field: "destination",
+        reason_code: "destination_ambiguous",
+        question: "请确认收货地",
+      },
+    });
+    const restored = agentReducer(initialAgentState, { type: "snapshot", snapshot });
+    expect(restored.status).toBe("awaiting_clarification");
+    expect(restored.clarification?.field).toBe("destination");
   });
 
   it("deduplicates a replayed monitor event", () => {
@@ -298,6 +342,34 @@ describe("snapshot synchronization races", () => {
       expect(terminal?.status).toBe(terminalStatus);
     },
   );
+
+  it("stops snapshot recovery at an awaiting clarification without treating it as terminal", async () => {
+    const responses = [
+      taskSnapshot({ status: "running" }),
+      taskSnapshot({
+        status: "awaiting_clarification",
+        clarification: {
+          field: "mode",
+          reason_code: "mode_ambiguous",
+          question: "请选择比较模式",
+        },
+      }),
+    ];
+    let waits = 0;
+
+    const restored = await runSnapshotRecovery({
+      threadId: "thread-live",
+      request: async () => responses.shift()!,
+      isCurrent: () => true,
+      apply: () => undefined,
+      wait: async () => {
+        waits += 1;
+      },
+    });
+
+    expect(restored?.status).toBe("awaiting_clarification");
+    expect(waits).toBe(1);
+  });
 });
 
 describe("WebSocket protocol parsing", () => {

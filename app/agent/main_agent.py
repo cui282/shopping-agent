@@ -37,6 +37,11 @@ from app.tools import (
     shipping_calc,
     shopping_summary,
 )
+from app.tools.clarification import (
+    BlockingAmbiguity,
+    apply_clarification_context,
+    detect_blocking_ambiguity,
+)
 from app.tools.destination import SUPPORTED_DESTINATION, is_supported_destination
 from app.utils.thread_ctx import get_thread_id
 
@@ -49,6 +54,14 @@ class ProvidersUnavailableError(RuntimeError):
 
 class UnsupportedCapabilityError(RuntimeError):
     """The requested destination is outside the current landed-cost capability."""
+
+
+class BlockingAmbiguityError(RuntimeError):
+    """The request needs one deterministic clarification before research can continue."""
+
+    def __init__(self, ambiguity: BlockingAmbiguity) -> None:
+        self.ambiguity = ambiguity
+        super().__init__(ambiguity.question)
 
 
 ADVISORY_TOOLS = [planner]
@@ -183,10 +196,27 @@ async def run_agent(
     store: PreferenceStore,
     reference_images: list[dict[str, Any]] | None = None,
     data_mode: DataMode | None = None,
+    clarification_answers: dict[str, str] | None = None,
 ) -> ShoppingSummaryOutput:
     thread_id = get_thread_id()
     settings = get_settings()
     task_data_mode = data_mode or settings.data_mode
+    answers = clarification_answers or {}
+    query = strip_memory_commands(apply_clarification_context(request.query, answers))
+
+    plan = await _call_tool(monitor, "planner", {"query": query}, lambda: planner(query))
+    ambiguity = detect_blocking_ambiguity(
+        request.query,
+        plan,
+        resolved_fields=set(answers),
+    )
+    if ambiguity is not None:
+        raise BlockingAmbiguityError(ambiguity)
+    if not is_supported_destination(plan.destination):
+        raise UnsupportedCapabilityError(
+            f"当前仅支持配送至{SUPPORTED_DESTINATION}，暂不支持配送至{plan.destination}。"
+        )
+
     stored_preferences = await store.get(request.user_id)
     remembered = RememberedPreference.model_validate(
         {field: stored_preferences.get(field, []) for field in RememberedPreference.model_fields}
@@ -195,7 +225,6 @@ async def run_agent(
     if memory_commands:
         await execute_memory_commands(store, request.user_id, memory_commands)
     remembered = remembered_for_task(remembered, memory_commands)
-    query = strip_memory_commands(request.query)
 
     await monitor.emit(
         thread_id,
@@ -241,11 +270,6 @@ async def run_agent(
                 },
             )
 
-    plan = await _call_tool(monitor, "planner", {"query": query}, lambda: planner(query))
-    if not is_supported_destination(plan.destination):
-        raise UnsupportedCapabilityError(
-            f"当前仅支持配送至{SUPPORTED_DESTINATION}，暂不支持配送至{plan.destination}。"
-        )
     insight = await _call_tool(
         monitor,
         "category_insight",

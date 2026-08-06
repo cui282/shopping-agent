@@ -174,7 +174,8 @@
 
 .statusDot[data-status="running"],
 .statusDot[data-status="connecting"],
-.statusDot[data-status="starting"] {
+.statusDot[data-status="starting"],
+.statusDot[data-status="awaiting_clarification"] {
   background: var(--info);
 }
 

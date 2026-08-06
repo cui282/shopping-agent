@@ -810,7 +810,9 @@ function RankingDisclosure({ profile }: { profile: RankingProfile | undefined })
 
 export default function ResearchContent({ state, view, onViewChange, onUseStarter, onReset }: ResearchContentProps) {
   if (state.status === "idle") return <StarterState onUseStarter={onUseStarter} />;
-  if (["starting", "connecting", "running"].includes(state.status)) return <WaitingState eventCount={state.events.length} />;
+  if (["starting", "connecting", "running", "awaiting_clarification"].includes(state.status)) {
+    return <WaitingState eventCount={state.events.length} />;
+  }
   if (state.status === "error") {
     return (
       <section className={styles.terminalState} role="alert">

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { PanelRightOpen } from "lucide-react";
 import { api } from "../api/client";
 import ActivityRail from "../components/ActivityRail";
+import ClarificationPanel from "../components/ClarificationPanel";
 import MobileHeader, { type MobileView } from "../components/MobileHeader";
 import QueryComposer from "../components/QueryComposer";
 import ReadinessNotice from "../components/ReadinessNotice";
@@ -17,7 +18,17 @@ import { taskDisabledReason } from "../utils/trust";
 import styles from "./WorkspacePage.module.css";
 
 export default function WorkspacePage() {
-  const { state, startTask, cancelTask, loadThread, reset, clearDeletedThread, reconnect, refreshReadiness } =
+  const {
+    state,
+    startTask,
+    cancelTask,
+    respondToClarification,
+    loadThread,
+    reset,
+    clearDeletedThread,
+    reconnect,
+    refreshReadiness,
+  } =
     useShoppingAgent();
   const { history, upsert, updateStatus, remove } = useSessionHistory();
   const [userId] = useState(getAnonymousUserId);
@@ -28,10 +39,21 @@ export default function WorkspacePage() {
   const [composerResetKey, setComposerResetKey] = useState(0);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const wasAwaitingClarificationRef = useRef(false);
   const busy = ["starting", "connecting", "running"].includes(state.status);
-  const canCancel = Boolean(state.threadId) && ["connecting", "running"].includes(state.status);
+  const canCancel = Boolean(state.threadId) && ["connecting", "running", "awaiting_clarification"].includes(state.status);
   const disabledReason = taskDisabledReason(state.serviceStatus, state.readiness);
   const allowImageUpload = state.readiness?.capabilities.image_analysis === true;
+
+  const focusComposer = () => {
+    window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('textarea[name="shopping-query"]')?.focus(), 0);
+  };
+
+  useEffect(() => {
+    const wasAwaitingClarification = wasAwaitingClarificationRef.current;
+    wasAwaitingClarificationRef.current = state.status === "awaiting_clarification";
+    if (wasAwaitingClarification && state.status !== "awaiting_clarification") focusComposer();
+  }, [state.status]);
 
   useEffect(() => {
     if (state.query && (state.status !== "idle" || !draft)) setDraft(state.query);
@@ -62,7 +84,7 @@ export default function WorkspacePage() {
     upsert({
       threadId,
       query,
-      status: "running",
+      status: state.status === "awaiting_clarification" ? "awaiting_clarification" : "running",
       createdAt: new Date().toISOString(),
       providerMode: state.providerMode,
     });
@@ -92,6 +114,8 @@ export default function WorkspacePage() {
       setDeletingThreadId(null);
     }
   };
+
+  const submitClarification = (response: string) => respondToClarification(response);
 
   const currentTitle = state.query || "新的购物研究";
   return (
@@ -147,17 +171,26 @@ export default function WorkspacePage() {
               onReset={newResearch}
             />
           </div>
-          <QueryComposer
-            value={draft}
-            busy={busy}
-            canCancel={canCancel}
-            disabledReason={disabledReason}
-            allowImageUpload={allowImageUpload}
-            attachmentResetKey={composerResetKey}
-            onChange={setDraft}
-            onSubmit={(ids) => void submit(ids)}
-            onCancel={() => void cancelTask()}
-          />
+          {state.status === "awaiting_clarification" && state.clarification ? (
+            <ClarificationPanel
+              prompt={state.clarification}
+              onSubmit={submitClarification}
+              onCancel={cancelTask}
+              onRestoreFocus={focusComposer}
+            />
+          ) : (
+            <QueryComposer
+              value={draft}
+              busy={busy}
+              canCancel={canCancel}
+              disabledReason={disabledReason}
+              allowImageUpload={allowImageUpload}
+              attachmentResetKey={composerResetKey}
+              onChange={setDraft}
+              onSubmit={(ids) => void submit(ids)}
+              onCancel={() => void cancelTask()}
+            />
+          )}
         </main>
 
         <div className={styles.activityPane}>

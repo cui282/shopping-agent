@@ -19,7 +19,8 @@
 
 .task[data-status="running"],
 .task[data-status="starting"],
-.task[data-status="connecting"] {
+.task[data-status="connecting"],
+.task[data-status="awaiting_clarification"] {
   color: var(--info);
 }
 

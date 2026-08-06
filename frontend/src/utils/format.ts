@@ -36,6 +36,7 @@ export function statusLabel(status: TaskStatus): string {
     starting: "正在启动",
     connecting: "正在连接",
     running: "研究中",
+    awaiting_clarification: "等待确认",
     completed: "已完成",
     cancelled: "已取消",
     error: "需要处理",
@@ -99,6 +100,8 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
     fork: "并行检索",
     task_result: "推荐已生成",
     task_cancelled: "研究已取消",
+    clarification_required: "等待确认",
+    clarification_resolved: "已收到确认",
     error: "流程中断",
   };
   const detail = event.message || labels[event.event];

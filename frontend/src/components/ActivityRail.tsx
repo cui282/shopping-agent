@@ -5,6 +5,7 @@ import {
   Check,
   ChevronRight,
   Circle,
+  CircleHelp,
   GitFork,
   LoaderCircle,
   PanelRightClose,
@@ -41,6 +42,7 @@ function progressIndex(state: AgentState): number {
 function EventIcon({ event }: { event: MonitorEvent }) {
   if (event.event === "fork") return <GitFork size={14} aria-hidden="true" />;
   if (event.event === "error") return <AlertCircle size={14} aria-hidden="true" />;
+  if (event.event === "clarification_required") return <CircleHelp size={14} aria-hidden="true" />;
   if (event.event === "tool_end" && event.data.outcome !== "success") {
     return <AlertCircle size={14} aria-hidden="true" />;
   }

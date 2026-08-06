@@ -170,9 +170,23 @@ export type TaskStatus =
   | "starting"
   | "connecting"
   | "running"
+  | "awaiting_clarification"
   | "completed"
   | "cancelled"
   | "error";
+
+export type ClarificationField = "mode" | "product_variant" | "destination";
+
+export type ClarificationReasonCode =
+  | "mode_ambiguous"
+  | "product_variant_ambiguous"
+  | "destination_ambiguous";
+
+export interface ClarificationPrompt {
+  field: ClarificationField;
+  reason_code: ClarificationReasonCode;
+  question: string;
+}
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting" | "disconnected";
 
@@ -184,6 +198,8 @@ export type MonitorEventName =
   | "fork"
   | "task_result"
   | "task_cancelled"
+  | "clarification_required"
+  | "clarification_resolved"
   | "error";
 
 export interface MarketplaceDemand {
@@ -224,6 +240,14 @@ export interface MonitorEventDataMap {
   fork: ForkEventData;
   task_result: TaskResultData;
   task_cancelled: { thread_id: string; data_mode: DataMode };
+  clarification_required: ClarificationPrompt & { data_mode: DataMode };
+  clarification_resolved: {
+    field: ClarificationField;
+    reason_code: ClarificationReasonCode;
+    response: string;
+    resolved_value: string | null;
+    data_mode: DataMode;
+  };
   error: { thread_id: string; code: string; data_mode: DataMode };
 }
 
@@ -387,7 +411,7 @@ export interface TaskStartResponse {
 export interface TaskSnapshot {
   thread_id: string;
   run_id: string;
-  status: "running" | "completed" | "cancelled" | "error";
+  status: "running" | "awaiting_clarification" | "completed" | "cancelled" | "error";
   query: string;
   user_id: string;
   data_mode: DataMode;
@@ -395,8 +419,17 @@ export interface TaskSnapshot {
   updated_at: string;
   events: MonitorEvent[];
   result: TaskResultData | null;
+  clarification: ClarificationPrompt | null;
+  clarification_answers: Partial<Record<ClarificationField, string>>;
   error_code: string | null;
   error: string | null;
+}
+
+export interface ClarificationCommandResponse {
+  status: "resumed";
+  thread_id: string;
+  field: ClarificationField;
+  idempotent: boolean;
 }
 
 export interface TaskSnapshotMessage {

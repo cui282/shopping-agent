@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 import { api, buildWebSocketUrl } from "../api/client";
 import type {
   ConnectionStatus,
+  ClarificationPrompt,
   HealthResponse,
   MonitorEvent,
   ProviderMode,
@@ -29,6 +30,7 @@ export interface AgentState {
   connection: ConnectionStatus;
   events: MonitorEvent[];
   result: TaskResultData | null;
+  clarification: ClarificationPrompt | null;
   error: string | null;
   providerMode: ProviderMode;
   health: HealthResponse | null;
@@ -45,6 +47,7 @@ export const initialAgentState: AgentState = {
   connection: "idle",
   events: [],
   result: null,
+  clarification: null,
   error: null,
   providerMode: "unverified",
   health: null,
@@ -92,6 +95,35 @@ function timelineError(events: MonitorEvent[]): string | null {
   return lastTimelineEvent(events, (event) => event.event === "error")?.message ?? null;
 }
 
+function timelineClarification(events: MonitorEvent[]): ClarificationPrompt | null {
+  let pending: ClarificationPrompt | null = null;
+  for (const event of events) {
+    if (event.event === "clarification_required") {
+      pending = {
+        field: event.data.field,
+        reason_code: event.data.reason_code,
+        question: event.data.question,
+      };
+    } else if (event.event === "clarification_resolved" || TERMINAL_EVENTS.has(event.event)) {
+      pending = null;
+    }
+  }
+  return pending;
+}
+
+function timelineStatus(events: MonitorEvent[]): TaskStatus | null {
+  let status: TaskStatus | null = null;
+  for (const event of events) {
+    if (event.event === "session_created") status = "running";
+    else if (event.event === "clarification_required") status = "awaiting_clarification";
+    else if (event.event === "clarification_resolved") status = "running";
+    else if (event.event === "task_result") status = "completed";
+    else if (event.event === "task_cancelled") status = "cancelled";
+    else if (event.event === "error") status = "error";
+  }
+  return status;
+}
+
 type Action =
   | { type: "service_checking" }
   | { type: "service_loaded"; health: HealthResponse; readiness: ReadinessResponse }
@@ -135,6 +167,7 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         runId: null,
         events: [],
         result: null,
+        clarification: null,
         error: null,
         providerMode: "unverified",
       };
@@ -152,7 +185,11 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
       const events = mergeEvents(state.events, [action.event]);
       const terminal = terminalState(events);
       const result = timelineResult(events) ?? state.result;
-      const nextStatus = terminal ?? (["completed", "cancelled", "error"].includes(state.status) ? state.status : "running");
+      const nextStatus =
+        terminal ??
+        timelineStatus(events) ??
+        (["completed", "cancelled", "error"].includes(state.status) ? state.status : "running");
+      const clarification = timelineClarification(events);
       return {
         ...state,
         threadId: state.threadId ?? action.event.thread_id,
@@ -160,12 +197,18 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         events,
         status: nextStatus,
         result,
-        error: terminal === "error" ? timelineError(events) ?? "研究流程未能完成" : state.error,
+        clarification,
+        error:
+          terminal === "error"
+            ? timelineError(events) ?? "研究流程未能完成"
+            : nextStatus === "awaiting_clarification"
+              ? null
+              : state.error,
         providerMode: result ? normalizeProviderMode(result.provider_mode) : state.providerMode,
       };
     }
     case "cancelled":
-      return { ...state, status: "cancelled", connection: "idle", error: null };
+      return { ...state, status: "cancelled", connection: "idle", clarification: null, error: null };
     case "failure":
       return { ...state, status: "error", connection: "disconnected", error: action.message };
     case "snapshot": {
@@ -179,16 +222,20 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         : mergeEvents(snapshot.events ?? []);
       const result = snapshot.result ?? timelineResult(events) ?? (preserveCurrentEvents ? state.result : null);
       const normalized = normalizeSnapshotStatus(snapshot.status, Boolean(result));
-      const status = (preserveCurrentEvents ? terminalState(events) : null) ?? normalized;
+      const timeline = preserveCurrentEvents ? timelineStatus(events) : null;
+      const status: TaskStatus = ["awaiting_clarification", "completed", "cancelled", "error"].includes(normalized)
+        ? (normalized as TaskStatus)
+        : timeline ?? normalized;
       return {
         ...state,
         threadId: snapshot.thread_id,
         runId: snapshot.run_id,
         query: snapshot.query || action.fallbackQuery || state.query,
         status,
-        connection: status === "running" ? state.connection : "idle",
+        connection: status === "running" || status === "awaiting_clarification" ? state.connection : "idle",
         events,
         result,
+        clarification: snapshot.clarification ?? timelineClarification(events),
         providerMode: normalizeProviderMode(result?.provider_mode),
         error: snapshot.error ?? timelineError(events),
       };
@@ -212,6 +259,7 @@ function normalizeSnapshotStatus(status: string, hasResult: boolean): TaskStatus
   if (hasResult || ["completed", "complete", "done", "success"].includes(status)) return "completed";
   if (["cancelled", "canceled"].includes(status)) return "cancelled";
   if (["error", "failed"].includes(status)) return "error";
+  if (["awaiting_clarification", "awaiting-clarification"].includes(status)) return "awaiting_clarification";
   if (["running", "started", "pending"].includes(status)) return "running";
   return "idle";
 }
@@ -276,7 +324,8 @@ export async function runSnapshotRecovery(
       const snapshot = await options.request(options.threadId, options.signal);
       if (!options.isCurrent()) return null;
       options.apply(snapshot, options.fallbackQuery);
-      if (normalizeSnapshotStatus(snapshot.status, Boolean(snapshot.result)) !== "running") {
+      const status = normalizeSnapshotStatus(snapshot.status, Boolean(snapshot.result));
+      if (status !== "running") {
         return snapshot;
       }
     } catch {
@@ -289,6 +338,7 @@ export async function runSnapshotRecovery(
 
 export function useShoppingAgent() {
   const [state, dispatch] = useReducer(agentReducer, initialAgentState);
+  const stateRef = useRef(state);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
@@ -300,9 +350,12 @@ export function useShoppingAgent() {
   const startRequestRef = useRef<AbortController | null>(null);
   const loadRequestRef = useRef<AbortController | null>(null);
   const cancelRequestRef = useRef<AbortController | null>(null);
+  const clarificationRequestRef = useRef<AbortController | null>(null);
   const serviceRequestRef = useRef<AbortController | null>(null);
   const snapshotSyncRequestRef = useRef<AbortController | null>(null);
   const taskIntentRef = useRef<{ generation: number; threadId: string | null }>({ generation: 0, threadId: null });
+
+  stateRef.current = state;
 
   const replaceTaskIntent = useCallback((threadId: string | null) => {
     snapshotSyncRequestRef.current?.abort();
@@ -388,7 +441,10 @@ export function useShoppingAgent() {
             if (controller.signal.aborted) finish();
           }),
       });
-      if (terminal && isCurrent()) terminalRef.current = true;
+      if (terminal && isCurrent()) {
+        const status = normalizeSnapshotStatus(terminal.status, Boolean(terminal.result));
+        terminalRef.current = ["completed", "cancelled", "error"].includes(status);
+      }
     } finally {
       if (snapshotSyncRequestRef.current === controller) snapshotSyncRequestRef.current = null;
     }
@@ -497,6 +553,8 @@ export function useShoppingAgent() {
       loadRequestRef.current = null;
       cancelRequestRef.current?.abort();
       cancelRequestRef.current = null;
+      clarificationRequestRef.current?.abort();
+      clarificationRequestRef.current = null;
       replaceTaskIntent(null);
       startRequestRef.current?.abort();
       closeSocket();
@@ -558,11 +616,37 @@ export function useShoppingAgent() {
     }
   }, [closeSocket, replaceTaskIntent, state.query, state.threadId, syncSnapshot]);
 
+  const respondToClarification = useCallback(
+    async (response: string): Promise<{ ok: boolean; message?: string }> => {
+      const current = stateRef.current;
+      if (!current.threadId || current.status !== "awaiting_clarification") {
+        return { ok: false, message: "这次研究已经不在等待澄清" };
+      }
+      clarificationRequestRef.current?.abort();
+      const controller = new AbortController();
+      clarificationRequestRef.current = controller;
+      try {
+        await api.clarifyTask(current.threadId, response, { signal: controller.signal });
+        if (clarificationRequestRef.current !== controller || disposedRef.current) return { ok: false };
+        if (stateRef.current.connection !== "connected") connect(current.threadId, current.query);
+        await syncSnapshot(current.threadId, current.query);
+        return { ok: true };
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return { ok: false };
+        return { ok: false, message: error instanceof Error ? error.message : "提交澄清回答失败" };
+      } finally {
+        if (clarificationRequestRef.current === controller) clarificationRequestRef.current = null;
+      }
+    },
+    [connect, syncSnapshot],
+  );
+
   const loadThread = useCallback(
     async (threadId: string, fallbackQuery: string) => {
       startRequestRef.current?.abort();
       loadRequestRef.current?.abort();
       cancelRequestRef.current?.abort();
+      clarificationRequestRef.current?.abort();
       replaceTaskIntent(threadId);
       closeSocket();
       terminalRef.current = false;
@@ -581,7 +665,10 @@ export function useShoppingAgent() {
           return;
         }
         dispatch({ type: "snapshot", snapshot, fallbackQuery });
-        if (normalizeSnapshotStatus(snapshot.status, Boolean(snapshot.result)) === "running") connect(threadId, fallbackQuery);
+        const snapshotStatus = normalizeSnapshotStatus(snapshot.status, Boolean(snapshot.result));
+        if (snapshotStatus === "running" || snapshotStatus === "awaiting_clarification") {
+          connect(threadId, fallbackQuery);
+        }
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
         dispatch({ type: "failure", message: error instanceof Error ? error.message : "无法读取这次研究" });
@@ -599,6 +686,8 @@ export function useShoppingAgent() {
     loadRequestRef.current = null;
     cancelRequestRef.current?.abort();
     cancelRequestRef.current = null;
+    clarificationRequestRef.current?.abort();
+    clarificationRequestRef.current = null;
     replaceTaskIntent(null);
     closeSocket();
     terminalRef.current = true;
@@ -658,10 +747,21 @@ export function useShoppingAgent() {
       startRequestRef.current?.abort();
       loadRequestRef.current?.abort();
       cancelRequestRef.current?.abort();
+      clarificationRequestRef.current?.abort();
       snapshotSyncRequestRef.current?.abort();
       closeSocket();
     };
   }, [closeSocket, refreshReadiness]);
 
-  return { state, startTask, cancelTask, loadThread, reset, clearDeletedThread, reconnect, refreshReadiness };
+  return {
+    state,
+    startTask,
+    cancelTask,
+    respondToClarification,
+    loadThread,
+    reset,
+    clearDeletedThread,
+    reconnect,
+    refreshReadiness,
+  };
 }

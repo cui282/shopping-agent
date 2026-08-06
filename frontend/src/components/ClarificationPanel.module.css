@@ -1,0 +1,162 @@
+.panel {
+  position: relative;
+  z-index: 4;
+  flex: 0 0 auto;
+  padding: 14px clamp(12px, 3vw, 28px) calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid color-mix(in oklch, var(--accent) 22%, var(--line));
+  background: var(--surface);
+  box-shadow: var(--shadow-composer);
+}
+
+.heading,
+.inputRow,
+.message {
+  width: min(100%, 780px);
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.heading {
+  min-width: 0;
+  margin-bottom: 9px;
+}
+
+.eyebrow {
+  display: inline-flex;
+  min-height: 22px;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid color-mix(in oklch, var(--accent) 30%, var(--line));
+  border-radius: var(--r-pill);
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 10px;
+  font-weight: 720;
+  line-height: 1.4;
+}
+
+.heading h2 {
+  margin: 7px 0 0;
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 670;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.inputRow {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgb(20 28 26 / 0.1);
+}
+
+.inputRow:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 16%, transparent), 0 3px 12px rgb(20 28 26 / 0.09);
+}
+
+.inputRow[data-error="true"] {
+  border-color: var(--danger);
+}
+
+.inputRow input {
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: var(--ink);
+  background: transparent;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.inputRow input::placeholder {
+  color: color-mix(in oklch, var(--ink-muted) 82%, transparent);
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.cancelButton,
+.submitButton {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition-property: transform, background-color, color;
+  transition-duration: 140ms;
+}
+
+.cancelButton {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.submitButton {
+  color: #fff8f6;
+  background: var(--accent);
+}
+
+.cancelButton:disabled,
+.submitButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.message {
+  min-height: 19px;
+  margin-top: 2px;
+  color: var(--ink-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.inputRow[data-error="true"] + .message {
+  color: var(--danger);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+  clip-path: inset(50%);
+}
+
+.spinning {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 420px) {
+  .panel {
+    padding-right: max(8px, env(safe-area-inset-right));
+    padding-left: max(8px, env(safe-area-inset-left));
+  }
+
+  .inputRow {
+    padding-left: 9px;
+  }
+}
