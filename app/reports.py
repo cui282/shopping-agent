@@ -146,6 +146,22 @@ def _build_notices(report: ResearchReportSnapshot) -> list[ReportNotice]:
                 ),
             )
         )
+    if report.recall_provenance is not None:
+        degraded = [
+            f"{name}={channel.reason_code}"
+            for name, channel in report.recall_provenance.channels.items()
+            if channel.state in {"degraded", "unavailable"}
+        ]
+        notices.append(
+            ReportNotice(
+                code="recall_provenance",
+                message=(
+                    f"Recall mode={report.recall_provenance.mode}；"
+                    f"participating channels={','.join(report.recall_provenance.participating_channels) or 'none'}；"
+                    f"degraded reasons={','.join(degraded) or 'none'}。"
+                ),
+            )
+        )
     if report.exclusions or report.calculation_exclusions:
         notices.append(
             ReportNotice(
@@ -291,6 +307,7 @@ def render_markdown(report: ResearchReportSnapshot) -> str:
         f"- Query：{report.query}",
         f"- Resolved query：{report.resolved_query or '未提供'}",
         f"- Mode：`{report.mode}`",
+        f"- Recall mode：`{report.recall_provenance.mode if report.recall_provenance else 'deterministic_fallback'}`",
         "",
         "### Resolved Intent",
         "",
@@ -346,6 +363,27 @@ def render_markdown(report: ResearchReportSnapshot) -> str:
         )
     if not report.providers:
         lines.append("| - | - | - | - | - |")
+    lines.extend(["", "## Recall Provenance", ""])
+    if report.recall_provenance is None:
+        lines.append("- 未记录 Recall Provenance；按兼容路径视为 deterministic fallback。")
+    else:
+        lines.extend(
+            [
+                f"- Mode：`{report.recall_provenance.mode}`",
+                f"- Participating channels：`{', '.join(report.recall_provenance.participating_channels) or 'none'}`",
+                f"- Candidates：`{report.recall_provenance.selected_candidate_count}/{report.recall_provenance.input_candidate_count}`",
+                "",
+                "| Channel | State | Participated | Reason code | Disclosure |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for name, channel in report.recall_provenance.channels.items():
+            lines.append(
+                f"| {name} | {channel.state} | {str(channel.participated).lower()} | "
+                f"{channel.reason_code} | {channel.reason} |"
+            )
+        if report.recall_provenance.fallback_reason:
+            lines.extend(["", f"- Fallback reason：`{report.recall_provenance.fallback_reason}`"])
     lines.extend(
         [
             "",
@@ -544,6 +582,15 @@ def render_pdf(report: ResearchReportSnapshot) -> bytes:
         [_paragraph("Resolved query", label), _paragraph(report.resolved_query or "未提供", body)],
         [_paragraph("Mode", label), _paragraph(report.mode, body)],
         [_paragraph("Data mode", label), _paragraph(report.data_mode, body)],
+        [
+            _paragraph("Recall mode", label),
+            _paragraph(
+                report.recall_provenance.mode
+                if report.recall_provenance
+                else "deterministic_fallback",
+                body,
+            ),
+        ],
         [_paragraph("Lineage", label), _paragraph(_lineage_message(report), body)],
     ]
     table = Table(snapshot_rows, colWidths=[35 * mm, 145 * mm], repeatRows=0)
@@ -613,6 +660,29 @@ def render_pdf(report: ResearchReportSnapshot) -> bytes:
         )
     if not report.providers:
         story.append(_paragraph("无 Provider Coverage。", body))
+    section("Recall Provenance")
+    if report.recall_provenance is None:
+        story.append(
+            _paragraph("未记录 Recall Provenance；按兼容路径视为 deterministic fallback。", body)
+        )
+    else:
+        story.append(
+            _paragraph(
+                f"Mode={report.recall_provenance.mode}；"
+                f"participating={', '.join(report.recall_provenance.participating_channels) or 'none'}；"
+                f"candidates={report.recall_provenance.selected_candidate_count}/"
+                f"{report.recall_provenance.input_candidate_count}",
+                body,
+            )
+        )
+        for name, channel in report.recall_provenance.channels.items():
+            story.append(
+                _paragraph(
+                    f"{name}：state={channel.state}；participated={channel.participated}；"
+                    f"reason_code={channel.reason_code}；{channel.reason}",
+                    body,
+                )
+            )
 
     def item_section(name: str, items: list[Candidate | LandedCost], empty: str) -> None:
         section(name)

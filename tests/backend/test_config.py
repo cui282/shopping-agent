@@ -128,3 +128,10 @@ def test_non_finite_numeric_configuration_fails_fast(
 
     with pytest.raises(ConfigurationError, match="TASK_TIMEOUT_SECONDS"):
         get_settings()
+
+
+def test_invalid_recall_configuration_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANN_BACKEND", "vector-db")
+
+    with pytest.raises(ConfigurationError, match="ANN_BACKEND"):
+        get_settings()

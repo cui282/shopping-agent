@@ -157,6 +157,7 @@ function snapshotAfterEvent(snapshot: TaskSnapshot | null, event: MonitorEvent):
       product_evidence: result.product_evidence ?? base.product_evidence,
       exchange_rate: result.exchange_rate,
       report_references: result.files,
+      recall_provenance: result.recall_provenance ?? base.recall_provenance,
       result,
       error_code: null,
       error: null,

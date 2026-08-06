@@ -192,8 +192,8 @@ Marketplace Gateway adapter 负责上游平台的 OAuth/鉴权、签名、地区
 - `ALLOW_RULES_FALLBACK=false` 可要求模型配置完整，否则运行状态不可用。
 - `web_search` 提供 Tavily 适配器扩展点，但尚未接入默认研究工作流；仅设置 `TAVILY_API_KEY` 不会改变推荐结果。
 - `STORE_BACKEND=redis` 与 `STORE_REDIS_URL` 启用带 TTL 的持久偏好；生产 readiness 会提示不要使用内存 Store。
-- `OPENSEARCH_URL` 等变量启用类目知识检索；没有向量时使用 BM25，并披露降级原因。
-- `ANN_BACKEND=faiss` 与三个 `TOWER_*_ENDPOINT` 是个性化召回扩展点，不会默认启用。
+- `OPENSEARCH_URL` 等变量启用类目知识检索；配置后它会进入研究路径并披露请求或语义降级原因。
+- `ANN_BACKEND=faiss`、`ANN_INDEX_PATH`、`TOWER_QUERY_ENDPOINT` 和 `TOWER_ITEM_ENDPOINT` 启用真实候选召回；缺少任一可选 channel 时 readiness 与结果会显示稳定降级原因，并保留确定性 fallback。
 
 跨币种排序应配置可维护的汇率快照：
 

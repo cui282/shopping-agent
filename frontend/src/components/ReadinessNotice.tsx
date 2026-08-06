@@ -1,6 +1,13 @@
 import { AlertTriangle, CircleAlert, LoaderCircle, RefreshCw } from "lucide-react";
 import type { AgentState } from "../hooks/useShoppingAgent";
-import { providerNameLabel, providerReasonLabel, requiredActionLabel } from "../utils/trust";
+import {
+  providerNameLabel,
+  providerReasonLabel,
+  recallChannelLabel,
+  recallModeLabel,
+  recallStateLabel,
+  requiredActionLabel,
+} from "../utils/trust";
 import styles from "./ReadinessNotice.module.css";
 
 interface ReadinessNoticeProps {
@@ -50,8 +57,12 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
       : readiness.data_mode === "mixed"
         ? "Developer Diagnostic mode 已启用"
         : "部分服务能力已降级";
-  const actions = readiness.required_actions.map(requiredActionLabel);
+  const actions = [
+    ...readiness.required_actions,
+    ...(readiness.recall?.required_actions ?? []),
+  ].map(requiredActionLabel);
   const providers = Object.entries(readiness.providers);
+  const recallChannels = readiness.recall ? Object.entries(readiness.recall.channels) : [];
 
   return (
     <div className={styles.notice} data-state={blocked ? "error" : "warning"} role={blocked ? "alert" : "status"}>
@@ -85,6 +96,24 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
               </li>
             ))}
           </ul>
+        )}
+        {readiness.recall && (
+          <>
+            <span>
+              召回配置：{recallModeLabel(readiness.recall.mode)}；可选 channel 缺失时保留 deterministic fallback。
+            </span>
+            {recallChannels.length > 0 && (
+              <ul className={styles.providers} aria-label="召回 channel readiness">
+                {recallChannels.map(([name, channel]) => (
+                  <li key={name} data-available={channel.state === "ready"}>
+                    <strong>{recallChannelLabel(name)}</strong>
+                    <span>{recallStateLabel(channel.state)} · {channel.reason_code}</span>
+                    {channel.state !== "ready" && <small>{channel.reason}</small>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
       <button type="button" onClick={onRefresh}>

@@ -45,11 +45,59 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
     "image_upload": true,
     "image_analysis": false
   },
+  "recall": {
+    "mode": "deterministic_fallback",
+    "channels": {
+      "opensearch": {
+        "channel": "opensearch",
+        "configured": false,
+        "state": "unavailable",
+        "reason_code": "not_configured",
+        "reason": "channel is not configured; deterministic fallback remains active",
+        "participated": false
+      },
+      "query_tower": {
+        "channel": "query_tower",
+        "configured": false,
+        "state": "unavailable",
+        "reason_code": "ann_backend_disabled",
+        "reason": "ANN backend is disabled; deterministic fallback remains active",
+        "participated": false
+      },
+      "item_tower": {
+        "channel": "item_tower",
+        "configured": false,
+        "state": "unavailable",
+        "reason_code": "ann_backend_disabled",
+        "reason": "ANN backend is disabled; deterministic fallback remains active",
+        "participated": false
+      },
+      "faiss": {
+        "channel": "faiss",
+        "configured": false,
+        "state": "unavailable",
+        "reason_code": "backend_disabled",
+        "reason": "ANN_BACKEND is disabled; deterministic fallback remains active",
+        "participated": false
+      }
+    },
+    "required_actions": [
+      "Configure OPENSEARCH_URL for category knowledge recall",
+      "Enable ANN_BACKEND=faiss and configure ANN_INDEX_PATH for ANN recall",
+      "Configure TOWER_QUERY_ENDPOINT for query-tower recall",
+      "Configure TOWER_ITEM_ENDPOINT for item-tower recall"
+    ]
+  },
   "required_actions": []
 }
 ```
 
 `status` is `ready`, `degraded`, or `not_ready`. Clients must use `task_ready`, not liveness or provider count, to enable task submission.
+The additive `recall` object reports configuration before a task runs. Its `configured` state is
+not a runtime health claim; terminal result provenance and `tool_end` carry the actual `ready`,
+`degraded`, or `unavailable` state for each channel. Missing optional recall configuration keeps
+the marketplace task runnable when the core runtime is ready, but readiness remains visibly
+degraded and lists the required action.
 
 ## Task lifecycle
 
@@ -153,7 +201,9 @@ with live events. Monitor events use this envelope:
     "source": "live",
     "provider": "amazon_api",
     "status": "ok",
-    "fallback_reason": null
+    "fallback_reason": null,
+    "failure_reason": null,
+    "recall_provenance": null
   },
   "timestamp": "2026-07-30T12:00:00Z"
 }
@@ -198,6 +248,9 @@ before the task-level `error`. `fork.data` has this shape:
 `sandbox_forbidden`; this code is stable for client handling while `fallback_reason` remains a
 human-readable disclosure. Every event in one task uses the same data mode. `mixed` is emitted only
 when explicit developer diagnostics are enabled.
+The recall tool's `tool_end.data.recall_provenance` is the same immutable object persisted on the
+terminal result and snapshot. It reports the actual recall mode, participating channels, candidate
+counts, and each channel's stable reason code.
 
 Clients must branch on `event`; `message` is display text and may change. `event_id` is stable for
 the lifetime of the event. `run_id` identifies one execution of a thread, while `sequence` starts at
@@ -252,7 +305,8 @@ another task. A still-running first snapshot is not treated as the end of recove
   "clarification": null,
   "clarification_answers": {},
   "error_code": null,
-  "error": null
+  "error": null,
+  "recall_provenance": null
 }
 ```
 
@@ -641,6 +695,72 @@ ranking, or minimum-price conclusions.
 
 Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or
 `unavailable`. `failure_reason` is nullable and uses the stable provider failure codes above.
+
+### Recall provenance
+
+`task_result.data.recall_provenance`, `snapshot.recall_provenance`, and
+`ShoppingSummaryOutput.recall_provenance` are additive typed fields:
+
+```json
+{
+  "mode": "hybrid",
+  "channels": {
+    "opensearch": {
+      "channel": "opensearch",
+      "configured": true,
+      "state": "ready",
+      "reason_code": "ready",
+      "reason": "OpenSearch category knowledge was returned",
+      "participated": true
+    },
+    "query_tower": {
+      "channel": "query_tower",
+      "configured": true,
+      "state": "ready",
+      "reason_code": "ready",
+      "reason": "query embedding returned a finite vector",
+      "participated": true
+    },
+    "item_tower": {
+      "channel": "item_tower",
+      "configured": true,
+      "state": "ready",
+      "reason_code": "ready",
+      "reason": "item embeddings returned for every Product Evidence candidate",
+      "participated": true
+    },
+    "faiss": {
+      "channel": "faiss",
+      "configured": true,
+      "state": "ready",
+      "reason_code": "ready",
+      "reason": "Faiss returned candidate IDs and similarity scores",
+      "participated": true
+    }
+  },
+  "participating_channels": ["opensearch", "query_tower", "item_tower", "faiss"],
+  "fallback_reason": null,
+  "input_candidate_count": 12,
+  "selected_candidate_count": 8
+}
+```
+
+`mode` is `hybrid` only when all four configured channels participated successfully,
+`partial_hybrid` when at least one channel participated and another was degraded or unavailable,
+and `deterministic_fallback` when no optional channel could safely contribute. Each channel is
+reported independently with `configured`, `ready`, `degraded`, or `unavailable` state and a stable
+`reason_code`; `participated` means that channel affected the current candidate selection or
+ordering. The canonical channel order is OpenSearch, query tower, item tower, then Faiss.
+
+OpenSearch contributes category knowledge and semantic context only. Query and item embeddings
+and ANN scores can select or order candidates only from the marketplace `Product Evidence` already
+returned by the parallel gateway branches. The query/item cosine is a deterministic secondary
+recall signal after the ANN score, including tie-breaking when ANN scores are equal. Recall never
+creates an offer, fills a missing product fact, or changes `Hard Constraint`, `Identity Evidence`,
+`Landed Cost`, or the final deterministic ranking boundary. The raw `product_evidence` list remains
+complete; only the selected subset is passed into cost calculation and ranking. When recall is
+empty, unavailable, times out, or fails, the stable fallback preserves the original Product
+Evidence order and discloses the reason.
 
 Every recommendation and comparison row carries the same normalized offer evidence before adding
 calculated price, shipping, duty, and ranking fields:

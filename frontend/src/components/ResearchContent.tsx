@@ -34,6 +34,9 @@ import {
   providerReasonLabel,
   providerSourceLabel,
   providerStatusLabel,
+  recallChannelLabel,
+  recallModeLabel,
+  recallStateLabel,
   resultBadgeLabel,
 } from "../utils/trust";
 import styles from "./ResearchContent.module.css";
@@ -530,6 +533,38 @@ function ProviderDisclosure({ state }: { state: AgentState }) {
   );
 }
 
+function RecallDisclosure({ state }: { state: AgentState }) {
+  const provenance = state.result?.recall_provenance;
+  if (!provenance) return null;
+  const channels = Object.entries(provenance.channels);
+  return (
+    <section className={styles.providerDisclosure} aria-labelledby="recall-heading">
+      <div>
+        <h3 id="recall-heading">候选召回</h3>
+        <span>
+          {recallModeLabel(provenance.mode)} · {provenance.selected_candidate_count}/
+          {provenance.input_candidate_count} 个 Product Evidence 候选进入成本与排序路径
+        </span>
+      </div>
+      <ul>
+        {channels.map(([name, channel]) => (
+          <li key={name} data-status={channel.state === "configured" ? "degraded" : channel.state}>
+            <strong>{recallChannelLabel(name)}</strong>
+            <span>
+              {recallStateLabel(channel.state)}
+              {channel.participated ? " · 已参与" : " · 未参与"}
+            </span>
+            {(channel.state !== "ready" || channel.reason_code !== "ready") && (
+              <small>{channel.reason_code}：{channel.reason}</small>
+            )}
+          </li>
+        ))}
+      </ul>
+      {provenance.fallback_reason && <p>{`降级原因：${provenance.fallback_reason}`}</p>}
+    </section>
+  );
+}
+
 function IdentityEvidenceLine({ evidence }: { evidence: IdentityEvidence | null | undefined }) {
   if (!evidence) return null;
   const details = [
@@ -989,6 +1024,7 @@ export default function ResearchContent({
       </p>
       <RankingDisclosure profile={result?.ranking_profile} />
       <ProviderDisclosure state={state} />
+      <RecallDisclosure state={state} />
       <DecisionTransparency state={state} onRelax={onRelax} />
 
       <div

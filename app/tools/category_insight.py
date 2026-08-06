@@ -77,6 +77,31 @@ def _default_insight(category: str) -> dict[str, Any]:
     }
 
 
+def curated_category_insight(
+    category: str,
+    *,
+    fallback_reason: str | None = None,
+) -> CategoryInsightOutput:
+    data = _LOCAL_INSIGHTS.get(category, _default_insight(category))
+    return CategoryInsightOutput(
+        category=category,
+        components=data["components"],
+        bestsellers=[Bestseller.model_validate(item) for item in data["bestsellers"]],
+        attributes=[AttributeDist.model_validate(item) for item in data["attributes"]],
+        price_tiers=[
+            PriceTier(tier=tier, range_cny=price_range, notes=notes)
+            for tier, price_range, notes in data["tiers"]
+        ],
+        confidence=0.86 if category in _LOCAL_INSIGHTS else 0.68,
+        provider=ProviderMetadata(
+            source="curated",
+            provider="built-in-category-kb",
+            status="degraded" if fallback_reason else "ok",
+            fallback_reason=fallback_reason,
+        ),
+    )
+
+
 async def _opensearch_insight(category: str, depth: str) -> CategoryInsightOutput:
     base_url = os.environ["OPENSEARCH_URL"].rstrip("/")
     index = os.getenv("OPENSEARCH_CATEGORY_INDEX", "shopping_agent_category_kb")
@@ -122,7 +147,10 @@ async def _opensearch_insight(category: str, depth: str) -> CategoryInsightOutpu
         price_tiers=[PriceTier.model_validate(item) for item in merged.get("price_tiers", [])],
         confidence=float(merged.get("confidence", 0.7)),
         provider=ProviderMetadata(
-            source="live", provider="opensearch", fallback_reason=semantic_unavailable
+            source="live",
+            provider="opensearch",
+            status="degraded" if semantic_unavailable else "ok",
+            fallback_reason=semantic_unavailable,
         ),
     )
 
@@ -140,21 +168,4 @@ async def category_insight(
             fallback_reason = f"OpenSearch unavailable: {type(exc).__name__}"
     else:
         fallback_reason = "OPENSEARCH_URL is not configured"
-    data = _LOCAL_INSIGHTS.get(category, _default_insight(category))
-    return CategoryInsightOutput(
-        category=category,
-        components=data["components"],
-        bestsellers=[Bestseller.model_validate(item) for item in data["bestsellers"]],
-        attributes=[AttributeDist.model_validate(item) for item in data["attributes"]],
-        price_tiers=[
-            PriceTier(tier=tier, range_cny=price_range, notes=notes)
-            for tier, price_range, notes in data["tiers"]
-        ],
-        confidence=0.86 if category in _LOCAL_INSIGHTS else 0.68,
-        provider=ProviderMetadata(
-            source="curated",
-            provider="built-in-category-kb",
-            status="degraded" if fallback_reason else "ok",
-            fallback_reason=fallback_reason,
-        ),
-    )
+    return curated_category_insight(category, fallback_reason=fallback_reason)

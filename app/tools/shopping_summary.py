@@ -10,6 +10,7 @@ from app.schemas import (
     LandedCost,
     PreferenceDecision,
     ProviderMetadata,
+    RecallProvenance,
     RememberedPreference,
     ShoppingPlan,
     ShoppingSummaryOutput,
@@ -49,6 +50,7 @@ async def shopping_summary(
     task_overrides: list[TaskOverride] | None = None,
     constraint_relaxations: list[ConstraintRelaxation] | None = None,
     product_evidence: list[Candidate] | None = None,
+    recall_provenance: RecallProvenance | None = None,
 ) -> ShoppingSummaryOutput:
     """Create the typed terminal result; the API materializes reports from its snapshot."""
 
@@ -213,5 +215,6 @@ async def shopping_summary(
         relaxation_suggestions=picks.relaxation_suggestions,
         match_status=picks.match_status,
         preference_decisions=preference_decisions,
+        recall_provenance=recall_provenance,
     )
     return result

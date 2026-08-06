@@ -8,6 +8,7 @@ from typing import Literal
 AppEnvironment = Literal["development", "test", "production"]
 AgentMode = Literal["auto", "llm", "rules"]
 RuntimeStatus = Literal["ready", "degraded", "not_ready"]
+AnnBackend = Literal["disabled", "faiss"]
 
 MARKETPLACES = ("amazon", "shopee", "aliexpress", "ebay")
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -94,6 +95,14 @@ class Settings:
     max_upload_bytes: int
     cors_origins: tuple[str, ...]
     marketplaces: tuple[MarketplaceSettings, ...]
+    ann_backend: AnnBackend
+    ann_index_path: str
+    tower_query_endpoint: str
+    tower_item_endpoint: str
+    opensearch_url: str
+    opensearch_category_index: str
+    opensearch_search_pipeline: str
+    recall_timeout_seconds: float
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -130,6 +139,18 @@ class Settings:
             max_upload_bytes=_integer("UPLOAD_MAX_BYTES", 8 * 1024 * 1024, 1024),
             cors_origins=origins,
             marketplaces=marketplaces,
+            ann_backend=_choice("ANN_BACKEND", "disabled", {"disabled", "faiss"}),  # type: ignore[arg-type]
+            ann_index_path=os.getenv("ANN_INDEX_PATH", "./data/item_index.faiss").strip(),
+            tower_query_endpoint=os.getenv("TOWER_QUERY_ENDPOINT", "").strip(),
+            tower_item_endpoint=os.getenv("TOWER_ITEM_ENDPOINT", "").strip(),
+            opensearch_url=os.getenv("OPENSEARCH_URL", "").strip(),
+            opensearch_category_index=os.getenv(
+                "OPENSEARCH_CATEGORY_INDEX", "shopping_agent_category_kb"
+            ).strip(),
+            opensearch_search_pipeline=os.getenv(
+                "OPENSEARCH_SEARCH_PIPELINE", "shopping-agent-hybrid-pipeline"
+            ).strip(),
+            recall_timeout_seconds=_number("RECALL_TIMEOUT_SECONDS", 10, 1),
         )
 
     @property
@@ -164,6 +185,31 @@ class Settings:
             and self.app_env != "production"
             and not self.sandbox_mode
         )
+
+    @property
+    def recall_configuration_complete(self) -> bool:
+        return bool(
+            self.opensearch_url
+            and self.ann_backend == "faiss"
+            and self.ann_index_path
+            and self.tower_query_endpoint
+            and self.tower_item_endpoint
+        )
+
+    @property
+    def recall_required_actions(self) -> tuple[str, ...]:
+        actions: list[str] = []
+        if not self.opensearch_url:
+            actions.append("Configure OPENSEARCH_URL for category knowledge recall")
+        if self.ann_backend == "disabled":
+            actions.append("Enable ANN_BACKEND=faiss and configure ANN_INDEX_PATH for ANN recall")
+        elif not self.ann_index_path:
+            actions.append("Configure ANN_INDEX_PATH for Faiss recall")
+        if not self.tower_query_endpoint:
+            actions.append("Configure TOWER_QUERY_ENDPOINT for query-tower recall")
+        if not self.tower_item_endpoint:
+            actions.append("Configure TOWER_ITEM_ENDPOINT for item-tower recall")
+        return tuple(actions)
 
     @property
     def data_mode(self) -> Literal["live", "sandbox", "mixed"]:
@@ -219,6 +265,7 @@ class Settings:
             or self.fixture_fallback_enabled
             or len(self.configured_marketplaces) < len(MARKETPLACES)
             or (self.app_env == "production" and self.store_backend == "memory")
+            or not self.recall_configuration_complete
         ):
             return "degraded"
         return "ready"

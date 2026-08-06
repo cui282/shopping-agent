@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections.abc import Awaitable, Callable
@@ -18,7 +19,9 @@ from app.memory.commands import (
 )
 from app.memory.injector import resolve_preferences
 from app.memory.store import PreferenceStore
+from app.recall.orchestrator import RecallOrchestrator
 from app.schemas import (
+    CategoryInsightOutput,
     ConstraintRelaxation,
     ConstraintRelaxationChange,
     DataMode,
@@ -27,6 +30,8 @@ from app.schemas import (
     Platform,
     ProviderFailureReason,
     ProviderMetadata,
+    RecallProvenance,
+    RecallResult,
     RememberedPreference,
     ShoppingPlan,
     ShoppingSummaryOutput,
@@ -43,6 +48,7 @@ from app.tools import (
     shipping_calc,
     shopping_summary,
 )
+from app.tools.category_insight import curated_category_insight
 from app.tools.clarification import (
     BlockingAmbiguity,
     apply_clarification_context,
@@ -71,6 +77,21 @@ class BlockingAmbiguityError(RuntimeError):
 
 
 ADVISORY_TOOLS = [planner]
+recall_orchestrator = RecallOrchestrator()
+
+
+async def _category_insight_with_fallback(category: str) -> CategoryInsightOutput:
+    try:
+        return await asyncio.wait_for(
+            category_insight(category), timeout=get_settings().recall_timeout_seconds
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - category knowledge is optional
+        return curated_category_insight(
+            category,
+            fallback_reason=f"category insight failed: {type(exc).__name__}",
+        )
 
 
 def _apply_constraint_relaxations(
@@ -206,6 +227,7 @@ async def _call_tool(
         outcome = "success"
         fallback_reason = None
         failure_reason = None
+    recall_provenance = getattr(result, "provenance", None)
     completed = ToolEndEventData(
         tool_name=name,
         duration_ms=round((time.perf_counter() - started) * 1000),
@@ -216,6 +238,9 @@ async def _call_tool(
         fallback_reason=fallback_reason,
         failure_reason=failure_reason,
         data_mode=event_data_mode,
+        recall_provenance=(
+            recall_provenance if isinstance(recall_provenance, RecallProvenance) else None
+        ),
     )
     await monitor.emit(
         thread_id,
@@ -369,26 +394,29 @@ async def run_agent(
                 },
             )
 
-    insight = await _call_tool(
-        monitor,
-        "category_insight",
-        {"category": plan.category, "depth": "quick"},
-        lambda: category_insight(plan.category),
-    )
-
     await monitor.emit(
         thread_id,
         "assistant_call",
-        message=f"Act：并行检索 {len(settings.enabled_marketplaces)} 个已启用平台",
+        message=f"Act：并行检索 {len(settings.enabled_marketplaces)} 个已启用平台，并准备类目召回",
         data={
             "step": "acting",
-            "category": insight.category,
-            "components": insight.components,
+            "category": plan.category,
             "platforms": list(settings.enabled_marketplaces),
             "data_mode": task_data_mode,
         },
     )
     platforms = [cast(Platform, name) for name in settings.enabled_marketplaces]
+
+    insight_task = asyncio.create_task(
+        _call_tool(
+            monitor,
+            "category_insight",
+            {"category": plan.category, "depth": "quick"},
+            lambda: _category_insight_with_fallback(plan.category),
+            event_thread_id=thread_id,
+            data_mode=task_data_mode,
+        )
+    )
 
     async def search_branch(demand: dict[str, Any]) -> ItemSearchOutput:
         platform: Platform = demand["platform"]
@@ -425,12 +453,19 @@ async def run_agent(
                 provider=failure_metadata,
             )
 
-    searches = await dispatch_tool(
-        [{"platform": platform, "query": query} for platform in platforms],
-        search_branch,
-        monitor,
-        data_mode=task_data_mode,
-    )
+    try:
+        searches = await dispatch_tool(
+            [{"platform": platform, "query": query} for platform in platforms],
+            search_branch,
+            monitor,
+            data_mode=task_data_mode,
+        )
+    except BaseException:
+        if not insight_task.done():
+            insight_task.cancel()
+        await asyncio.gather(insight_task, return_exceptions=True)
+        raise
+    insight = await insight_task
     candidates = [candidate for result in searches for candidate in result.candidates]
     providers = {result.platform: result.provider for result in searches}
     if task_data_mode != "sandbox":
@@ -466,11 +501,39 @@ async def run_agent(
     ):
         raise ProvidersUnavailableError("all enabled marketplace providers are unavailable")
 
+    recall = await _call_tool(
+        monitor,
+        "recall",
+        {"candidate_count": len(candidates), "top_k": 20},
+        lambda: recall_orchestrator.recall(
+            query,
+            candidates,
+            category_insight=insight,
+            top_k=20,
+        ),
+        event_thread_id=thread_id,
+        data_mode=task_data_mode,
+    )
+    assert isinstance(recall, RecallResult)
+    recalled_candidates = recall.candidates
+    await monitor.emit(
+        thread_id,
+        "assistant_call",
+        message="Recall：已根据实际可用 channel 选择或排序 Product Evidence",
+        data={
+            "step": "recalling",
+            "candidate_count": len(candidates),
+            "selected_count": len(recalled_candidates),
+            "recall_provenance": recall.provenance.model_dump(mode="json"),
+            "data_mode": task_data_mode,
+        },
+    )
+
     prices = await _call_tool(
         monitor,
         "price_compare",
-        {"candidate_count": len(candidates), "base_currency": "CNY"},
-        lambda: price_compare(candidates),
+        {"candidate_count": len(recalled_candidates), "base_currency": "CNY"},
+        lambda: price_compare(recalled_candidates),
     )
     shipping = await _call_tool(
         monitor,
@@ -521,6 +584,7 @@ async def run_agent(
             task_overrides=task_overrides,
             constraint_relaxations=constraint_relaxations,
             product_evidence=candidates,
+            recall_provenance=recall.provenance,
         ),
     )
     return result

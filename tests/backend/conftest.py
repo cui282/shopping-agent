@@ -28,7 +28,17 @@ def isolated_runtime(tmp_path, monkeypatch):
     for prefix in ("AMAZON", "SHOPEE", "ALIEXPRESS", "EBAY"):
         monkeypatch.delenv(f"{prefix}_API_ENDPOINT", raising=False)
         monkeypatch.delenv(f"{prefix}_API_KEY", raising=False)
-    monkeypatch.delenv("OPENSEARCH_URL", raising=False)
+    for name in (
+        "OPENSEARCH_URL",
+        "OPENSEARCH_CATEGORY_INDEX",
+        "OPENSEARCH_SEARCH_PIPELINE",
+        "ANN_BACKEND",
+        "ANN_INDEX_PATH",
+        "TOWER_QUERY_ENDPOINT",
+        "TOWER_ITEM_ENDPOINT",
+        "RECALL_TIMEOUT_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     server.records.clear()
     server.task_locks.clear()
     manager.active.clear()

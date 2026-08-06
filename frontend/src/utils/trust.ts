@@ -1,4 +1,14 @@
-import type { DataMode, ProviderFailureReason, ProviderMode, ProviderSource, ReadinessResponse, ResultKind } from "../types/api";
+import type {
+  DataMode,
+  ProviderFailureReason,
+  ProviderMode,
+  ProviderSource,
+  ReadinessResponse,
+  RecallChannelName,
+  RecallChannelState,
+  RecallMode,
+  ResultKind,
+} from "../types/api";
 import type { ServiceStatus } from "../hooks/useShoppingAgent";
 
 export function providerModeLabel(mode: ProviderMode | string): string {
@@ -76,6 +86,21 @@ export function requiredActionLabel(action: string): string {
   if (action === "Redis preference backend unavailable; local evaluation is non-persistent") {
     return "Redis 偏好后端不可用；当前仅本地评估且不会持久保存";
   }
+  if (action.startsWith("Configure OPENSEARCH_URL")) {
+    return "配置 OPENSEARCH_URL 以启用 OpenSearch 类目知识召回";
+  }
+  if (action.startsWith("Enable ANN_BACKEND=faiss")) {
+    return "启用 ANN_BACKEND=faiss 并配置 ANN_INDEX_PATH 以启用 ANN 召回";
+  }
+  if (action.startsWith("Configure ANN_INDEX_PATH")) {
+    return "配置 ANN_INDEX_PATH 以启用 Faiss 召回";
+  }
+  if (action.startsWith("Configure TOWER_QUERY_ENDPOINT")) {
+    return "配置 TOWER_QUERY_ENDPOINT 以启用 Query tower";
+  }
+  if (action.startsWith("Configure TOWER_ITEM_ENDPOINT")) {
+    return "配置 TOWER_ITEM_ENDPOINT 以启用 Item tower";
+  }
   return action;
 }
 
@@ -89,4 +114,33 @@ export function providerNameLabel(name: string): string {
     ebay: "eBay",
   };
   return labels[name] ?? name.replaceAll("_", " ");
+}
+
+export function recallChannelLabel(channel: RecallChannelName | string): string {
+  const labels: Record<string, string> = {
+    opensearch: "OpenSearch 类目知识",
+    query_tower: "Query tower",
+    item_tower: "Item tower",
+    faiss: "Faiss ANN",
+  };
+  return labels[channel] ?? channel.replaceAll("_", " ");
+}
+
+export function recallModeLabel(mode: RecallMode | string): string {
+  const labels: Record<string, string> = {
+    hybrid: "Hybrid recall",
+    partial_hybrid: "Partial hybrid recall",
+    deterministic_fallback: "Deterministic fallback",
+  };
+  return labels[mode] ?? mode;
+}
+
+export function recallStateLabel(state: RecallChannelState | string): string {
+  const labels: Record<string, string> = {
+    configured: "已配置，尚未探测",
+    ready: "已参与且可用",
+    degraded: "已降级",
+    unavailable: "不可用",
+  };
+  return labels[state] ?? state;
 }

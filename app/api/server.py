@@ -42,6 +42,7 @@ from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.commands import execute_memory_commands
 from app.memory.store import PreferenceStore, PreferenceStoreError, build_preference_store
+from app.recall.orchestrator import recall_readiness
 from app.reports import (
     ReportGenerationError,
     generate_reports,
@@ -578,6 +579,7 @@ def _record_task_result(
             "product_evidence": result.product_evidence,
             "exchange_rate": result.exchange_rate,
             "report_references": files,
+            "recall_provenance": result.recall_provenance,
             "error_code": None,
             "error": None,
         }
@@ -1017,6 +1019,7 @@ def _readiness_response() -> ReadinessResponse:
         data_mode=settings.data_mode,
         developer_diagnostic_mode=settings.developer_diagnostic_mode,
         preference_backend=preference_backend,
+        recall=recall_readiness(settings),
     )
 
 

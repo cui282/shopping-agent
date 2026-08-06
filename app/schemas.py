@@ -10,6 +10,9 @@ Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
 DataMode = Literal["live", "sandbox", "mixed"]
 ResearchMode = Literal["product_research", "exact_offer_comparison"]
+RecallChannelName = Literal["opensearch", "query_tower", "item_tower", "faiss"]
+RecallChannelState = Literal["configured", "ready", "degraded", "unavailable"]
+RecallMode = Literal["hybrid", "partial_hybrid", "deterministic_fallback"]
 JsonValue = TypeAliasType(
     "JsonValue",
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"],
@@ -139,6 +142,30 @@ class ProviderMetadata(StrictModel):
     failure_reason: ProviderFailureReason | None = None
 
 
+class RecallChannelReport(StrictModel):
+    channel: RecallChannelName
+    configured: bool = False
+    state: RecallChannelState
+    reason_code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    reason: str = Field(min_length=1, max_length=4000)
+    participated: bool = False
+
+
+class RecallProvenance(StrictModel):
+    mode: RecallMode
+    channels: dict[RecallChannelName, RecallChannelReport] = Field(default_factory=dict)
+    participating_channels: list[RecallChannelName] = Field(default_factory=list)
+    fallback_reason: str | None = None
+    input_candidate_count: int = Field(ge=0)
+    selected_candidate_count: int = Field(ge=0)
+
+
+class RecallReadiness(StrictModel):
+    mode: RecallMode
+    channels: dict[RecallChannelName, RecallChannelReport] = Field(default_factory=dict)
+    required_actions: list[str] = Field(default_factory=list)
+
+
 class ProductIdentity(StrictModel):
     gtin: str | None = None
     mpn: str | None = None
@@ -208,6 +235,7 @@ class ToolEndEventData(StrictModel):
     fallback_reason: str | None = None
     failure_reason: ProviderFailureReason | None = None
     data_mode: DataMode = "live"
+    recall_provenance: RecallProvenance | None = None
 
     @model_validator(mode="after")
     def outcome_matches_status(self) -> ToolEndEventData:
@@ -579,6 +607,14 @@ class ItemSearchOutput(StrictModel):
     provider: ProviderMetadata
 
 
+class RecallResult(StrictModel):
+    candidates: list[Candidate]
+    total_recall: int = Field(ge=0)
+    truncated: bool = False
+    provenance: RecallProvenance
+    provider: ProviderMetadata
+
+
 class PricePoint(StrictModel):
     item_id: str
     platform: Platform
@@ -808,6 +844,7 @@ class ShoppingSummaryOutput(StrictModel):
     relaxation_suggestions: list[ConstraintRelaxationSuggestion] = Field(default_factory=list)
     match_status: Literal["matched", "no_match"] = "matched"
     preference_decisions: list[PreferenceDecision] = Field(default_factory=list)
+    recall_provenance: RecallProvenance | None = None
 
     @model_validator(mode="after")
     def normalize_result_contract(self) -> ShoppingSummaryOutput:
@@ -890,6 +927,7 @@ class TaskSnapshot(StrictModel):
     clarification_answers: dict[ClarificationField, str] = Field(default_factory=dict)
     error_code: str | None = None
     error: str | None = None
+    recall_provenance: RecallProvenance | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -923,6 +961,12 @@ class TaskSnapshot(StrictModel):
             raise ValueError("snapshot and result Product Evidence must match")
         if self.provider_coverage and self.provider_coverage != self.result.providers:
             raise ValueError("snapshot and result provider coverage must match")
+        if (
+            self.recall_provenance is not None
+            and self.result.recall_provenance is not None
+            and self.recall_provenance != self.result.recall_provenance
+        ):
+            raise ValueError("snapshot and result recall provenance must match")
         if self.report_references and self.report_references != self.result.files:
             raise ValueError("snapshot and result report references must match")
         return self
@@ -1021,4 +1065,7 @@ class ReadinessResponse(StrictModel):
             backend="memory",
             durability="local_evaluation",
         )
+    )
+    recall: RecallReadiness = Field(
+        default_factory=lambda: RecallReadiness(mode="deterministic_fallback")
     )

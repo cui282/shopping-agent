@@ -6,6 +6,9 @@ export type ReportFormat = "markdown" | "json" | "pdf";
 export type ProviderMode = DataMode | "unverified";
 export type ResearchMode = "product_research" | "exact_offer_comparison";
 export type ResultKind = "live" | "sandbox" | "partial";
+export type RecallChannelName = "opensearch" | "query_tower" | "item_tower" | "faiss";
+export type RecallChannelState = "configured" | "ready" | "degraded" | "unavailable";
+export type RecallMode = "hybrid" | "partial_hybrid" | "deterministic_fallback";
 export type ProviderFailureReason =
   | "not_configured"
   | "request_failed"
@@ -215,6 +218,30 @@ export interface ProviderMetadata {
   failure_reason: ProviderFailureReason | null;
 }
 
+export interface RecallChannelReport {
+  channel: RecallChannelName;
+  configured: boolean;
+  state: RecallChannelState;
+  reason_code: string;
+  reason: string;
+  participated: boolean;
+}
+
+export interface RecallProvenance {
+  mode: RecallMode;
+  channels: Record<RecallChannelName, RecallChannelReport>;
+  participating_channels: RecallChannelName[];
+  fallback_reason: string | null;
+  input_candidate_count: number;
+  selected_candidate_count: number;
+}
+
+export interface RecallReadiness {
+  mode: RecallMode;
+  channels: Record<RecallChannelName, RecallChannelReport>;
+  required_actions: string[];
+}
+
 export type TaskStatus =
   | "idle"
   | "starting"
@@ -282,6 +309,7 @@ export interface ToolEndEventData {
   fallback_reason: string | null;
   failure_reason: ProviderFailureReason | null;
   data_mode: DataMode;
+  recall_provenance?: RecallProvenance | null;
 }
 
 export interface MonitorEventDataMap {
@@ -469,6 +497,7 @@ export interface TaskResultData {
   relaxation_suggestions?: ConstraintRelaxationSuggestion[];
   match_status?: "matched" | "no_match";
   preference_decisions?: PreferenceDecision[];
+  recall_provenance?: RecallProvenance | null;
 }
 
 export interface TaskRequest {
@@ -517,6 +546,7 @@ export interface TaskSnapshot {
   clarification_answers: Partial<Record<ClarificationField, string>>;
   error_code: string | null;
   error: string | null;
+  recall_provenance?: RecallProvenance | null;
 }
 
 export interface ClarificationCommandResponse {
@@ -618,6 +648,7 @@ export interface ReadinessResponse {
   data_mode: DataMode;
   developer_diagnostic_mode: boolean;
   preference_backend?: PreferenceBackendStatus;
+  recall?: RecallReadiness;
 }
 
 export interface PreferencesResponse {

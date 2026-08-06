@@ -6,7 +6,12 @@ import {
   runSnapshotRecovery,
   runSnapshotSync,
 } from "./useShoppingAgent";
-import type { MonitorEvent, TaskResultData, TaskSnapshot } from "../types/api";
+import type {
+  MonitorEvent,
+  RecallChannelReport,
+  TaskResultData,
+  TaskSnapshot,
+} from "../types/api";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -70,6 +75,17 @@ function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     error_code: null,
     error: null,
     ...overrides,
+  };
+}
+
+function fallbackRecallChannel(channel: RecallChannelReport["channel"]): RecallChannelReport {
+  return {
+    channel,
+    configured: false,
+    state: "unavailable",
+    reason_code: "not_configured",
+    reason: "channel is not configured; deterministic fallback remains active",
+    participated: false,
   };
 }
 
@@ -143,12 +159,30 @@ describe("agentReducer", () => {
       data_mode: "sandbox",
       result_kind: "sandbox",
       unavailable_marketplaces: [],
+      recall_provenance: {
+        mode: "deterministic_fallback",
+        channels: {
+          opensearch: fallbackRecallChannel("opensearch"),
+          query_tower: fallbackRecallChannel("query_tower"),
+          item_tower: fallbackRecallChannel("item_tower"),
+          faiss: fallbackRecallChannel("faiss"),
+        },
+        participating_channels: [],
+        fallback_reason: "optional_recall_unavailable",
+        input_candidate_count: 0,
+        selected_candidate_count: 0,
+      },
     };
     const event = timelineEvent(1, "task_result", result as unknown as Record<string, unknown>);
 
-    const state = agentReducer(initialAgentState, { type: "event", event });
+    const loaded = agentReducer(initialAgentState, {
+      type: "snapshot",
+      snapshot: taskSnapshot({ thread_id: "thread-timeline" }),
+    });
+    const state = agentReducer(loaded, { type: "event", event });
     expect(state.status).toBe("completed");
     expect(state.result?.thread_id).toBe("thread-42");
+    expect(state.snapshot?.recall_provenance?.mode).toBe("deterministic_fallback");
     expect(state.events).toHaveLength(1);
   });
 
