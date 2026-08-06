@@ -54,11 +54,14 @@ describe("request lifecycle", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await api.deleteTask("thread-1");
+    await api.deleteTask("thread-1", "browser-user");
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringMatching(/\/api\/task\/thread-1$/),
-      expect.objectContaining({ method: "DELETE" }),
+      expect.objectContaining({
+        method: "DELETE",
+        body: JSON.stringify({ user_id: "browser-user" }),
+      }),
     );
   });
 

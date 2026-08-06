@@ -19,6 +19,7 @@ class ConnectionManager:
         )
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._generations: dict[str, int] = defaultdict(int)
+        self._discarded: set[str] = set()
 
     async def connect(
         self,
@@ -29,6 +30,15 @@ class ConnectionManager:
         generation = self._generations[thread_id]
         await websocket.accept()
         async with self._locks[thread_id]:
+            if thread_id in self._discarded:
+                try:
+                    await asyncio.wait_for(
+                        websocket.close(code=1000, reason="task transport discarded"),
+                        timeout=self._send_timeout_seconds,
+                    )
+                except (asyncio.TimeoutError, OSError, RuntimeError, WebSocketDisconnect):
+                    pass
+                return False
             if self._generations[thread_id] != generation:
                 try:
                     await asyncio.wait_for(
@@ -85,6 +95,8 @@ class ConnectionManager:
 
     async def send_to_thread(self, thread_id: str, payload: dict[str, Any]) -> None:
         async with self._locks[thread_id]:
+            if thread_id in self._discarded:
+                return
             self._events[thread_id].append(payload)
             websocket = self.active.get(thread_id)
             if websocket is None:
@@ -99,15 +111,20 @@ class ConnectionManager:
 
     async def send_ephemeral(self, thread_id: str, payload: dict[str, Any]) -> None:
         async with self._locks[thread_id]:
+            if thread_id in self._discarded:
+                return
             websocket = self.active.get(thread_id)
             if websocket is not None:
                 await websocket.send_json(payload)
 
     def history(self, thread_id: str) -> list[dict[str, Any]]:
+        if thread_id in self._discarded:
+            return []
         return list(self._events.get(thread_id, ()))
 
     async def clear(self, thread_id: str, *, close_active: bool = False) -> None:
         async with self._locks[thread_id]:
+            self._discarded.discard(thread_id)
             self._events.pop(thread_id, None)
             if not close_active:
                 return
@@ -140,6 +157,7 @@ class ConnectionManager:
 
         async with self._locks[thread_id]:
             self._generations[thread_id] += 1
+            self._discarded.add(thread_id)
             websocket = self.active.pop(thread_id, None)
             self._events.pop(thread_id, None)
             if websocket is None:

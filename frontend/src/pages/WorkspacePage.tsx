@@ -39,6 +39,7 @@ export default function WorkspacePage() {
   const [composerResetKey, setComposerResetKey] = useState(0);
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyNotice, setHistoryNotice] = useState<string | null>(null);
   const [commandPending, setCommandPending] = useState<"rerun" | "relaxation" | null>(null);
   const rerunCommandKeysRef = useRef(new Map<string, string>());
   const relaxationCommandKeysRef = useRef(new Map<string, string>());
@@ -135,6 +136,7 @@ export default function WorkspacePage() {
   const newResearch = () => {
     reset();
     clearWorkspace();
+    setHistoryNotice(null);
   };
 
   const submit = async (uploadIds: string[]) => {
@@ -166,10 +168,19 @@ export default function WorkspacePage() {
     if (deletingThreadId || !window.confirm(`删除“${session.query}”及其研究报告？此操作无法撤销。`)) return;
     setDeletingThreadId(session.threadId);
     setHistoryError(null);
+    setHistoryNotice(null);
     try {
-      await api.deleteTask(session.threadId);
+      await api.deleteTask(session.threadId, userId);
       remove(session.threadId);
-      if (clearDeletedThread(session.threadId)) clearWorkspace();
+      if (clearDeletedThread(session.threadId)) {
+        clearWorkspace();
+        focusComposer();
+      } else {
+        window.setTimeout(() => {
+          document.querySelector<HTMLButtonElement>('[data-session-select="true"]')?.focus();
+        }, 0);
+      }
+      setHistoryNotice("研究已删除");
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : "删除失败，请重试");
     } finally {
@@ -256,6 +267,7 @@ export default function WorkspacePage() {
             onDelete={(session) => void deleteSession(session)}
             deletingThreadId={deletingThreadId}
             historyError={historyError}
+            historyNotice={historyNotice}
           />
         </div>
 

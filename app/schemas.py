@@ -97,6 +97,40 @@ class TaskStarted(StrictModel):
     thread_id: str
 
 
+class TaskDeleteCommand(StrictModel):
+    user_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class TaskDeleteResponse(StrictModel):
+    status: Literal["deleted"] = "deleted"
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+
+
+class TaskTombstone(StrictModel):
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    user_id: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    generation: int = Field(ge=1)
+    deleted_at: str = Field(min_length=1)
+
+
+class ReferenceImageBinding(StrictModel):
+    upload_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    name: str = Field(pattern=r"^[0-9a-f]{32}\.(?:jpg|png|webp)$")
+    content_type: Literal["image/jpeg", "image/png", "image/webp"]
+    size: int = Field(ge=0)
+    ownership: Literal["task_owned_copy"] = "task_owned_copy"
+    bound_at: str = Field(min_length=1)
+
+
+class LegacyReferenceImageBinding(StrictModel):
+    """Read-only compatibility for snapshots written before task binding existed."""
+
+    upload_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    name: str = Field(pattern=r"^[0-9a-f]{32}\.(?:jpg|png|webp)$")
+    content_type: str = Field(min_length=1)
+    size: int = Field(ge=0)
+
+
 class ProviderMetadata(StrictModel):
     source: ProviderSource
     provider: str
@@ -147,7 +181,7 @@ class ForkEventData(StrictModel):
 
 class SessionCreatedEventData(StrictModel):
     thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
-    reference_images: list[dict[str, Any]]
+    reference_images: list[ReferenceImageBinding | LegacyReferenceImageBinding]
     data_mode: DataMode = "live"
 
 
@@ -831,6 +865,7 @@ class TaskSnapshot(StrictModel):
     snapshot_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]{1,80}$")
     thread_id: str
     run_id: str = Field(default="legacy", pattern=r"^(?:legacy|[0-9a-f]{32})$")
+    generation: int = Field(default=0, ge=0)
     status: Literal["running", "awaiting_clarification", "completed", "cancelled", "error"]
     query: str
     user_id: str

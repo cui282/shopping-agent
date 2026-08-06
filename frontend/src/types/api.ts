@@ -483,10 +483,16 @@ export interface TaskStartResponse {
   thread_id: string;
 }
 
+export interface TaskDeleteResponse {
+  status: "deleted";
+  thread_id: string;
+}
+
 export interface TaskSnapshot {
   snapshot_id: string;
   thread_id: string;
   run_id: string;
+  generation: number;
   status: "running" | "awaiting_clarification" | "completed" | "cancelled" | "error";
   query: string;
   user_id: string;

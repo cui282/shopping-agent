@@ -15,6 +15,7 @@ interface SessionRailProps {
   onDelete: (session: SessionHistoryItem) => void;
   deletingThreadId?: string | null;
   historyError?: string | null;
+  historyNotice?: string | null;
 }
 
 export default function SessionRail({
@@ -26,6 +27,7 @@ export default function SessionRail({
   onDelete,
   deletingThreadId = null,
   historyError = null,
+  historyNotice = null,
 }: SessionRailProps) {
   const providerLabel = providerModeLabel(providerMode);
 
@@ -39,7 +41,11 @@ export default function SessionRail({
         </button>
       </div>
 
-      <section className={styles.history} aria-labelledby="history-heading">
+      <section
+        className={styles.history}
+        aria-labelledby="history-heading"
+        aria-busy={Boolean(deletingThreadId)}
+      >
         <div className={styles.sectionLabel}>
           <History size={14} aria-hidden="true" />
           <h2 id="history-heading">最近研究</h2>
@@ -59,6 +65,7 @@ export default function SessionRail({
                   type="button"
                   onClick={() => onSelect(session)}
                   disabled={deletingThreadId === session.threadId}
+                  data-session-select="true"
                   aria-current={session.threadId === activeThreadId ? "page" : undefined}
                 >
                   <span className={styles.query}>{session.query}</span>
@@ -79,7 +86,11 @@ export default function SessionRail({
                   type="button"
                   onClick={() => onDelete(session)}
                   disabled={deletingThreadId === session.threadId}
-                  aria-label={`删除研究：${session.query}`}
+                  aria-label={
+                    deletingThreadId === session.threadId
+                      ? `正在删除研究：${session.query}`
+                      : `删除研究：${session.query}`
+                  }
                   title="删除研究"
                 >
                   {deletingThreadId === session.threadId ? (
@@ -92,9 +103,20 @@ export default function SessionRail({
             ))}
           </ol>
         )}
+        {deletingThreadId && (
+          <p className={styles.historyProgress} role="status" aria-live="polite">
+            正在删除研究：
+            {history.find((session) => session.threadId === deletingThreadId)?.query ?? "当前研究"}
+          </p>
+        )}
         {historyError && (
           <p className={styles.historyError} role="alert">
             {historyError}
+          </p>
+        )}
+        {historyNotice && (
+          <p className={styles.historyNotice} role="status" aria-live="polite">
+            {historyNotice}
           </p>
         )}
       </section>

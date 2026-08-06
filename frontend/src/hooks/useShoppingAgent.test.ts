@@ -39,6 +39,7 @@ function taskSnapshot(overrides: Partial<TaskSnapshot> = {}): TaskSnapshot {
     snapshot_id: "thread-live",
     thread_id: "thread-live",
     run_id: "1".repeat(32),
+    generation: 0,
     status: "running",
     query: "test",
     user_id: "test-user",

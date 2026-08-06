@@ -636,7 +636,11 @@ def test_completed_task_can_be_deleted(client: TestClient) -> None:
     task_directory = server.output_root() / thread_id
     assert task_directory.is_dir()
 
-    deleted = client.delete(f"/api/task/{thread_id}")
+    deleted = client.request(
+        "DELETE",
+        f"/api/task/{thread_id}",
+        json={"user_id": "delete-user"},
+    )
 
     assert deleted.status_code == 200
     assert deleted.json() == {"status": "deleted", "thread_id": thread_id}
@@ -645,7 +649,11 @@ def test_completed_task_can_be_deleted(client: TestClient) -> None:
 
 
 def test_deleting_missing_task_is_idempotent(client: TestClient) -> None:
-    deleted = client.delete("/api/task/stale-task-id")
+    deleted = client.request(
+        "DELETE",
+        "/api/task/stale-task-id",
+        json={"user_id": "stale-user"},
+    )
 
     assert deleted.status_code == 200
     assert deleted.json() == {"status": "deleted", "thread_id": "stale-task-id"}
@@ -667,7 +675,11 @@ def test_active_task_delete_cancels_worker_and_removes_record(
     ).json()
     thread_id = started["thread_id"]
 
-    deleted = client.delete(f"/api/task/{thread_id}")
+    deleted = client.request(
+        "DELETE",
+        f"/api/task/{thread_id}",
+        json={"user_id": "active-delete-user"},
+    )
 
     assert deleted.status_code == 200
     assert thread_id not in server.records

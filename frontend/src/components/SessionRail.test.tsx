@@ -54,6 +54,8 @@ describe("SessionRail", () => {
     );
 
     expect(markup.match(/disabled=""/g)).toHaveLength(2);
+    expect(markup).toContain('aria-busy="true"');
+    expect(markup).toContain("正在删除研究：找一款适合长辈使用的手机");
   });
 
   it("shows lineage for a rerun in Recent Research", () => {

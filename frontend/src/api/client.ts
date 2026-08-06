@@ -11,6 +11,7 @@ import type {
   RecentResearchResponse,
   TaskRerunResponse,
   TaskRequest,
+  TaskDeleteResponse,
   TaskSnapshot,
   TaskStartResponse,
   UploadResponse,
@@ -143,9 +144,14 @@ export const api = {
       body: JSON.stringify({ response }),
       ...control,
     }),
-  deleteTask: (threadId: string, control: RequestControl = {}) =>
-    requestJson<{ status: "deleted"; thread_id: string }>(`/api/task/${encodeURIComponent(threadId)}`, {
+  deleteTask: (
+    threadId: string,
+    userId: string,
+    control: RequestControl = {},
+  ) =>
+    requestJson<TaskDeleteResponse>(`/api/task/${encodeURIComponent(threadId)}`, {
       method: "DELETE",
+      body: JSON.stringify({ user_id: userId }),
       ...control,
     }),
   upload: async (file: File, control: RequestControl = {}) => {

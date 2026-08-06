@@ -34,6 +34,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     manager.active.clear()
     manager._events.clear()
     manager._generations.clear()
+    manager._discarded.clear()
     server.preference_store = InMemoryPreferenceStore()
     yield
     for record in list(server.records.values()):

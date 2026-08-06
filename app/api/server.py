@@ -5,11 +5,11 @@ import errno
 import fcntl
 import json
 import logging
-import mimetypes
 import re
 import shutil
 import uuid
 from contextlib import asynccontextmanager, contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -66,6 +66,7 @@ from app.schemas import (
     PreferenceResponse,
     ProviderCapability,
     ReadinessResponse,
+    ReferenceImageBinding,
     RememberedPreference,
     ReportGeneratedEventData,
     ReportGenerationResponse,
@@ -75,11 +76,14 @@ from app.schemas import (
     ShoppingPlan,
     ShoppingSummaryOutput,
     SnapshotLineage,
+    TaskDeleteCommand,
+    TaskDeleteResponse,
     TaskRequest,
     TaskRerunResponse,
     TaskSnapshot,
     TaskSnapshotMessage,
     TaskStarted,
+    TaskTombstone,
     UploadResponse,
 )
 from app.tools.clarification import InvalidClarificationResponse, normalize_clarification_response
@@ -95,14 +99,132 @@ class SnapshotPersistenceError(OSError):
     pass
 
 
+class TaskDeletedError(RuntimeError):
+    """Raised when a late worker attempts to mutate a tombstoned task."""
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedUpload:
+    upload_id: str
+    name: str
+    content_type: str
+    size: int
+    source: Path
+
+
+_CONTROL_DIRECTORY = ".task-control"
+_TOMBSTONE_DIRECTORY = ".task-tombstones"
+_MUTATION_LOCK = ".research-mutation.lock"
+_TOMBSTONE_SUFFIX = ".json"
+_mutation_lock_held: ContextVar[bool] = ContextVar("mutation_lock_held", default=False)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _task_directory(thread_id: str, *, create: bool = False) -> Path:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise ValueError("invalid thread id")
+    root = output_root().resolve()
+    candidate = root / thread_id
+    if candidate.is_symlink():
+        raise ValueError("task directory must not be a symlink")
+    directory = safe_join(root, thread_id)
+    if directory != candidate:
+        raise ValueError("task directory canonical path mismatch")
+    if create:
+        # Keep the existing session-dir seam for persistence failures and legacy callers.
+        created = session_dir(thread_id)
+        if created != directory:
+            raise ValueError("task directory canonical path mismatch")
+    return directory
+
+
+def _control_path(thread_id: str, filename: str, *, create: bool = True) -> Path:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise ValueError("invalid thread id")
+    if not re.fullmatch(r"\.[A-Za-z0-9_.-]+", filename):
+        raise ValueError("invalid task control filename")
+    root = output_root().resolve()
+    directory = root / _CONTROL_DIRECTORY
+    if directory.is_symlink():
+        raise ValueError("task control directory must not be a symlink")
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / f"{thread_id}{filename}"
+    path = safe_join(root, _CONTROL_DIRECTORY, candidate.name)
+    if path != candidate:
+        raise ValueError("task control path canonical mismatch")
+    return path
+
+
+def _tombstone_path(thread_id: str, *, create: bool = True) -> Path:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise ValueError("invalid thread id")
+    root = output_root().resolve()
+    directory = root / _TOMBSTONE_DIRECTORY
+    if directory.is_symlink():
+        raise ValueError("task tombstone directory must not be a symlink")
+    if create:
+        directory.mkdir(parents=True, exist_ok=True)
+    candidate = directory / f"{thread_id}{_TOMBSTONE_SUFFIX}"
+    path = safe_join(root, _TOMBSTONE_DIRECTORY, candidate.name)
+    if path != candidate:
+        raise ValueError("task tombstone path canonical mismatch")
+    return path
+
+
+def _read_tombstone(thread_id: str) -> TaskTombstone | None:
+    path = _tombstone_path(thread_id, create=False)
+    if path.is_symlink() or not path.exists():
+        if path.is_symlink():
+            return TaskTombstone(thread_id=thread_id, generation=1, deleted_at=_now())
+        return None
+    if not path.is_file():
+        return TaskTombstone(thread_id=thread_id, generation=1, deleted_at=_now())
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        logger.exception("failed to read task tombstone", extra={"thread_id": thread_id})
+        return TaskTombstone(thread_id=thread_id, generation=1, deleted_at=_now())
+    if not isinstance(payload, dict) or payload.get("thread_id") != thread_id:
+        return TaskTombstone(thread_id=thread_id, generation=1, deleted_at=_now())
+    try:
+        return TaskTombstone.model_validate(payload)
+    except ValueError:
+        logger.exception("invalid task tombstone", extra={"thread_id": thread_id})
+        return TaskTombstone(thread_id=thread_id, generation=1, deleted_at=_now())
+
+
+def _task_is_deleted(thread_id: str) -> bool:
+    return _read_tombstone(thread_id) is not None
+
+
+def _atomic_json_write(destination: Path, payload: dict[str, Any]) -> None:
+    temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(destination)
+    except OSError:
+        with suppress(OSError):
+            temporary.unlink()
+        raise
+
+
 def _persist_snapshot(snapshot: TaskSnapshot) -> None:
+    if not _mutation_lock_held.get():
+        with _task_mutation_lock(snapshot.thread_id):
+            _persist_snapshot(snapshot)
+        return
+    if _task_is_deleted(snapshot.thread_id):
+        raise TaskDeletedError(f"task {snapshot.thread_id} has been deleted")
     temporary: Path | None = None
     try:
-        directory = session_dir(snapshot.thread_id)
+        directory = _task_directory(snapshot.thread_id, create=True)
         destination = directory / "task.json"
         temporary = directory / f".task-{uuid.uuid4().hex}.tmp"
         temporary.write_text(
@@ -126,7 +248,7 @@ def _open_lock_handle(
 ) -> TextIO | None:
     handle: TextIO | None = None
     try:
-        lock_path = safe_join(output_root(), thread_id, filename)
+        lock_path = _control_path(thread_id, filename)
         handle = lock_path.open("a+", encoding="utf-8")
         flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if non_blocking else 0)
         fcntl.flock(handle.fileno(), flags)
@@ -167,6 +289,63 @@ def _command_lock(thread_id: str):
     """Serialize keyed child commands across workers sharing the snapshot store."""
     with _persistent_lock(thread_id, ".research-commands.lock"):
         yield
+
+
+@contextmanager
+def _task_mutation_lock(thread_id: str):
+    with _persistent_lock(thread_id, _MUTATION_LOCK):
+        token = _mutation_lock_held.set(True)
+        try:
+            yield
+        finally:
+            _mutation_lock_held.reset(token)
+
+
+def _write_tombstone(
+    thread_id: str,
+    *,
+    user_id: str | None,
+    generation: int,
+) -> TaskTombstone:
+    with _task_mutation_lock(thread_id):
+        existing = _read_tombstone(thread_id)
+        if existing is not None:
+            return existing
+        path = _tombstone_path(thread_id)
+        payload = TaskTombstone(
+            thread_id=thread_id,
+            user_id=user_id,
+            generation=max(1, generation),
+            deleted_at=_now(),
+        )
+        try:
+            _atomic_json_write(path, payload.model_dump(mode="json"))
+        except OSError as exc:
+            raise SnapshotPersistenceError(str(exc)) from exc
+        return payload
+
+
+def _remove_task_control_files(thread_id: str) -> None:
+    for filename in (
+        ".research-owner.lock",
+        ".research-commands.lock",
+        ".research-recovery.lock",
+    ):
+        try:
+            path = _control_path(thread_id, filename, create=False)
+        except ValueError:
+            continue
+        with suppress(OSError):
+            path.unlink()
+
+
+def _remove_task_directory(thread_id: str) -> None:
+    directory = _task_directory(thread_id)
+    if not directory.exists():
+        return
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("task directory is not a canonical directory")
+    shutil.rmtree(directory)
 
 
 def _as_data_mode(value: Any) -> DataMode | None:
@@ -213,8 +392,13 @@ def _infer_legacy_snapshot_data_mode(payload: dict[str, Any]) -> DataMode:
 def _read_persisted_snapshot(thread_id: str) -> TaskSnapshot | None:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         return None
-    path = safe_join(output_root(), thread_id, "task.json")
-    if not path.is_file():
+    if _task_is_deleted(thread_id):
+        return None
+    try:
+        path = _task_directory(thread_id) / "task.json"
+    except ValueError:
+        return None
+    if path.is_symlink() or not path.is_file():
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -243,6 +427,8 @@ def _read_persisted_snapshot(thread_id: str) -> TaskSnapshot | None:
 
 
 def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
+    if _task_is_deleted(thread_id):
+        return None
     snapshot = _read_persisted_snapshot(thread_id)
     if snapshot is None:
         return None
@@ -282,7 +468,10 @@ def _load_snapshot(thread_id: str) -> TaskSnapshot | None:
                             "error": message,
                         }
                     )
-                    _persist_snapshot(snapshot)
+                    try:
+                        _persist_snapshot(snapshot)
+                    except TaskDeletedError:
+                        return None
                 finally:
                     _release_lock_handle(owner_handle)
     return snapshot
@@ -309,6 +498,8 @@ class TaskRecord:
     snapshot: TaskSnapshot
     task: asyncio.Task[None]
     owner_handle: TextIO | None = None
+    generation: int = 0
+    deleting: bool = False
 
 
 records: dict[str, TaskRecord] = {}
@@ -360,6 +551,8 @@ def _record_task_result(
     event_id: str,
     timestamp: str,
 ) -> tuple[MonitorEvent, MonitorEvent]:
+    if record.deleting or _task_is_deleted(thread_id):
+        raise TaskDeletedError(f"task {thread_id} has been deleted")
     task_data_mode = record.snapshot.data_mode
     result = ShoppingSummaryOutput.model_validate(data)
     if result.data_mode != task_data_mode:
@@ -390,7 +583,7 @@ def _record_task_result(
         }
     )
     try:
-        generate_reports(terminal_snapshot, session_dir(thread_id))
+        generate_reports(terminal_snapshot, _task_directory(thread_id, create=True))
     except ReportGenerationError as exc:
         raise RuntimeError(str(exc)) from exc
 
@@ -437,114 +630,117 @@ def _record_event(
     timestamp: str,
     emitted_run_id: str | None,
 ) -> MonitorEvent | tuple[MonitorEvent, MonitorEvent]:
-    record = records.get(thread_id)
-    if record is None:
-        raise RuntimeError(f"cannot record an event for unknown task {thread_id}")
-    if emitted_run_id is not None and emitted_run_id != record.run_id:
-        raise RuntimeError(f"cannot record an event from a superseded run for {thread_id}")
-    current_status = record.snapshot.status
-    allowed_statuses = {
-        "session_created": {"running"},
-        "intent_resolved": {"running"},
-        "assistant_call": {"running"},
-        "tool_start": {"running"},
-        "tool_end": {"running"},
-        "fork": {"running"},
-        "report_generated": {"completed"},
-        "task_result": {"running"},
-        "task_cancelled": {"running", "awaiting_clarification"},
-        "clarification_required": {"running"},
-        "clarification_resolved": {"awaiting_clarification"},
-        "error": {"running"},
-    }
-    if current_status not in allowed_statuses[event]:
-        if current_status in {"completed", "cancelled", "error"}:
-            raise RuntimeError(f"cannot record an event for terminal task {thread_id}")
-        raise RuntimeError(
-            f"event {event} cannot transition task {thread_id} from {current_status}"
-        )
+    with _task_mutation_lock(thread_id):
+        record = records.get(thread_id)
+        if record is None:
+            raise TaskDeletedError(f"cannot record an event for unknown task {thread_id}")
+        if record.deleting or _task_is_deleted(thread_id):
+            raise TaskDeletedError(f"task {thread_id} has been deleted")
+        if emitted_run_id is not None and emitted_run_id != record.run_id:
+            raise RuntimeError(f"cannot record an event from a superseded run for {thread_id}")
+        current_status = record.snapshot.status
+        allowed_statuses = {
+            "session_created": {"running"},
+            "intent_resolved": {"running"},
+            "assistant_call": {"running"},
+            "tool_start": {"running"},
+            "tool_end": {"running"},
+            "fork": {"running"},
+            "report_generated": {"completed"},
+            "task_result": {"running"},
+            "task_cancelled": {"running", "awaiting_clarification"},
+            "clarification_required": {"running"},
+            "clarification_resolved": {"awaiting_clarification"},
+            "error": {"running"},
+        }
+        if current_status not in allowed_statuses[event]:
+            if current_status in {"completed", "cancelled", "error"}:
+                raise RuntimeError(f"cannot record an event for terminal task {thread_id}")
+            raise RuntimeError(
+                f"event {event} cannot transition task {thread_id} from {current_status}"
+            )
 
-    if event == "task_result":
-        return _record_task_result(record, thread_id, message, data, event_id, timestamp)
+        if event == "task_result":
+            return _record_task_result(record, thread_id, message, data, event_id, timestamp)
 
-    sequence = record.snapshot.events[-1].sequence + 1 if record.snapshot.events else 1
-    task_data_mode = record.snapshot.data_mode
-    event_data = {**data, "data_mode": task_data_mode}
-    envelope = MonitorEvent(
-        event_id=event_id,
-        thread_id=thread_id,
-        run_id=record.run_id,
-        sequence=sequence,
-        event=event,
-        message=message,
-        data=event_data,
-        timestamp=timestamp,
-    )
-    changes: dict[str, Any] = {
-        "events": [*record.snapshot.events, envelope],
-        "updated_at": timestamp,
-    }
-    if event == "intent_resolved":
-        resolved = IntentResolvedEventData.model_validate(event_data)
-        changes.update(
-            resolved_query=resolved.resolved_query,
-            resolved_intent=resolved.resolved_intent,
-            mode=resolved.resolved_intent.mode,
-            working_assumptions=resolved.resolved_intent.working_assumptions,
-            applied_preferences=resolved.applied_preferences,
-            task_overrides=resolved.task_overrides,
-            constraint_relaxations=resolved.constraint_relaxations,
+        sequence = record.snapshot.events[-1].sequence + 1 if record.snapshot.events else 1
+        task_data_mode = record.snapshot.data_mode
+        event_data = {**data, "data_mode": task_data_mode}
+        envelope = MonitorEvent(
+            event_id=event_id,
+            thread_id=thread_id,
+            run_id=record.run_id,
+            sequence=sequence,
+            event=event,
+            message=message,
+            data=event_data,
+            timestamp=timestamp,
         )
-    elif event == "task_cancelled":
-        changes.update(
-            status="cancelled",
-            result=None,
-            clarification=None,
-            error_code=None,
-            error=None,
-        )
-    elif event == "clarification_required":
-        required = ClarificationRequiredEventData.model_validate(event_data)
-        changes.update(
-            status="awaiting_clarification",
-            result=None,
-            clarification=ClarificationPrompt(
-                field=required.field,
-                reason_code=required.reason_code,
-                question=required.question,
-            ),
-            error_code=None,
-            error=None,
-        )
-    elif event == "clarification_resolved":
-        resolved = ClarificationResolvedEventData.model_validate(event_data)
-        resolved_value = resolved.resolved_value or normalize_clarification_response(
-            resolved.field,
-            resolved.response,
-        )
-        changes.update(
-            status="running",
-            clarification=None,
-            clarification_answers={
-                **record.snapshot.clarification_answers,
-                resolved.field: resolved_value,
-            },
-            error_code=None,
-            error=None,
-        )
-    elif event == "error":
-        changes.update(
-            status="error",
-            result=None,
-            clarification=None,
-            error_code=str(data.get("code") or "task_failed"),
-            error=message,
-        )
+        changes: dict[str, Any] = {
+            "events": [*record.snapshot.events, envelope],
+            "updated_at": timestamp,
+        }
+        if event == "intent_resolved":
+            resolved = IntentResolvedEventData.model_validate(event_data)
+            changes.update(
+                resolved_query=resolved.resolved_query,
+                resolved_intent=resolved.resolved_intent,
+                mode=resolved.resolved_intent.mode,
+                working_assumptions=resolved.resolved_intent.working_assumptions,
+                applied_preferences=resolved.applied_preferences,
+                task_overrides=resolved.task_overrides,
+                constraint_relaxations=resolved.constraint_relaxations,
+            )
+        elif event == "task_cancelled":
+            changes.update(
+                status="cancelled",
+                result=None,
+                clarification=None,
+                error_code=None,
+                error=None,
+            )
+        elif event == "clarification_required":
+            required = ClarificationRequiredEventData.model_validate(event_data)
+            changes.update(
+                status="awaiting_clarification",
+                result=None,
+                clarification=ClarificationPrompt(
+                    field=required.field,
+                    reason_code=required.reason_code,
+                    question=required.question,
+                ),
+                error_code=None,
+                error=None,
+            )
+        elif event == "clarification_resolved":
+            resolved = ClarificationResolvedEventData.model_validate(event_data)
+            resolved_value = resolved.resolved_value or normalize_clarification_response(
+                resolved.field,
+                resolved.response,
+            )
+            changes.update(
+                status="running",
+                clarification=None,
+                clarification_answers={
+                    **record.snapshot.clarification_answers,
+                    resolved.field: resolved_value,
+                },
+                error_code=None,
+                error=None,
+            )
+        elif event == "error":
+            changes.update(
+                status="error",
+                result=None,
+                clarification=None,
+                error_code=str(data.get("code") or "task_failed"),
+                error=message,
+            )
 
-    snapshot = record.snapshot.model_copy(update=changes)
-    _persist_snapshot(snapshot)
-    record.snapshot = snapshot
-    return envelope
+        snapshot = record.snapshot.model_copy(update=changes)
+        _persist_snapshot(snapshot)
+        record.snapshot = snapshot
+        return envelope
 
 
 monitor.set_event_recorder(_record_event)
@@ -555,7 +751,11 @@ def _task_lock(thread_id: str) -> asyncio.Lock:
 
 
 def _snapshot_message(thread_id: str) -> dict[str, Any]:
+    if _task_is_deleted(thread_id):
+        raise TaskDeletedError(f"task {thread_id} has been deleted")
     record = records.get(thread_id)
+    if record is not None and record.deleting:
+        raise TaskDeletedError(f"task {thread_id} is being deleted")
     snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
     if snapshot is None:
         raise RuntimeError(f"cannot bootstrap an unknown task {thread_id}")
@@ -614,9 +814,17 @@ async def _execute_task(
                     "task_result",
                     data=result.model_dump(mode="json"),
                 )
+    except TaskDeletedError:
+        return
     except asyncio.CancelledError:
         record = records.get(thread_id)
-        if record is not None and record.run_id == run_id and record.snapshot.status == "running":
+        if (
+            record is not None
+            and not record.deleting
+            and not _task_is_deleted(thread_id)
+            and record.run_id == run_id
+            and record.snapshot.status == "running"
+        ):
             await monitor.emit(
                 thread_id,
                 "task_cancelled",
@@ -686,6 +894,8 @@ async def _execute_task(
     except SnapshotPersistenceError:
         raise
     except Exception as exc:
+        if _task_is_deleted(thread_id):
+            return
         logger.exception(
             "shopping task failed",
             extra={"thread_id": thread_id, "error_type": type(exc).__name__},
@@ -834,10 +1044,18 @@ async def create_task(request: TaskRequest) -> TaskStarted:
             },
         )
     _prune_records(settings.task_retention_seconds)
-    reference_images = _resolve_uploads(request.upload_ids)
+    resolved_uploads = _resolve_uploads(request.upload_ids)
     thread_id = request.thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     request = request.model_copy(update={"thread_id": thread_id})
     async with _task_lock(thread_id):
+        if _task_is_deleted(thread_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "code": "task_deleted",
+                    "message": "A deleted task thread cannot be reused",
+                },
+            )
         previous = records.get(thread_id)
         if previous is not None and previous.snapshot.status in {"completed", "cancelled", "error"}:
             raise HTTPException(
@@ -871,13 +1089,15 @@ async def create_task(request: TaskRequest) -> TaskStarted:
             thread_id=thread_id,
             run_id=run_id,
             status="running",
+            generation=0,
             query=request.query,
             user_id=request.user_id,
             data_mode=settings.data_mode,
             created_at=created_at,
             updated_at=created_at,
         )
-        directory = session_dir(thread_id)
+        directory = _task_directory(thread_id)
+        directory_existed = directory.exists()
         owner_handle = _try_acquire_owner_lock(thread_id)
         if owner_handle is None:
             raise HTTPException(
@@ -888,7 +1108,18 @@ async def create_task(request: TaskRequest) -> TaskStarted:
                 },
             )
         try:
-            _persist_snapshot(snapshot)
+            with _task_mutation_lock(thread_id):
+                if _task_is_deleted(thread_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail={
+                            "code": "task_deleted",
+                            "message": "A deleted task thread cannot be reused",
+                        },
+                    )
+                directory = _task_directory(thread_id, create=True)
+                reference_images = _bind_reference_images(thread_id, resolved_uploads)
+                _persist_snapshot(snapshot)
             task = asyncio.create_task(
                 _execute(request, run_id, directory, reference_images, owner_handle=owner_handle),
                 name=f"shopping-agent:{thread_id}",
@@ -898,18 +1129,41 @@ async def create_task(request: TaskRequest) -> TaskStarted:
                 snapshot=snapshot,
                 task=task,
                 owner_handle=owner_handle,
+                generation=snapshot.generation,
             )
             owner_handle = None
         except Exception:
             _release_lock_handle(owner_handle)
+            if not directory_existed:
+                try:
+                    with _task_mutation_lock(thread_id):
+                        if not _task_is_deleted(thread_id):
+                            _remove_task_directory(thread_id)
+                except (OSError, ValueError):
+                    logger.exception(
+                        "failed to clean up an incomplete task directory",
+                        extra={"thread_id": thread_id},
+                    )
             raise
     return TaskStarted(thread_id=thread_id)
 
 
 @app.get("/api/task/{thread_id}", response_model=TaskSnapshot)
 async def get_task(thread_id: str) -> TaskSnapshot:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="invalid thread id")
     async with _task_lock(thread_id):
+        if _task_is_deleted(thread_id):
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "task_not_found", "message": "Task not found"},
+            )
         record = records.get(thread_id)
+        if record is not None and record.deleting:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "task_not_found", "message": "Task not found"},
+            )
         if record is not None:
             return record.snapshot
         persisted = _load_snapshot(thread_id)
@@ -925,7 +1179,11 @@ def _history_snapshots(user_id: str) -> list[TaskSnapshot]:
     snapshots: dict[str, TaskSnapshot] = {}
     root = output_root()
     for directory in root.iterdir():
-        if not directory.is_dir() or not _THREAD_ID_PATTERN.fullmatch(directory.name):
+        if (
+            directory.is_symlink()
+            or not directory.is_dir()
+            or not _THREAD_ID_PATTERN.fullmatch(directory.name)
+        ):
             continue
         if directory.name in records:
             continue
@@ -998,6 +1256,7 @@ def _start_child_task(
         thread_id=child_thread_id,
         run_id=uuid.uuid4().hex,
         status="running",
+        generation=0,
         query=parent.query,
         user_id=parent.user_id,
         data_mode=parent.data_mode,
@@ -1012,7 +1271,7 @@ def _start_child_task(
         task_overrides=[item.model_copy(deep=True) for item in parent.task_overrides],
         constraint_relaxations=[item.model_copy(deep=True) for item in lineage.changed_constraints],
     )
-    directory = session_dir(child_thread_id)
+    directory = _task_directory(child_thread_id, create=True)
     owner_handle = _try_acquire_owner_lock(child_thread_id)
     if owner_handle is None:
         raise SnapshotPersistenceError("child task owner lock is already held")
@@ -1023,13 +1282,14 @@ def _start_child_task(
         upload_ids=[],
     )
     try:
+        reference_images = _clone_reference_images(parent, child_thread_id)
         _persist_snapshot(child)
         task = asyncio.create_task(
             _execute(
                 request,
                 child.run_id,
                 directory,
-                _reference_images(parent),
+                reference_images,
                 resolved_intent=parent.resolved_intent.model_copy(deep=True),
                 resolved_query=parent.resolved_query,
                 applied_preferences=parent.applied_preferences.model_copy(deep=True),
@@ -1047,6 +1307,7 @@ def _start_child_task(
             snapshot=child,
             task=task,
             owner_handle=owner_handle,
+            generation=child.generation,
         )
         owner_handle = None
     except Exception:
@@ -1069,39 +1330,56 @@ async def get_research_snapshot(thread_id: str) -> TaskSnapshot:
 
 
 def _load_report_snapshot(thread_id: str, *, rebuild_missing: bool = True) -> TaskSnapshot:
-    record = records.get(thread_id)
-    snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
-    if snapshot is None:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "code": "research_snapshot_not_found",
-                "message": "Research Snapshot not found",
-            },
-        )
-    if snapshot.status != "completed" or snapshot.result is None:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "reports_not_available",
-                "message": "Reports are available only for a completed Research Snapshot",
-            },
-        )
-    files = report_file_links(snapshot)
-    result = snapshot.result.model_copy(update={"files": files})
-    effective = snapshot.model_copy(update={"result": result, "report_references": files})
-    directory = safe_join(output_root(), thread_id)
-    missing = [file for file in files if not (directory / file.name).is_file()]
-    if missing and rebuild_missing:
-        try:
-            generate_reports(effective, directory)
-        except ReportGenerationError as exc:
-            logger.exception("failed to rebuild reports", extra={"thread_id": thread_id})
+    with _task_mutation_lock(thread_id):
+        if _task_is_deleted(thread_id):
             raise HTTPException(
-                status_code=500,
-                detail={"code": "report_generation_failed", "message": str(exc)},
-            ) from exc
-    return effective
+                status_code=404,
+                detail={
+                    "code": "research_snapshot_not_found",
+                    "message": "Research Snapshot not found",
+                },
+            )
+        record = records.get(thread_id)
+        if record is not None and record.deleting:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "research_snapshot_not_found",
+                    "message": "Research Snapshot not found",
+                },
+            )
+        snapshot = record.snapshot if record is not None else _read_persisted_snapshot(thread_id)
+        if snapshot is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "research_snapshot_not_found",
+                    "message": "Research Snapshot not found",
+                },
+            )
+        if snapshot.status != "completed" or snapshot.result is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "reports_not_available",
+                    "message": "Reports are available only for a completed Research Snapshot",
+                },
+            )
+        files = report_file_links(snapshot)
+        result = snapshot.result.model_copy(update={"files": files})
+        effective = snapshot.model_copy(update={"result": result, "report_references": files})
+        directory = _task_directory(thread_id)
+        missing = [file for file in files if not (directory / file.name).is_file()]
+        if missing and rebuild_missing:
+            try:
+                generate_reports(effective, directory)
+            except ReportGenerationError as exc:
+                logger.exception("failed to rebuild reports", extra={"thread_id": thread_id})
+                raise HTTPException(
+                    status_code=500,
+                    detail={"code": "report_generation_failed", "message": str(exc)},
+                ) from exc
+        return effective
 
 
 @app.get("/api/task/{thread_id}/reports", response_model=ReportListResponse)
@@ -1471,7 +1749,7 @@ async def _clarify_task_locked(
             _execute(
                 request,
                 record.run_id,
-                session_dir(thread_id),
+                _task_directory(thread_id, create=True),
                 _reference_images(snapshot),
                 resume=True,
                 clarification_answers=record.snapshot.clarification_answers,
@@ -1505,72 +1783,111 @@ async def clarify_task(
         raise HTTPException(status_code=422, detail="invalid thread id")
 
     async with _task_lock(thread_id):
-        directory = safe_join(output_root(), thread_id)
+        directory = _task_directory(thread_id)
         if not directory.is_dir():
             return await _clarify_task_locked(thread_id, command)
         with _command_lock(thread_id):
             return await _clarify_task_locked(thread_id, command)
 
 
-@app.delete("/api/task/{thread_id}")
-async def delete_task(thread_id: str) -> dict[str, str]:
+@app.delete("/api/task/{thread_id}", response_model=TaskDeleteResponse)
+async def delete_task(
+    thread_id: str,
+    command: TaskDeleteCommand,
+) -> TaskDeleteResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
+    requested_user_id = command.user_id
+    lock = _task_lock(thread_id)
+    try:
+        async with lock:
+            tombstone = _read_tombstone(thread_id)
+            record = records.get(thread_id)
+            directory = _task_directory(thread_id)
+            snapshot = (
+                record.snapshot if record is not None else _read_persisted_snapshot(thread_id)
+            )
+            owner_handle = record.owner_handle if record is not None else None
 
-    async with _task_lock(thread_id):
-        record = records.get(thread_id)
-        directory = safe_join(output_root(), thread_id)
-        owner_handle: TextIO | None = None
-        if record is None and directory.exists():
-            owner_handle = _try_acquire_owner_lock(thread_id)
-            if owner_handle is None:
+            if tombstone is not None:
+                owner = tombstone.user_id
+                if owner is None or requested_user_id != owner:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={"code": "task_not_found", "message": "Task not found"},
+                    )
+                if record is not None:
+                    record.deleting = True
+            elif snapshot is not None:
+                if requested_user_id != snapshot.user_id:
+                    raise HTTPException(
+                        status_code=404,
+                        detail={"code": "task_not_found", "message": "Task not found"},
+                    )
+                if record is not None:
+                    record.deleting = True
+                try:
+                    tombstone = _write_tombstone(
+                        thread_id,
+                        user_id=snapshot.user_id,
+                        generation=snapshot.generation + 1,
+                    )
+                except Exception:
+                    if record is not None:
+                        record.deleting = False
+                    raise
+            elif directory.exists():
                 raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "task_active_elsewhere",
-                        "message": "The task is currently owned by another worker",
-                    },
+                    status_code=404,
+                    detail={"code": "task_not_found", "message": "Task not found"},
                 )
-        elif (
-            record is not None
-            and record.snapshot.status == "awaiting_clarification"
-            and record.owner_handle is None
-        ):
-            owner_handle = _try_acquire_owner_lock(thread_id)
-            if owner_handle is None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail={
-                        "code": "task_active_elsewhere",
-                        "message": "The task is currently owned by another worker",
-                    },
-                )
-            record.owner_handle = owner_handle
-        try:
-            if record is not None and not record.task.done():
+            else:
+                return TaskDeleteResponse(thread_id=thread_id)
+
+            if (
+                record is not None
+                and not record.task.done()
+                and record.task is not asyncio.current_task()
+            ):
                 record.task.cancel()
-                with suppress(asyncio.CancelledError):
+                with suppress(asyncio.CancelledError, Exception):
                     await record.task
+
+            if record is not None and record.owner_handle is owner_handle:
+                record.owner_handle = None
+                _release_lock_handle(owner_handle)
 
             records.pop(thread_id, None)
             await manager.discard(thread_id)
-            if directory.exists():
-                try:
-                    shutil.rmtree(directory)
-                except OSError as exc:
-                    logger.exception(
-                        "failed to delete task artifacts", extra={"thread_id": thread_id}
-                    )
-                    raise HTTPException(status_code=500, detail="failed to delete task") from exc
-        finally:
-            _release_lock_handle(owner_handle)
+            monitor.discard(thread_id)
+            try:
+                with _task_mutation_lock(thread_id):
+                    if _task_is_deleted(thread_id):
+                        _remove_task_directory(thread_id)
+            except (OSError, ValueError) as exc:
+                logger.exception("failed to delete task artifacts", extra={"thread_id": thread_id})
+                raise HTTPException(
+                    status_code=500,
+                    detail={"code": "task_deletion_failed", "message": "Failed to delete task"},
+                ) from exc
+            _remove_task_control_files(thread_id)
+    finally:
+        if task_locks.get(thread_id) is lock:
+            task_locks.pop(thread_id, None)
 
-    return {"status": "deleted", "thread_id": thread_id}
+    return TaskDeleteResponse(thread_id=thread_id)
 
 
 @app.post("/api/task/{thread_id}/cancel")
 async def cancel_task(thread_id: str) -> dict[str, str]:
+    if not _THREAD_ID_PATTERN.fullmatch(thread_id):
+        raise HTTPException(status_code=422, detail="invalid thread id")
     async with _task_lock(thread_id):
+        if _task_is_deleted(thread_id):
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "task_not_found", "message": "Task not found"},
+            )
         record = records.get(thread_id)
         if record is None:
             persisted = _load_snapshot(thread_id)
@@ -1612,6 +1929,11 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
                     "code": "task_active_elsewhere",
                     "message": "The task is currently owned by another worker",
                 },
+            )
+        if record.deleting:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "task_not_found", "message": "Task not found"},
             )
         if record.snapshot.status == "awaiting_clarification":
             owner_handle = record.owner_handle
@@ -1665,7 +1987,13 @@ async def task_socket(websocket: WebSocket, thread_id: str) -> None:
         await websocket.close(code=1008, reason="invalid thread id")
         return
     async with _task_lock(thread_id):
+        if _task_is_deleted(thread_id):
+            await websocket.close(code=1008, reason="task not found")
+            return
         record = records.get(thread_id)
+        if record is not None and record.deleting:
+            await websocket.close(code=1008, reason="task not found")
+            return
         if record is None and _load_snapshot(thread_id) is None:
             await websocket.close(code=1008, reason="task not found")
             return
@@ -1713,25 +2041,132 @@ def _valid_image_signature(content_type: str, content: bytes) -> bool:
     return False
 
 
-def _resolve_uploads(upload_ids: list[str]) -> list[dict[str, Any]]:
-    references: list[dict[str, Any]] = []
-    root = upload_root()
+def _resolve_uploads(upload_ids: list[str]) -> list[ResolvedUpload]:
+    references: list[ResolvedUpload] = []
+    root = upload_root().resolve()
     for upload_id in upload_ids:
         if not _UPLOAD_ID_PATTERN.fullmatch(upload_id):
             raise HTTPException(status_code=422, detail=f"invalid upload id: {upload_id}")
-        matches = [path for path in root.iterdir() if path.is_file() and path.stem == upload_id]
+        matches: list[Path] = []
+        for suffix in _ALLOWED_UPLOAD_TYPES.values():
+            path = root / f"{upload_id}{suffix}"
+            if path.is_symlink():
+                continue
+            if path.is_file() and path.resolve() == path:
+                matches.append(path)
         if len(matches) != 1:
             raise HTTPException(status_code=422, detail=f"upload not found: {upload_id}")
         path = matches[0]
+        content_type = next(
+            content_type
+            for content_type, suffix in _ALLOWED_UPLOAD_TYPES.items()
+            if suffix == path.suffix
+        )
         references.append(
-            {
-                "upload_id": upload_id,
-                "name": path.name,
-                "content_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
-                "size": path.stat().st_size,
-            }
+            ResolvedUpload(
+                upload_id=upload_id,
+                name=path.name,
+                content_type=content_type,
+                size=path.stat().st_size,
+                source=path,
+            )
         )
     return references
+
+
+def _write_reference_copy(
+    destination_directory: Path,
+    upload: ResolvedUpload,
+    *,
+    bound_at: str,
+    source_root: Path | None = None,
+) -> dict[str, Any]:
+    if not _UPLOAD_ID_PATTERN.fullmatch(upload.upload_id):
+        raise ValueError("invalid upload id")
+    if (
+        upload.name != f"{upload.upload_id}{Path(upload.name).suffix}"
+        or Path(upload.name).suffix not in _ALLOWED_UPLOAD_TYPES.values()
+    ):
+        raise ValueError("invalid reference image name")
+    source = upload.source.resolve()
+    if source_root is not None and (
+        source.parent != source_root.resolve() or source.name != upload.name
+    ):
+        raise ValueError("reference image source is outside upload root")
+    if not source.is_file():
+        raise FileNotFoundError(source)
+
+    destination_directory.mkdir(parents=True, exist_ok=True)
+    if destination_directory.is_symlink():
+        raise ValueError("reference image directory must not be a symlink")
+    destination = safe_join(destination_directory, upload.name)
+    raw_destination = destination_directory / upload.name
+    if raw_destination.is_symlink() or destination != raw_destination:
+        raise ValueError("reference image destination is not canonical")
+    temporary = destination_directory / f".{upload.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        shutil.copyfile(source, temporary)
+        temporary.replace(destination)
+    except OSError:
+        with suppress(OSError):
+            temporary.unlink()
+        raise
+    return ReferenceImageBinding(
+        upload_id=upload.upload_id,
+        name=upload.name,
+        content_type=upload.content_type,
+        size=upload.size,
+        bound_at=bound_at,
+    ).model_dump(mode="json")
+
+
+def _bind_reference_images(
+    thread_id: str,
+    uploads: list[ResolvedUpload],
+) -> list[dict[str, Any]]:
+    if not uploads:
+        return []
+    directory = _task_directory(thread_id, create=True)
+    references_directory = safe_join(directory, "reference-images")
+    bound_at = _now()
+    return [
+        _write_reference_copy(
+            references_directory,
+            upload,
+            bound_at=bound_at,
+            source_root=upload_root(),
+        )
+        for upload in uploads
+    ]
+
+
+def _clone_reference_images(parent: TaskSnapshot, child_thread_id: str) -> list[dict[str, Any]]:
+    references = _reference_images(parent)
+    if not references:
+        return []
+    parent_directory = _task_directory(parent.thread_id)
+    child_directory = _task_directory(child_thread_id, create=True)
+    parent_references = safe_join(parent_directory, "reference-images")
+    child_references = safe_join(child_directory, "reference-images")
+    bound_at = _now()
+    cloned: list[dict[str, Any]] = []
+    for raw in references:
+        try:
+            binding = ReferenceImageBinding.model_validate(raw)
+        except ValueError:
+            continue
+        source = safe_join(parent_references, binding.name)
+        if source.is_symlink() or not source.is_file():
+            continue
+        upload = ResolvedUpload(
+            upload_id=binding.upload_id,
+            name=binding.name,
+            content_type=binding.content_type,
+            size=binding.size,
+            source=source,
+        )
+        cloned.append(_write_reference_copy(child_references, upload, bound_at=bound_at))
+    return cloned
 
 
 @app.post("/api/upload", response_model=UploadResponse)
@@ -1763,22 +2198,44 @@ async def download_file(thread_id: str, name: str) -> FileResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
     if not name or "/" in name or "\\" in name or name in {".", ".."}:
-        raise HTTPException(status_code=400, detail="invalid file path")
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_file_path", "message": "Invalid file path"},
+        )
+    if _task_is_deleted(thread_id):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "file_not_found", "message": "File not found"},
+        )
     record = records.get(thread_id)
     original = record.snapshot if record is not None else _load_snapshot(thread_id)
     if original is None or original.result is None or original.status != "completed":
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "file_not_found", "message": "File not found"},
+        )
     snapshot = _load_report_snapshot(thread_id)
     assert snapshot.result is not None
     file_ref = next((file for file in snapshot.result.files if file.name == name), None)
     if file_ref is None:
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "file_not_found", "message": "File not found"},
+        )
     try:
-        path = safe_join(output_root(), thread_id, name)
+        directory = _task_directory(thread_id)
+        raw_path = directory / name
+        path = safe_join(directory, name)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail="invalid file path") from exc
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="file not found")
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_file_path", "message": "Invalid file path"},
+        ) from exc
+    if path != raw_path or raw_path.is_symlink() or not path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "file_not_found", "message": "File not found"},
+        )
     return FileResponse(
         path,
         filename=file_ref.name,

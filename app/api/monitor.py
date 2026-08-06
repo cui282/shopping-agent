@@ -47,6 +47,12 @@ class Monitor:
     def set_event_recorder(self, event_recorder: EventRecorder) -> None:
         self._event_recorder = event_recorder
 
+    def discard(self, thread_id: str) -> None:
+        """Forget process-local sequencing state after durable task deletion."""
+        self._locks.pop(thread_id, None)
+        self._sequences.pop(thread_id, None)
+        self._run_ids.pop(thread_id, None)
+
     async def emit(
         self,
         thread_id: str,

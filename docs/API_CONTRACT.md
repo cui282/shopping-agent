@@ -105,6 +105,7 @@ durable snapshot, even when the process-local event buffer is empty:
     "snapshot_id": "thread-7b8cb4a9c23f",
     "thread_id": "thread-7b8cb4a9c23f",
     "run_id": "d41d8cd98f004204e9800998ecf8427e",
+    "generation": 0,
     "status": "running",
     "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
     "user_id": "browser-7f3c1f7a",
@@ -216,6 +217,7 @@ another task. A still-running first snapshot is not treated as the end of recove
   "snapshot_id": "thread-7b8cb4a9c23f",
   "thread_id": "thread-7b8cb4a9c23f",
   "run_id": "d41d8cd98f004204e9800998ecf8427e",
+  "generation": 0,
   "status": "running",
   "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
   "user_id": "browser-7f3c1f7a",
@@ -347,6 +349,10 @@ and may rebuild missing artifacts from the immutable snapshot. An unfinished tas
 `report_generated` before the terminal `task_result` event; its `data` repeats the stable file
 list and effective time.
 
+`GET /api/files/{thread_id}/{name}` returns HTTP 404 with `detail.code=file_not_found` when the
+task, report, or file is absent. Unsafe names return HTTP 400 with
+`detail.code=invalid_file_path`; neither response includes a filesystem path.
+
 `POST /api/task/{thread_id}/rerun` is the explicit Research Rerun command. Its required body is:
 
 ```json
@@ -452,16 +458,37 @@ superseded worker is internal and does not emit `task_cancelled`; the replacemen
 old WebSocket is closed with code `1012`, after which reconnect receives the replacement snapshot
 instead of mixing both runs.
 
-`DELETE /api/task/{thread_id}` permanently removes a research task. An active worker is
-cancelled and awaited before its durable snapshot, generated reports, WebSocket connection, and
-buffered events are removed. The operation is idempotent for a valid thread ID so clients can
-also clear stale local history entries:
+`DELETE /api/task/{thread_id}` permanently removes a research task. The command body identifies
+the Anonymous Shopper ID that owns the task:
+
+```json
+{"user_id": "browser-7f3c1f7a"}
+```
+
+The service compares that ID with the task aggregate before changing anything and returns the
+same not-found contract for another shopper. An active worker is first fenced by a durable
+deletion tombstone, cancelled, and awaited; the tombstone and a per-task mutation lock prevent
+late workers, external-call continuations, snapshot writes, report generation, and event
+broadcasts from recreating the task. The task's durable snapshot, events, reports, task-owned
+Reference Image copies, owner locks, WebSocket connection, and in-memory transport buffer are
+then removed. The original upload records are not task-owned and remain available for their own
+independent lifecycle. A deletion tombstone remains outside the task directory so a stale worker
+cannot resurrect a deleted thread after process restart; reusing that thread ID returns HTTP 409
+with `detail.code=task_deleted`.
+
+The operation is idempotent for a valid thread ID, including after restart, so clients can also
+clear stale local history entries:
 
 ```json
 {"status": "deleted", "thread_id": "thread-7b8cb4a9c23f"}
 ```
 
-Uploaded references and user preferences are not task-owned and are therefore not deleted.
+When a task is accepted, each selected upload is bound at that point and copied into the task's
+`reference-images/` boundary. The `session_created.data.reference_images` entries include
+`upload_id`, safe generated `name`, `content_type`, `size`, `ownership="task_owned_copy"`, and
+`bound_at`. Deleting the task removes only those copies. An upload that has never been selected
+by a task remains an unbound temporary upload. User preferences, Task Override rules, and other
+shopper tasks are not task-owned and are not deleted.
 
 ## Result representation
 

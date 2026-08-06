@@ -373,7 +373,11 @@ def test_awaiting_clarification_can_be_deleted(client: TestClient) -> None:
     waiting = start_and_wait_for_clarification(client, "比较耳机价格", "delete-awaiting-user")
     thread_id = waiting["thread_id"]
 
-    deleted = client.delete(f"/api/task/{thread_id}")
+    deleted = client.request(
+        "DELETE",
+        f"/api/task/{thread_id}",
+        json={"user_id": "delete-awaiting-user"},
+    )
 
     assert deleted.status_code == 200
     assert deleted.json() == {"status": "deleted", "thread_id": thread_id}
