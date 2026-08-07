@@ -13,6 +13,7 @@ ResearchMode = Literal["product_research", "exact_offer_comparison"]
 ContextMessageRole = Literal["system", "user", "assistant", "tool"]
 RecallChannelName = Literal["opensearch", "query_tower", "item_tower", "faiss"]
 RecallChannelState = Literal["configured", "ready", "degraded", "unavailable"]
+ReadinessComponentState = Literal["ready", "configured", "degraded", "unavailable", "disabled"]
 RecallMode = Literal["hybrid", "partial_hybrid", "deterministic_fallback"]
 PersonalizationInputSource = Literal["remembered_preference", "none"]
 PersonalizationSignal = Literal["user_tower", "none"]
@@ -1117,6 +1118,29 @@ class ProviderCapability(StrictModel):
     failure_reason: ProviderFailureReason | None = None
 
 
+class ReadinessComponentStatus(StrictModel):
+    """A conservative runtime/configuration observation used by readiness clients."""
+
+    configured: bool = False
+    ready: bool = False
+    state: ReadinessComponentState
+    reason_code: str = Field(min_length=1, pattern=r"^[a-z0-9_.:-]+$")
+    reason: str = Field(min_length=1, max_length=4000)
+
+
+class ReadinessComponents(StrictModel):
+    llm: ReadinessComponentStatus
+    marketplace_gateways: dict[str, ReadinessComponentStatus] = Field(default_factory=dict)
+    redis: ReadinessComponentStatus
+    opensearch: ReadinessComponentStatus
+    faiss: ReadinessComponentStatus
+    query_tower: ReadinessComponentStatus
+    item_tower: ReadinessComponentStatus
+    user_tower: ReadinessComponentStatus
+    storage: ReadinessComponentStatus
+    image_analysis: ReadinessComponentStatus
+
+
 class ReadinessResponse(StrictModel):
     status: Literal["ready", "degraded", "not_ready"]
     task_ready: bool
@@ -1130,6 +1154,7 @@ class ReadinessResponse(StrictModel):
     required_actions: list[str]
     data_mode: DataMode = "live"
     developer_diagnostic_mode: bool = False
+    components: ReadinessComponents
     preference_backend: PreferenceBackendStatus = Field(
         default_factory=lambda: PreferenceBackendStatus(
             requested_backend="memory",

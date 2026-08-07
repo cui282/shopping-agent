@@ -664,6 +664,34 @@ export interface ProviderCapability {
   failure_reason: ProviderFailureReason | null;
 }
 
+export type ReadinessComponentState =
+  | "ready"
+  | "configured"
+  | "degraded"
+  | "unavailable"
+  | "disabled";
+
+export interface ReadinessComponentStatus {
+  configured: boolean;
+  ready: boolean;
+  state: ReadinessComponentState;
+  reason_code: string;
+  reason: string;
+}
+
+export interface ReadinessComponents {
+  llm: ReadinessComponentStatus;
+  marketplace_gateways: Record<string, ReadinessComponentStatus>;
+  redis: ReadinessComponentStatus;
+  opensearch: ReadinessComponentStatus;
+  faiss: ReadinessComponentStatus;
+  query_tower: ReadinessComponentStatus;
+  item_tower: ReadinessComponentStatus;
+  user_tower: ReadinessComponentStatus;
+  storage: ReadinessComponentStatus;
+  image_analysis: ReadinessComponentStatus;
+}
+
 export interface ReadinessResponse {
   status: "ready" | "degraded" | "not_ready";
   task_ready: boolean;
@@ -677,6 +705,7 @@ export interface ReadinessResponse {
   required_actions: string[];
   data_mode: DataMode;
   developer_diagnostic_mode: boolean;
+  components?: ReadinessComponents;
   preference_backend?: PreferenceBackendStatus;
   recall?: RecallReadiness;
 }

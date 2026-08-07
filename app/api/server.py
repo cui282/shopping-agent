@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import errno
 import fcntl
+import importlib.util
 import json
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -66,6 +68,8 @@ from app.schemas import (
     PreferenceDeleteResponse,
     PreferenceResponse,
     ProviderCapability,
+    ReadinessComponents,
+    ReadinessComponentStatus,
     ReadinessResponse,
     ReferenceImageBinding,
     RememberedPreference,
@@ -94,6 +98,8 @@ from app.utils.thread_ctx import thread_scope
 
 load_dotenv()
 logger = logging.getLogger("shopping_agent.api")
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 class SnapshotPersistenceError(OSError):
@@ -963,10 +969,274 @@ async def _execute(
         _release_lock_handle(owner_handle)
 
 
+def _readiness_component(
+    *,
+    configured: bool,
+    ready: bool,
+    state: str,
+    reason_code: str,
+    reason: str,
+) -> ReadinessComponentStatus:
+    return ReadinessComponentStatus(
+        configured=configured,
+        ready=ready,
+        state=state,  # type: ignore[arg-type]
+        reason_code=reason_code,
+        reason=reason,
+    )
+
+
+def _configured_runtime_path(variable: str, default: str) -> Path:
+    raw = Path(os.getenv(variable, default).strip())
+    return (raw if raw.is_absolute() else _PROJECT_ROOT / raw).resolve()
+
+
+def _storage_readiness() -> ReadinessComponentStatus:
+    roots = {
+        "output": _configured_runtime_path("OUTPUT_ROOT", "output"),
+        "uploaded": _configured_runtime_path("UPLOAD_ROOT", "uploaded"),
+        "data": _PROJECT_ROOT / "data",
+    }
+    failures: list[str] = []
+    for name, root in roots.items():
+        try:
+            if not root.exists():
+                root.mkdir(parents=True, exist_ok=True)
+            if not root.is_dir():
+                failures.append(f"{name} is not a directory")
+            elif not os.access(root, os.R_OK | os.W_OK | os.X_OK):
+                failures.append(f"{name} is not readable and writable")
+        except OSError as exc:
+            failures.append(f"{name} unavailable ({type(exc).__name__})")
+    if failures:
+        return _readiness_component(
+            configured=True,
+            ready=False,
+            state="degraded",
+            reason_code="storage_unavailable",
+            reason="; ".join(failures),
+        )
+    return _readiness_component(
+        configured=True,
+        ready=True,
+        state="ready",
+        reason_code="writable",
+        reason="output, uploaded, and data directories are readable and writable",
+    )
+
+
+def _recall_component(report, *, disabled_codes: set[str]) -> ReadinessComponentStatus:
+    if report.state == "ready":
+        return _readiness_component(
+            configured=True,
+            ready=True,
+            state="ready",
+            reason_code=report.reason_code,
+            reason=report.reason,
+        )
+    if report.state == "configured":
+        return _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code=report.reason_code,
+            reason=report.reason,
+        )
+    if report.reason_code in disabled_codes:
+        return _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code=report.reason_code,
+            reason=report.reason,
+        )
+    return _readiness_component(
+        configured=report.configured,
+        ready=False,
+        state="degraded" if report.state == "degraded" else "unavailable",
+        reason_code=report.reason_code,
+        reason=report.reason,
+    )
+
+
+def _readiness_components(settings, preference_backend) -> ReadinessComponents:
+    if settings.llm_configured:
+        llm = _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code="configured_not_probed",
+            reason="LLM credentials and model are configured; readiness does not make a live model call",
+        )
+    else:
+        llm = _readiness_component(
+            configured=False,
+            ready=False,
+            state="unavailable",
+            reason_code="not_configured",
+            reason=(
+                "OPENAI_API_KEY and LLM_MAIN are not both configured; the active rules planner"
+                if settings.active_agent_mode == "rules"
+                else "OPENAI_API_KEY and LLM_MAIN are not both configured"
+            ),
+        )
+
+    gateways: dict[str, ReadinessComponentStatus] = {}
+    for marketplace in settings.marketplaces:
+        if settings.sandbox_mode:
+            gateways[marketplace.name] = _readiness_component(
+                configured=marketplace.configured,
+                ready=False,
+                state="disabled",
+                reason_code=(
+                    "sandbox_forbidden"
+                    if settings.app_env == "production"
+                    else "sandbox_fixture_active"
+                ),
+                reason=(
+                    "production rejects sandbox execution; live gateway is not used"
+                    if settings.app_env == "production"
+                    else "explicit Sandbox mode uses fixture providers; live gateway is not used"
+                ),
+            )
+        elif marketplace.state == "configured":
+            gateways[marketplace.name] = _readiness_component(
+                configured=True,
+                ready=False,
+                state="configured",
+                reason_code="configured_not_probed",
+                reason="live gateway endpoint and key are configured; readiness does not call the gateway",
+            )
+        elif marketplace.state == "partial":
+            gateways[marketplace.name] = _readiness_component(
+                configured=False,
+                ready=False,
+                state="degraded",
+                reason_code="partial_configuration",
+                reason="gateway endpoint and key must both be configured",
+            )
+        else:
+            gateways[marketplace.name] = _readiness_component(
+                configured=False,
+                ready=False,
+                state="unavailable",
+                reason_code="not_configured",
+                reason="live gateway endpoint and key are not configured",
+            )
+
+    if preference_backend.fallback_reason:
+        redis = _readiness_component(
+            configured=True,
+            ready=False,
+            state="degraded",
+            reason_code="fallback_active",
+            reason=preference_backend.fallback_reason,
+        )
+    elif preference_backend.backend == "redis":
+        redis = _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code="configured_not_probed",
+            reason="Redis is configured; readiness does not issue a network ping",
+        )
+    else:
+        redis = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="backend_disabled",
+            reason="STORE_BACKEND=memory uses process-local preference evaluation",
+        )
+
+    recall = recall_readiness(settings)
+    opensearch = _recall_component(recall.channels["opensearch"], disabled_codes=set())
+    query_tower = _recall_component(
+        recall.channels["query_tower"], disabled_codes={"ann_backend_disabled"}
+    )
+    item_tower = _recall_component(
+        recall.channels["item_tower"], disabled_codes={"ann_backend_disabled"}
+    )
+    faiss_report = recall.channels["faiss"]
+    if settings.ann_backend == "disabled":
+        faiss = _recall_component(faiss_report, disabled_codes={"backend_disabled"})
+    else:
+        index_path = _configured_runtime_path("ANN_INDEX_PATH", "./data/item_index.faiss")
+        if not index_path.is_file():
+            faiss = _readiness_component(
+                configured=True,
+                ready=False,
+                state="unavailable",
+                reason_code="index_missing",
+                reason="ANN_BACKEND=faiss is enabled but ANN_INDEX_PATH does not point to a file",
+            )
+        elif importlib.util.find_spec("faiss") is None:
+            faiss = _readiness_component(
+                configured=True,
+                ready=False,
+                state="unavailable",
+                reason_code="dependency_missing",
+                reason="ANN_BACKEND=faiss is enabled but the faiss runtime dependency is unavailable",
+            )
+        else:
+            faiss = _recall_component(faiss_report, disabled_codes=set())
+
+    personalization = recall.personalization
+    if personalization is None or personalization.reason_code in {
+        "ann_backend_disabled",
+        "not_configured",
+    }:
+        user_tower = _readiness_component(
+            configured=bool(personalization and personalization.configured),
+            ready=False,
+            state="disabled"
+            if personalization and personalization.reason_code == "ann_backend_disabled"
+            else "unavailable",
+            reason_code=personalization.reason_code if personalization else "not_configured",
+            reason=personalization.reason if personalization else "user tower is not configured",
+        )
+    elif personalization.state == "configured":
+        user_tower = _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code=personalization.reason_code,
+            reason=personalization.reason,
+        )
+    else:
+        user_tower = _readiness_component(
+            configured=personalization.configured,
+            ready=False,
+            state="degraded" if personalization.state == "degraded" else "unavailable",
+            reason_code=personalization.reason_code,
+            reason=personalization.reason,
+        )
+
+    return ReadinessComponents(
+        llm=llm,
+        marketplace_gateways=gateways,
+        redis=redis,
+        opensearch=opensearch,
+        faiss=faiss,
+        query_tower=query_tower,
+        item_tower=item_tower,
+        user_tower=user_tower,
+        storage=_storage_readiness(),
+        image_analysis=_readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="not_configured",
+            reason="image analysis is not configured; image upload remains a separate storage capability",
+        ),
+    )
+
+
 def _readiness_response() -> ReadinessResponse:
     settings = get_settings()
     sandbox_available = settings.sandbox_mode and settings.app_env != "production"
     preference_backend = preference_store.backend_status
+    components = _readiness_components(settings, preference_backend)
 
     def capability(marketplace) -> ProviderCapability:
         if sandbox_available:
@@ -993,16 +1263,23 @@ def _readiness_response() -> ReadinessResponse:
         )
 
     required_actions = list(settings.required_actions)
+    if not components.storage.ready:
+        required_actions.append(
+            "Ensure OUTPUT_ROOT, UPLOAD_ROOT, and the data directory are readable and writable"
+        )
     if preference_backend.fallback_reason:
         required_actions.append(
             "Redis preference backend unavailable; local evaluation is non-persistent"
         )
-    readiness_status = settings.status
+    task_ready = settings.task_ready and components.storage.ready
+    readiness_status = settings.status if task_ready else "not_ready"
     if preference_backend.fallback_reason and readiness_status == "ready":
+        readiness_status = "degraded"
+    if components.redis.state == "disabled" and readiness_status == "ready":
         readiness_status = "degraded"
     return ReadinessResponse(
         status=readiness_status,
-        task_ready=settings.task_ready,
+        task_ready=task_ready,
         environment=settings.app_env,
         runtime_mode="sandbox" if settings.sandbox_mode else "live",
         agent_mode=settings.active_agent_mode,
@@ -1020,6 +1297,7 @@ def _readiness_response() -> ReadinessResponse:
         required_actions=required_actions,
         data_mode=settings.data_mode,
         developer_diagnostic_mode=settings.developer_diagnostic_mode,
+        components=components,
         preference_backend=preference_backend,
         recall=recall_readiness(settings),
     )

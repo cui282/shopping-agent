@@ -105,6 +105,40 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
 }
 ```
 
+The additive `components` object is present on every readiness response. It is the observable
+configuration boundary for the self-hosted runtime and uses this shape:
+
+```json
+{
+  "components": {
+    "llm": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+    "marketplace_gateways": {
+      "amazon": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+      "shopee": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+      "aliexpress": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+      "ebay": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."}
+    },
+    "redis": {"configured": false, "ready": false, "state": "disabled", "reason_code": "backend_disabled", "reason": "..."},
+    "opensearch": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+    "faiss": {"configured": false, "ready": false, "state": "disabled", "reason_code": "backend_disabled", "reason": "..."},
+    "query_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "ann_backend_disabled", "reason": "..."},
+    "item_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "ann_backend_disabled", "reason": "..."},
+    "user_tower": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+    "storage": {"configured": true, "ready": true, "state": "ready", "reason_code": "writable", "reason": "..."},
+    "image_analysis": {"configured": false, "ready": false, "state": "disabled", "reason_code": "not_configured", "reason": "..."}
+  }
+}
+```
+
+Every component status has `configured`, `ready`, `state` (`ready`, `configured`, `degraded`,
+`unavailable`, or `disabled`), a stable `reason_code`, and a human-readable `reason`. Gateway,
+LLM, Redis, OpenSearch, and tower configuration is intentionally not probed by readiness, so
+`state=configured` and `reason_code=configured_not_probed` are not network-health claims. The
+backend checks local storage writability. Actual provider and recall outcomes are reported by task
+events and terminal result provenance. A capability that is absent or disabled must never be
+represented as `ready`; clients should use `task_ready` to gate submission and `capabilities` to
+gate user-facing features.
+
 `status` is `ready`, `degraded`, or `not_ready`. Clients must use `task_ready`, not liveness or provider count, to enable task submission.
 The additive `recall` object reports configuration before a task runs. Its `configured` state is
 not a runtime health claim; terminal result provenance and `tool_end` carry the actual `ready`,
@@ -560,7 +594,7 @@ old WebSocket is closed with code `1012`, after which reconnect receives the rep
 instead of mixing both runs.
 
 `DELETE /api/task/{thread_id}` permanently removes a research task. The command body identifies
-the Anonymous Shopper ID that owns the task:
+the Anonymous Shopper ID associated with the task (an association key, not an ownership proof):
 
 ```json
 {"user_id": "browser-7f3c1f7a"}

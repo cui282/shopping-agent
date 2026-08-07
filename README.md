@@ -15,7 +15,7 @@ Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用�
 - 9 个类型化购物工具，覆盖规划、类目、检索、筛选、价格、到手价和总结
 - AGUI 风格 WebSocket 事件，支持连接前缓冲和断线重连
 - Live Result、Sandbox Result 与 Partial Result；开发诊断模式会额外披露 mixed source
-- Redis 偏好存储、OpenSearch 类目知识库、Faiss 与三塔召回扩展边界
+- Redis 偏好存储与可选 OpenSearch、Faiss、三塔召回扩展边界；未配置能力会在 readiness 中明确标记
 - Markdown、JSON、PDF 报告和受控文件下载
 - GitHub Actions、Dependabot 和统一的 `make verify` 质量门禁
 
@@ -119,6 +119,59 @@ curl --fail http://127.0.0.1:8000/api/readiness
 ```
 
 `task_ready=false` 时，响应中的 `required_actions` 会列出缺失配置；此时 `POST /api/task` 返回带 `runtime_not_ready` 错误码的 HTTP 503。
+
+## Self-hosted Beta runbook
+
+### 可复现的本地 Sandbox 流程
+
+Sandbox 是开发和验收模式，不是登录、鉴权或生产数据源。完整的最小流程如下：
+
+```bash
+cp examples/sandbox.env.example .env
+make install
+make dev-backend       # 终端一：127.0.0.1:8000
+make dev-frontend      # 终端二：127.0.0.1:5173
+curl --fail http://127.0.0.1:8000/api/health
+curl --fail http://127.0.0.1:8000/api/readiness
+```
+
+两项开发服务分别用 `Ctrl-C` 停止。浏览器访问 `http://127.0.0.1:5173`；Vite 将 `/api` 和 `/ws` 代理到后端。Sandbox 只有在 `.env` 明确设置 `SANDBOX_MODE=true` 且 `APP_ENV` 不是 `production` 时才会启用固定 fixture。未配置 live gateway 的 live runtime 会保持 `task_ready=false`，创建任务返回 HTTP 503，不会悄悄改用 fixture。
+
+### Gateway 接入
+
+每个 marketplace 都必须同时设置对应的 `*_API_ENDPOINT` 和 `*_API_KEY`；endpoint 是 Shopping Agent 要调用的完整搜索地址。网关接收 `GET` 的 `query`、`top_k` 参数，并返回契约中的 normalized offer。网关密钥只放在后端或 Compose 环境中，不能放入 `frontend` 的 Vite 变量或浏览器存储。配置不完整时 `/api/readiness` 会显示 `unavailable` 或 `degraded` 及 `reason_code`，生产环境不会接受任务。
+
+### Docker Compose 流程与数据目录
+
+```bash
+cp examples/sandbox.env.example .env
+make compose-up
+curl --fail http://127.0.0.1:8080/api/health
+curl --fail http://127.0.0.1:8080/api/readiness
+make compose-down
+```
+
+Compose 启动 Redis、OpenSearch、backend 和 Nginx frontend；`opensearch-init` 只在需要建立类目索引时运行：
+
+```bash
+make opensearch-init
+```
+
+运行时数据分别位于 `output/`（任务快照和报告）、`uploaded/`（上传文件）和 `data/`（可选 Faiss 索引）。Compose 使用 `redis_data`、`opensearch_data`、`shopping_agent_output`、`shopping_agent_uploaded`、`shopping_agent_data` 命名卷；`make compose-down` 不删除这些卷。仓库不提交这些目录中的运行时内容。Compose 没有内置 marketplace gateway 或 tower 服务；live gateway、Faiss 索引和 tower endpoint 必须由部署者提供并显式配置。
+
+### Readiness 与故障排查
+
+`/api/health` 只检查进程存活。`/api/readiness` 额外列出 LLM、每个平台 gateway、Redis、OpenSearch、Faiss、query/item/user tower、storage 和 image analysis 的 `configured`、`ready`、`state`、`reason_code`、`reason`。网络型依赖采用保守的配置观察：`configured`/`configured_not_probed` 不代表已成功连接；真实任务事件会披露实际 `ok`、`degraded` 或 `unavailable`。只有明确可验证的本地 storage 才会标为 `ready`。`image_analysis=false` 时只能上传和保存文件，界面不提供 Reference Image 搜索入口。
+
+启动异常时按以下顺序检查：
+
+```bash
+docker compose --profile app ps
+docker compose --profile app logs --tail=200 backend frontend
+curl --fail-with-body http://127.0.0.1:8000/api/readiness
+```
+
+如果 backend healthcheck 不通过，先读取 `required_actions` 和 `components.*.reason`；常见原因是 live 没有完整 gateway、生产误启用 Sandbox/诊断模式、Redis 只剩内存 fallback，或 `output`、`uploaded`、`data` 不可写。OpenSearch/tower/Faiss 是可选能力，缺失时应看到明确降级而不是“ready”；补齐配置后重新启动并重新检查 readiness。
 
 ## 连接真实 API
 
@@ -248,7 +301,7 @@ cp examples/sandbox.env.example .env
 make compose-up
 ```
 
-访问 `http://127.0.0.1:8080`。Compose 同时启动 Redis、OpenSearch、后端和 Nginx 前端；后端健康检查使用 readiness，因此配置不完整时前端不会被标记为可用。
+访问 `http://127.0.0.1:8080`。Compose 同时启动 Redis、OpenSearch、后端和 Nginx 前端；后端健康检查使用 readiness，因此配置不完整时前端不会被标记为可用。默认 Compose 不提供 live marketplace gateway、tower 服务或 Faiss 索引。
 
 只启动中间件：
 
@@ -273,7 +326,7 @@ make compose-down
 make verify
 ```
 
-它依次执行 Ruff lint/format 检查、后端测试、前端 Vitest 和生产构建。接口字段变化必须同步更新 Pydantic schema、前端 TypeScript 类型、测试和 `docs/API_CONTRACT.md`。
+它依次执行 Ruff lint/format 检查、后端测试、前端 Vitest、生产构建，以及使用受控 FastAPI backend 的真实 Chromium 浏览器验收。浏览器门禁覆盖 10 个任务状态（task-ready、running、awaiting-clarification、partial、no-match、empty、error、cancelled、completed、developer diagnostic mixed）和 1280px、375px、320px 三种视口，不调用外部 live API。接口字段变化必须同步更新 Pydantic schema、前端 TypeScript 类型、测试和 `docs/API_CONTRACT.md`。
 
 ## 数据与安全边界
 

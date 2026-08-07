@@ -56,7 +56,7 @@ Shopping Agent 需要的是面向消费者的商品发现/联盟数据 API，而
 
 这些要求见美国站 2026-04-14 更新的[Associates Program Policies](https://affiliate-program.amazon.com/help/operating/policies/#Associates%20Program%20IP%20License)。各站点适用各自协议，入口汇总在[Creators API License 页面](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/license-agreement)。
 
-因此，Shopping Agent 在接入 Amazon 前应把“跨平台排序、LLM 推理输入、日志内容、缓存、推荐文案和跳转方式”完整提交给 Associates Support，取得书面确认。一般联盟账号获批不等于这个具体 AI 比价数据流已经获批。Amazon 数据不得进入 SFT、RL、embedding 训练集或其他模型训练流程，除非获得明确书面许可。
+因此，Shopping Agent 在接入 Amazon 前应把“跨平台排序、LLM 推理输入、日志内容、缓存、推荐文案和跳转方式”完整提交给 Associates Support，取得书面确认。一般联盟账号获批不等于这个具体 AI 比价数据流已经获批。未经明确书面许可，Amazon 数据不得进入任何模型训练、微调或嵌入索引构建流程。
 
 ### 网关需要保存的凭证
 
@@ -176,6 +176,23 @@ React -> Shopping Agent FastAPI -> 自有 marketplace gateway -> 官方/合法�
 | 第三方 | 供应商 token、套餐和数据许可版本 | 对应平台 `*_API_ENDPOINT`、`*_API_KEY` |
 
 网关向 Shopping Agent 暴露 `GET /{platform}/search?query=...&top_k=...`，使用自有 Bearer/API key 验证请求，并至少返回 `title`、`price`、`currency`。建议同时返回 `item_id`、`image_url`、`product_url`、`seller`、`availability`、`observed_at`、`marketplace`、运费/税费口径和上游来源，便于后续补强当前统一模型。
+
+## Self-hosted Beta 验收清单
+
+### 配置与启动
+
+1. 复制 `examples/sandbox.env.example` 进行本地验收，或复制 `examples/live.env.example` 进行 live 配置；不要把两个模式混用。
+2. Sandbox 只允许在非生产环境显式启用 `SANDBOX_MODE=true`。生产环境没有完整 gateway 时，`GET /api/readiness` 必须返回 `task_ready=false`，`POST /api/task` 必须返回 HTTP 503。
+3. 每个平台都要同时填写 `*_API_ENDPOINT` 和 `*_API_KEY`。Shopping Agent 只把这两个网关配置交给后端适配器，平台原始凭证留在自有 gateway 内。
+4. 启动后检查 `/api/health` 和 `/api/readiness`；后者必须逐项查看 `components`，不能把 `configured` 或 `configured_not_probed` 当作已连通。
+
+### 故障与数据边界
+
+`output/` 保存任务快照和报告，`uploaded/` 保存上传文件，`data/` 保存可选索引；Compose 对应命名卷为 `shopping_agent_output`、`shopping_agent_uploaded` 和 `shopping_agent_data`，Redis 与 OpenSearch 另有各自数据卷。`make compose-down` 只停止容器，不删除数据。`image_analysis=false` 仅表示当前没有图像理解能力，不能从“允许上传”推导出图像搜索能力。
+
+Sandbox fixture 和 mixed source 只用于明确的 Sandbox/developer diagnostic 验收路径。普通 live 用户路径不得将 fixture 当作 gateway 结果；每个结果必须保留 `source`、状态、fallback 原因和数据模式。Anonymous Shopper ID 只是浏览器本地关联标识，不是 authentication、account、authorization 或所有权证明。
+
+受控浏览器验收通过 `make browser-acceptance` 运行，使用仓库内的 deterministic backend，不需要真实平台或模型凭证；完整发布门禁是 `make verify`。
 
 ## 建议执行顺序
 

@@ -791,6 +791,18 @@ function CalculationExclusions({ exclusions }: { exclusions: CalculationExclusio
   );
 }
 
+function resultHasEvidence(result: NonNullable<AgentState["result"]>): boolean {
+  return (
+    result.product_evidence.length > 0 ||
+    result.recommendations.length > 0 ||
+    result.comparison.length > 0 ||
+    result.matching_offers.length > 0 ||
+    result.alternative_candidates.length > 0 ||
+    (result.unverified_candidates?.length ?? 0) > 0 ||
+    (result.exclusions?.length ?? 0) > 0
+  );
+}
+
 const preferenceStatusLabels: Record<PreferenceDecision["status"], string> = {
   applied: "应用",
   ignored: "忽略",
@@ -834,12 +846,19 @@ function DecisionTransparency({ state, onRelax }: { state: AgentState; onRelax?:
   const exclusions = result.exclusions ?? [];
   const calculationExclusions = result.calculation_exclusions ?? [];
   const suggestions = result.relaxation_suggestions ?? [];
-  const isNoMatch = result.match_status === "no_match" || result.recommendations.length === 0;
+  const isEmpty = !resultHasEvidence(result);
+  const isNoMatch = !isEmpty && (result.match_status === "no_match" || result.recommendations.length === 0);
   const hasExactIdentityMatch = result.matching_offers.length > 0;
   const exactIdentityNoMatch = result.mode === "exact_offer_comparison" && !hasExactIdentityMatch;
 
   return (
     <div className={styles.decisionTransparency}>
+      {isEmpty && (
+        <section className={styles.emptyResult} role="status" aria-label="空结果">
+          <strong>没有可用的 Product Evidence</strong>
+          <span>本次平台查询没有返回可用于筛选、成本核算或排序的候选。</span>
+        </section>
+      )}
       {isNoMatch && (
         <section className={styles.noMatch} role="status" aria-label="无匹配结果">
           <strong>
@@ -1070,9 +1089,11 @@ export default function ResearchContent({
             </div>
           ) : (
             <p className={styles.noComparison}>
-              {result?.mode === "exact_offer_comparison" && result.matching_offers.length === 0
-                ? "研究已完成，但没有 Identity Evidence 充分的 Matching Offer。"
-                : "研究已完成，但没有商品同时满足硬性条件。"}
+              {result && !resultHasEvidence(result)
+                ? "研究已完成，但平台没有返回可用的 Product Evidence。"
+                : result?.mode === "exact_offer_comparison" && result.matching_offers.length === 0
+                  ? "研究已完成，但没有 Identity Evidence 充分的 Matching Offer。"
+                  : "研究已完成，但没有商品同时满足硬性条件。"}
             </p>
           )
         ) : (

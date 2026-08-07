@@ -6,7 +6,7 @@ COMPOSE ?= docker compose
 UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
 
-.PHONY: help install install-production dev-backend dev-frontend test lint frontend-build verify format build infra-up opensearch-init infra-down compose-up compose-down logs
+.PHONY: help install install-production dev-backend dev-frontend test lint frontend-build browser-install browser-acceptance verify format build infra-up opensearch-init infra-down compose-up compose-down logs
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Shopping Agent commands:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -35,7 +35,13 @@ lint: ## Check Python formatting and lint rules
 frontend-build: ## Type-check and create the frontend production bundle
 	cd frontend && $(NPM) run build
 
-verify: lint test frontend-build ## Run the same quality gate as CI
+browser-install: ## Install the pinned Chromium runtime used by browser acceptance
+	cd frontend && $(NPM) exec -- playwright install chromium
+
+browser-acceptance: ## Run the controlled-backend real-browser acceptance matrix
+	cd frontend && $(NPM) run browser:acceptance
+
+verify: lint test frontend-build browser-acceptance ## Run the same quality gate as CI
 
 format: ## Format Python source and tests
 	$(UV) run ruff format app tests

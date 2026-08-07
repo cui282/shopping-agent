@@ -513,6 +513,22 @@
   line-height: 1.6;
 }
 
+.emptyResult {
+  display: grid;
+  gap: 4px;
+  padding: 13px 15px;
+  border-left: 3px solid var(--info);
+  color: var(--ink);
+  background: var(--info-soft);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.emptyResult span {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
 .noMatch span {
   color: var(--ink-muted);
   font-size: 11px;

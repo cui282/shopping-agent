@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 from urllib.parse import unquote_plus
 
@@ -81,6 +82,29 @@ def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient)
         }
         for capability in readiness.json()["providers"].values()
     )
+    components = readiness.json()["components"]
+    assert set(components) == {
+        "llm",
+        "marketplace_gateways",
+        "redis",
+        "opensearch",
+        "faiss",
+        "query_tower",
+        "item_tower",
+        "user_tower",
+        "storage",
+        "image_analysis",
+    }
+    assert components["storage"]["ready"] is True
+    assert components["storage"]["state"] == "ready"
+    assert components["redis"]["state"] == "disabled"
+    assert components["image_analysis"] == {
+        "configured": False,
+        "ready": False,
+        "state": "disabled",
+        "reason_code": "not_configured",
+        "reason": "image analysis is not configured; image upload remains a separate storage capability",
+    }
 
 
 @pytest.mark.parametrize("query", ["a", "商" * 4000, f" \t{'商' * 4000}\n"])
@@ -136,6 +160,15 @@ def test_unsupported_destination_fails_before_marketplace_search(
 def test_unconfigured_live_runtime_rejects_tasks(client: TestClient, monkeypatch) -> None:
     monkeypatch.setenv("SANDBOX_MODE", "false")
 
+    readiness = client.get("/api/readiness")
+    assert readiness.status_code == 200
+    body = readiness.json()
+    assert body["task_ready"] is False
+    assert all(
+        component["state"] == "unavailable" and component["reason_code"] == "not_configured"
+        for component in body["components"]["marketplace_gateways"].values()
+    )
+
     response = client.post(
         "/api/task",
         json={"query": "找一款降噪耳机", "user_id": "live-user", "upload_ids": []},
@@ -144,6 +177,32 @@ def test_unconfigured_live_runtime_rejects_tasks(client: TestClient, monkeypatch
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "runtime_not_ready"
     assert response.headers["X-Request-ID"]
+
+
+def test_readiness_marks_partial_and_configured_live_gateways_without_claiming_health(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example/amazon")
+
+    partial = client.get("/api/readiness").json()
+    assert partial["components"]["marketplace_gateways"]["amazon"] == {
+        "configured": False,
+        "ready": False,
+        "state": "degraded",
+        "reason_code": "partial_configuration",
+        "reason": "gateway endpoint and key must both be configured",
+    }
+
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+    configured = client.get("/api/readiness").json()
+    assert configured["components"]["marketplace_gateways"]["amazon"] == {
+        "configured": True,
+        "ready": False,
+        "state": "configured",
+        "reason_code": "configured_not_probed",
+        "reason": "live gateway endpoint and key are configured; readiness does not call the gateway",
+    }
 
 
 def test_production_sandbox_readiness_and_task_fail_closed(client: TestClient, monkeypatch) -> None:
@@ -164,6 +223,10 @@ def test_production_sandbox_readiness_and_task_fail_closed(client: TestClient, m
         and capability["failure_reason"] == "sandbox_forbidden"
         for capability in body["providers"].values()
     )
+    assert all(
+        component["state"] == "disabled" and component["reason_code"] == "sandbox_forbidden"
+        for component in body["components"]["marketplace_gateways"].values()
+    )
 
     response = client.post(
         "/api/task",
@@ -171,6 +234,23 @@ def test_production_sandbox_readiness_and_task_fail_closed(client: TestClient, m
     )
     assert response.status_code == 503
     assert response.json()["detail"]["code"] == "runtime_not_ready"
+
+
+def test_readiness_fails_closed_when_runtime_storage_is_not_a_directory(
+    client: TestClient, monkeypatch, tmp_path: Path
+) -> None:
+    output_file = tmp_path / "output-file"
+    output_file.write_text("occupied", encoding="utf-8")
+    monkeypatch.setenv("OUTPUT_ROOT", str(output_file))
+
+    readiness = client.get("/api/readiness")
+
+    assert readiness.status_code == 200
+    body = readiness.json()
+    assert body["task_ready"] is False
+    assert body["status"] == "not_ready"
+    assert body["components"]["storage"]["reason_code"] == "storage_unavailable"
+    assert any("OUTPUT_ROOT" in action for action in body["required_actions"])
 
 
 def test_production_fixture_fallback_readiness_and_task_fail_closed(

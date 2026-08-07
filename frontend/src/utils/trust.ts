@@ -3,6 +3,7 @@ import type {
   ProviderFailureReason,
   ProviderMode,
   ProviderSource,
+  ReadinessComponentState,
   ReadinessResponse,
   RecallChannelName,
   RecallChannelState,
@@ -146,6 +147,33 @@ export function recallStateLabel(state: RecallChannelState | string): string {
     unavailable: "不可用",
   };
   return labels[state] ?? state;
+}
+
+export function readinessComponentStateLabel(state: ReadinessComponentState | string): string {
+  const labels: Record<string, string> = {
+    ready: "已就绪",
+    configured: "已配置，尚未探测",
+    degraded: "已降级",
+    unavailable: "不可用",
+    disabled: "未启用",
+  };
+  return labels[state] ?? state;
+}
+
+export function readinessComponentLabel(name: string): string {
+  const labels: Record<string, string> = {
+    llm: "LLM",
+    redis: "Redis",
+    opensearch: "OpenSearch",
+    faiss: "Faiss",
+    query_tower: "Query tower",
+    item_tower: "Item tower",
+    user_tower: "User tower",
+    storage: "Storage",
+    image_analysis: "Image analysis",
+  };
+  if (name.startsWith("gateway.")) return `${providerNameLabel(name.slice("gateway.".length))} gateway`;
+  return labels[name] ?? name.replaceAll("_", " ");
 }
 
 export function personalizationInputSourceLabel(source: string): string {

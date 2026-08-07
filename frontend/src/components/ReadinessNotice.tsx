@@ -1,5 +1,6 @@
 import { AlertTriangle, CircleAlert, LoaderCircle, RefreshCw } from "lucide-react";
 import type { AgentState } from "../hooks/useShoppingAgent";
+import type { ReadinessComponentStatus } from "../types/api";
 import {
   providerNameLabel,
   providerReasonLabel,
@@ -8,6 +9,8 @@ import {
   recallStateLabel,
   personalizationInputSourceLabel,
   requiredActionLabel,
+  readinessComponentLabel,
+  readinessComponentStateLabel,
 } from "../utils/trust";
 import styles from "./ReadinessNotice.module.css";
 
@@ -65,6 +68,23 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
   const providers = Object.entries(readiness.providers);
   const recallChannels = readiness.recall ? Object.entries(readiness.recall.channels) : [];
   const personalization = readiness.recall?.personalization;
+  const componentEntries: Array<[string, ReadinessComponentStatus]> = readiness.components
+    ? [
+        ["llm", readiness.components.llm],
+        ...Object.entries(readiness.components.marketplace_gateways).map(([name, component]) => [
+          `gateway.${name}`,
+          component,
+        ] as [string, ReadinessComponentStatus]),
+        ["redis", readiness.components.redis],
+        ["opensearch", readiness.components.opensearch],
+        ["faiss", readiness.components.faiss],
+        ["query_tower", readiness.components.query_tower],
+        ["item_tower", readiness.components.item_tower],
+        ["user_tower", readiness.components.user_tower],
+        ["storage", readiness.components.storage],
+        ["image_analysis", readiness.components.image_analysis],
+      ]
+    : [];
 
   return (
     <div className={styles.notice} data-state={blocked ? "error" : "warning"} role={blocked ? "alert" : "status"}>
@@ -92,18 +112,33 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
                   {capability.available
                     ? capability.source === "fixture"
                       ? "sandbox fixture 可用"
-                      : "live gateway 已配置"
+                      : capability.state === "configured"
+                        ? "live gateway 已配置，尚未探测"
+                        : "live gateway 配置不完整"
                     : providerReasonLabel(capability.failure_reason ?? capability.state)}
                 </span>
               </li>
             ))}
           </ul>
         )}
+        {componentEntries.length > 0 && (
+          <details className={styles.componentDisclosure}>
+            <summary>运行组件状态</summary>
+            <ul className={styles.components} aria-label="运行组件状态">
+              {componentEntries.map(([name, component]) => (
+                <li key={name} data-ready={component.ready} data-state={component.state}>
+                  <strong>{readinessComponentLabel(name)}</strong>
+                  <span>{readinessComponentStateLabel(component.state)} · {component.reason_code}</span>
+                  <small>{component.reason}</small>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
         {readiness.recall && (
-          <>
-            <span>
-              召回配置：{recallModeLabel(readiness.recall.mode)}；可选 channel 缺失时保留 deterministic fallback。
-            </span>
+          <details className={styles.recallDisclosure}>
+            <summary>召回状态：{recallModeLabel(readiness.recall.mode)}</summary>
+            <span>可选 channel 缺失时保留 deterministic fallback。</span>
             {recallChannels.length > 0 && (
               <ul className={styles.providers} aria-label="召回 channel readiness">
                 {recallChannels.map(([name, channel]) => (
@@ -130,7 +165,7 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
                 <small>{personalization.reason}</small>
               </div>
             )}
-          </>
+          </details>
         )}
       </div>
       <button type="button" onClick={onRefresh}>
