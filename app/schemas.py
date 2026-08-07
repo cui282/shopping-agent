@@ -10,6 +10,7 @@ Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
 DataMode = Literal["live", "sandbox", "mixed"]
 ResearchMode = Literal["product_research", "exact_offer_comparison"]
+ContextMessageRole = Literal["system", "user", "assistant", "tool"]
 RecallChannelName = Literal["opensearch", "query_tower", "item_tower", "faiss"]
 RecallChannelState = Literal["configured", "ready", "degraded", "unavailable"]
 RecallMode = Literal["hybrid", "partial_hybrid", "deterministic_fallback"]
@@ -69,6 +70,7 @@ EventName = Literal[
     "session_created",
     "intent_resolved",
     "assistant_call",
+    "context_compression",
     "tool_start",
     "tool_end",
     "fork",
@@ -245,6 +247,16 @@ class AssistantCallEventData(StrictModel):
     data_mode: DataMode = "live"
 
 
+class ContextCompressionEventData(StrictModel):
+    status: Literal["applied", "degraded", "not_needed"]
+    reason_code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    compressed_message_count: int = Field(ge=0)
+    retained_message_count: int = Field(ge=0)
+    estimated_tokens: int = Field(ge=0)
+    summary_fields: list[str] = Field(default_factory=list, max_length=32)
+    data_mode: DataMode = "live"
+
+
 class ToolEndEventData(StrictModel):
     tool_name: str = Field(min_length=1)
     duration_ms: int = Field(ge=0)
@@ -331,6 +343,7 @@ class MonitorEvent(StrictModel):
             "session_created": SessionCreatedEventData,
             "intent_resolved": IntentResolvedEventData,
             "assistant_call": AssistantCallEventData,
+            "context_compression": ContextCompressionEventData,
             "tool_start": ToolStartEventData,
             "tool_end": ToolEndEventData,
             "fork": ForkEventData,
@@ -486,6 +499,37 @@ class TaskOverride(StrictModel):
     value: str = Field(min_length=1)
     overridden_values: list[str] = Field(default_factory=list)
     reason: str = Field(min_length=1)
+
+
+class ContextClarificationResponse(StrictModel):
+    field: ClarificationField
+    reason_code: ClarificationReasonCode
+    response: str = Field(min_length=1, max_length=4000)
+    resolved_value: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
+class ContextPreferenceSource(StrictModel):
+    field: PreferenceField
+    value: str = Field(min_length=1)
+    source: Literal["remembered_preference", "task_override"]
+
+
+class ContextSummary(StrictModel):
+    """Typed, derived facts that may be sent to a model but never become authority."""
+
+    mode: ResearchMode | None = None
+    category: str | None = None
+    destination: str | None = None
+    supported_destination: str | None = None
+    resolved_hard_constraints: list[HardConstraint] = Field(default_factory=list)
+    product_variant: str | None = None
+    exact_identity: str | None = None
+    clarification_responses: list[ContextClarificationResponse] = Field(default_factory=list)
+    working_assumptions: list[WorkingAssumption] = Field(default_factory=list)
+    remembered_preference: RememberedPreference = Field(default_factory=RememberedPreference)
+    task_overrides: list[TaskOverride] = Field(default_factory=list)
+    preference_sources: list[ContextPreferenceSource] = Field(default_factory=list)
+    pending_clarification: ClarificationPrompt | None = None
 
 
 class RerunCommand(StrictModel):

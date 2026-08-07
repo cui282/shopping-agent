@@ -15,6 +15,7 @@ _MESSAGES = {
     "session_created": "购物任务已创建",
     "intent_resolved": "研究意图已保存",
     "assistant_call": "Agent 正在分析",
+    "context_compression": "模型上下文已压缩",
     "tool_start": "正在调用工具",
     "tool_end": "工具调用完成",
     "fork": "已创建并行检索分支",

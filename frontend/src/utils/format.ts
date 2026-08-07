@@ -104,10 +104,24 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
       note: note || undefined,
     };
   }
+  if (event.event === "context_compression") {
+    const status = event.data.status === "applied"
+      ? "已应用"
+      : event.data.status === "degraded"
+        ? "已降级"
+        : "未触发";
+    const retained = `${event.data.retained_message_count} 条最近消息`;
+    const reason = event.data.reason_code ? ` · ${event.data.reason_code}` : "";
+    return {
+      label: `模型上下文${status}`,
+      detail: `${retained} · 估算 ${event.data.estimated_tokens} tokens${reason}`,
+    };
+  }
   const labels: Record<MonitorEvent["event"], string> = {
     session_created: "会话已建立",
     intent_resolved: "意图与约束已保存",
     assistant_call: stage === "thinking" ? "正在分析需求" : "分析需求",
+    context_compression: "模型上下文压缩",
     tool_start: tool ? `开始${toolLabel}` : "开始处理",
     tool_end: tool ? `${toolLabel}已完成` : "处理已完成",
     fork: "并行检索",

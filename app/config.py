@@ -104,6 +104,8 @@ class Settings:
     opensearch_category_index: str
     opensearch_search_pipeline: str
     recall_timeout_seconds: float
+    compress_keep_recent: int
+    compress_max_tokens: int
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -153,6 +155,8 @@ class Settings:
                 "OPENSEARCH_SEARCH_PIPELINE", "shopping-agent-hybrid-pipeline"
             ).strip(),
             recall_timeout_seconds=_number("RECALL_TIMEOUT_SECONDS", 10, 1),
+            compress_keep_recent=_integer("COMPRESS_KEEP_RECENT", 3, 1),
+            compress_max_tokens=_integer("COMPRESS_MAX_TOKENS", 12_000, 32),
         )
 
     @property

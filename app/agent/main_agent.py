@@ -3,13 +3,22 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar, cast
 
 from app.agent.dispatch_tool import dispatch_tool
 from app.agent.llm import active_agent_mode, allow_rules_fallback, get_llm, requested_mode
 from app.agent.system_prompt import build_system_prompt
 from app.api.monitor import Monitor
+from app.compress import (
+    ContextCompressionSettings,
+    ContextMessage,
+    ModelContext,
+    build_context_messages,
+    build_context_summary_from_events,
+    build_model_context,
+    safe_bounded_context,
+)
 from app.config import MARKETPLACES, get_settings
 from app.memory.commands import (
     execute_memory_commands,
@@ -24,9 +33,11 @@ from app.schemas import (
     CategoryInsightOutput,
     ConstraintRelaxation,
     ConstraintRelaxationChange,
+    ContextPreferenceSource,
     DataMode,
     HardConstraint,
     ItemSearchOutput,
+    MonitorEvent,
     Platform,
     ProviderFailureReason,
     ProviderMetadata,
@@ -252,7 +263,11 @@ async def _call_tool(
     return result
 
 
-async def _run_react_advisory(query: str, preferences: dict[str, Any]) -> str:
+async def _run_react_advisory(
+    query: str,
+    preferences: dict[str, Any],
+    model_context: ModelContext | None = None,
+) -> str:
     """Invoke the configured LangGraph ReAct agent as the intent-analysis entry point."""
 
     from langgraph.prebuilt import create_react_agent
@@ -268,8 +283,17 @@ async def _run_react_advisory(query: str, preferences: dict[str, Any]) -> str:
     else:
         kwargs["state_modifier"] = prompt
     graph = create_react_agent(**kwargs)
+    context_messages = (
+        model_context.to_model_messages()
+        if model_context is not None
+        else [ContextMessage(role="user", content=query)]
+    )
     response = await graph.ainvoke(
-        {"messages": [("user", query)]},
+        {
+            "messages": [
+                {"role": message.role, "content": message.content} for message in context_messages
+            ]
+        },
         config={"recursion_limit": 8},
     )
     messages = response.get("messages", [])
@@ -290,6 +314,7 @@ async def run_agent(
     resolved_query: str | None = None,
     applied_preferences: RememberedPreference | None = None,
     constraint_relaxation_changes: list[ConstraintRelaxationChange] | None = None,
+    history_events: Sequence[MonitorEvent] = (),
 ) -> ShoppingSummaryOutput:
     thread_id = get_thread_id()
     settings = get_settings()
@@ -338,6 +363,20 @@ async def run_agent(
     )
     preference_resolution = resolve_preferences(plan, remembered)
     task_overrides = _task_overrides(preference_resolution.decisions)
+    effective_remembered = preference_resolution.effective_remembered
+    preference_sources = [
+        ContextPreferenceSource(
+            field=decision.field,
+            value=decision.value,
+            source="remembered_preference",
+        )
+        for decision in preference_resolution.decisions
+        if decision.status == "applied" and decision.source == "remembered_preference"
+    ]
+    preference_sources.extend(
+        ContextPreferenceSource(field=item.field, value=item.value, source="task_override")
+        for item in task_overrides
+    )
 
     await monitor.emit(
         thread_id,
@@ -369,10 +408,78 @@ async def run_agent(
     )
     agent_mode = active_agent_mode()
     if requested_mode() == "llm" and agent_mode == "unavailable":
+        await monitor.emit(
+            thread_id,
+            "context_compression",
+            data={
+                "status": "degraded",
+                "reason_code": "model_unavailable",
+                "compressed_message_count": 0,
+                "retained_message_count": 0,
+                "estimated_tokens": 0,
+                "summary_fields": [],
+            },
+        )
         raise RuntimeError("AGENT_MODE=llm but model credentials are not configured")
     if agent_mode == "llm":
+        compression_settings = ContextCompressionSettings(
+            keep_recent=settings.compress_keep_recent,
+            max_tokens=settings.compress_max_tokens,
+        )
+        fallback_summary = build_context_summary_from_events(
+            plan=plan,
+            history_events=history_events,
+            clarification_answers=answers,
+            product_variant=answers.get("product_variant"),
+            exact_identity=(
+                answers.get("product_variant") if plan.mode == "exact_offer_comparison" else None
+            ),
+            remembered_preference=effective_remembered,
+            task_overrides=task_overrides,
+            preference_sources=preference_sources,
+        )
+        context_messages = build_context_messages(
+            query=request.query,
+            history_events=history_events,
+            clarification_answers=answers,
+        )
         try:
-            preview = await _run_react_advisory(query, remembered.model_dump(mode="json"))
+            try:
+                model_context = build_model_context(
+                    query=request.query,
+                    plan=plan,
+                    history_events=history_events,
+                    clarification_answers=answers,
+                    product_variant=answers.get("product_variant"),
+                    remembered_preference=effective_remembered,
+                    task_overrides=task_overrides,
+                    preference_sources=preference_sources,
+                    settings=compression_settings,
+                )
+            except asyncio.TimeoutError:
+                model_context = safe_bounded_context(
+                    context_messages,
+                    fallback_summary,
+                    compression_settings,
+                    reason_code="compression_timeout",
+                )
+            except Exception:  # noqa: BLE001 - model context must fail closed to a bounded window
+                model_context = safe_bounded_context(
+                    context_messages,
+                    fallback_summary,
+                    compression_settings,
+                    reason_code="compression_failed",
+                )
+            await monitor.emit(
+                thread_id,
+                "context_compression",
+                data=model_context.compression_event_data(),
+            )
+            preview = await _run_react_advisory(
+                query,
+                effective_remembered.model_dump(mode="json"),
+                model_context,
+            )
             await monitor.emit(
                 thread_id,
                 "assistant_call",
@@ -385,8 +492,26 @@ async def run_agent(
                 },
             )
         except Exception as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             if not allow_rules_fallback():
                 raise
+            await monitor.emit(
+                thread_id,
+                "context_compression",
+                data={
+                    "status": "degraded",
+                    "reason_code": (
+                        "model_timeout"
+                        if isinstance(exc, asyncio.TimeoutError)
+                        else "model_unavailable"
+                    ),
+                    "compressed_message_count": 0,
+                    "retained_message_count": 0,
+                    "estimated_tokens": 0,
+                    "summary_fields": [],
+                },
+            )
             await monitor.emit(
                 thread_id,
                 "assistant_call",

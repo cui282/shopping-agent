@@ -645,6 +645,7 @@ def _record_event(
             "session_created": {"running"},
             "intent_resolved": {"running"},
             "assistant_call": {"running"},
+            "context_compression": {"running"},
             "tool_start": {"running"},
             "tool_end": {"running"},
             "fork": {"running"},
@@ -808,6 +809,7 @@ async def _execute_task(
                         resolved_query=resolved_query,
                         applied_preferences=applied_preferences,
                         constraint_relaxation_changes=constraint_relaxation_changes,
+                        history_events=(record.snapshot.events if record is not None else ()),
                     ),
                     timeout=get_settings().task_timeout_seconds,
                 )

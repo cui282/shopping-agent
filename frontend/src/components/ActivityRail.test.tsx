@@ -53,6 +53,14 @@ describe("ActivityRail timeline", () => {
         status: "degraded",
         fallback_reason: "SANDBOX_MODE is enabled",
       }),
+      event(22, "context_compression", {
+        status: "applied",
+        reason_code: "threshold_exceeded",
+        compressed_message_count: 8,
+        retained_message_count: 3,
+        estimated_tokens: 740,
+        summary_fields: ["resolved_hard_constraints", "product_variant"],
+      }),
     ];
 
     render(
@@ -70,12 +78,14 @@ describe("ActivityRail timeline", () => {
     );
 
     const timeline = screen.getByRole("list", { name: "完整研究活动历史" });
-    expect(within(timeline).getAllByRole("listitem")).toHaveLength(21);
+    expect(within(timeline).getAllByRole("listitem")).toHaveLength(22);
     expect(within(timeline).getByText("并行检索 · Amazon")).toBeTruthy();
     expect(within(timeline).getByText(`需求：${query}`)).toBeTruthy();
     const degradedDetail = within(timeline).getByText("240 毫秒 · 沙盒样本 · 已降级 · 降级");
     expect(degradedDetail.closest("li")?.dataset.outcome).toBe("degraded");
     expect(within(timeline).getByText(/已显式启用沙盒模式/)).toBeTruthy();
+    const compressionDetail = within(timeline).getByText(/3 条最近消息 · 估算 740 tokens/);
+    expect(compressionDetail.closest("li")?.dataset.compressionStatus).toBe("applied");
 
     timeline.focus();
     expect(document.activeElement).toBe(timeline);

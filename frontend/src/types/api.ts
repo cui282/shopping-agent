@@ -289,6 +289,7 @@ export type MonitorEventName =
   | "session_created"
   | "intent_resolved"
   | "assistant_call"
+  | "context_compression"
   | "tool_start"
   | "tool_end"
   | "fork"
@@ -317,6 +318,16 @@ export interface AssistantCallEventData {
   [key: string]: unknown;
 }
 
+export interface ContextCompressionEventData {
+  status: "applied" | "degraded" | "not_needed";
+  reason_code: string;
+  compressed_message_count: number;
+  retained_message_count: number;
+  estimated_tokens: number;
+  summary_fields: string[];
+  data_mode: DataMode;
+}
+
 export interface ToolEndEventData {
   tool_name: string;
   duration_ms: number;
@@ -341,6 +352,7 @@ export interface MonitorEventDataMap {
     data_mode: DataMode;
   };
   assistant_call: AssistantCallEventData;
+  context_compression: ContextCompressionEventData;
   tool_start: { tool_name: string; args: Record<string, unknown>; data_mode: DataMode };
   tool_end: ToolEndEventData;
   fork: ForkEventData;

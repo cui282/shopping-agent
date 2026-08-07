@@ -228,6 +228,7 @@ Supported events:
 | --- | --- |
 | `session_created` | Worker accepted the task |
 | `assistant_call` | Workflow state changed |
+| `context_compression` | The transient model-only context window was bounded; `data.status` is `applied`, `degraded`, or `not_needed`, and `data.reason_code` is stable. Counts and estimated tokens are disclosed without prompt text, sensitive messages, or configuration values. |
 | `tool_start` | A typed tool started |
 | `tool_end` | A typed tool completed, including duration, `outcome`, source, provider status, failure reason, and fallback reason |
 | `fork` | A marketplace branch started with explicit `platform` and `demand` |
@@ -256,6 +257,39 @@ before the task-level `error`. `fork.data` has this shape:
 
 `assistant_call`, search `tool_start`, and `tool_end` data also carry `data_mode`.
 `assistant_call.step` identifies the workflow phase and other diagnostic fields remain extensible.
+`context_compression.data` has this shape:
+
+```json
+{
+  "status": "applied",
+  "reason_code": "threshold_exceeded",
+  "compressed_message_count": 8,
+  "retained_message_count": 3,
+  "estimated_tokens": 740,
+  "summary_fields": [
+    "resolved_hard_constraints",
+    "product_variant",
+    "exact_identity",
+    "clarification_responses",
+    "supported_destination",
+    "working_assumptions",
+    "remembered_preference",
+    "task_overrides",
+    "preference_sources"
+  ],
+  "data_mode": "sandbox"
+}
+```
+
+The model-only context is derived afresh from typed task state and the durable event timeline.
+It contains a structured summary plus recent messages, bounded by `COMPRESS_KEEP_RECENT` and
+the deterministic character-based estimate configured by `COMPRESS_MAX_TOKENS`; it never becomes
+the source of Product Evidence, recall inputs or provenance, eligibility, identity matching,
+Landed Cost, ranking, reports, or snapshots. Compression is transient: the complete task events,
+clarification responses, shopper decisions, snapshots, reports, and visible history remain
+persisted and replayable. A degraded reason code means the recent-message fallback was used and
+the task remains intact. Rebuilding a context after restart starts from durable typed state, so
+repeated compression does not accumulate a semantic loss or re-ask a resolved Blocking Ambiguity.
 `tool_end` carries nullable
 `failure_reason` with one of `not_configured`, `request_failed`, `empty_response`, or
 `sandbox_forbidden`; this code is stable for client handling while `fallback_reason` remains a

@@ -8,6 +8,7 @@ import {
   CircleHelp,
   GitFork,
   LoaderCircle,
+  Minimize2,
   PanelRightClose,
   RefreshCw,
   Trash2,
@@ -43,6 +44,7 @@ function EventIcon({ event }: { event: MonitorEvent }) {
   if (event.event === "fork") return <GitFork size={14} aria-hidden="true" />;
   if (event.event === "error") return <AlertCircle size={14} aria-hidden="true" />;
   if (event.event === "clarification_required") return <CircleHelp size={14} aria-hidden="true" />;
+  if (event.event === "context_compression") return <Minimize2 size={14} aria-hidden="true" />;
   if (event.event === "tool_end" && event.data.outcome !== "success") {
     return <AlertCircle size={14} aria-hidden="true" />;
   }
@@ -238,6 +240,7 @@ export default function ActivityRail({
                   key={event.event_id}
                   data-event={event.event}
                   data-outcome={event.event === "tool_end" ? event.data.outcome : undefined}
+                  data-compression-status={event.event === "context_compression" ? event.data.status : undefined}
                 >
                   <span className={styles.eventIcon}>
                     <EventIcon event={event} />
