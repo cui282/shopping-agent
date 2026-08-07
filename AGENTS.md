@@ -21,7 +21,7 @@ and 320px and inspect task-ready, running, mixed-source, empty, and error states
 
 ## Runtime boundaries
 
-- Live mode fails closed when no marketplace gateway is configured.
+- Live mode fails closed when no data-provider marketplace gateway/channel is configured.
 - Fixture data requires explicit `SANDBOX_MODE=true` or non-production
   `ALLOW_FIXTURE_FALLBACK=true`; production must always fail closed.
 - Provider source, status, fallback reason, exchange-rate provenance, and estimation notices are

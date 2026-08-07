@@ -250,7 +250,7 @@ describe("Product Evidence", () => {
   it("renders typed link semantics and verifiable offer evidence", () => {
     renderCompletedResult();
 
-    expect(screen.getByText(/实时商品.*licensed-amazon-feed/)).toBeTruthy();
+    expect(screen.getByText(/数据提供商通道.*licensed-amazon-feed/)).toBeTruthy();
     expect(screen.getByText("有货")).toBeTruthy();
     expect(screen.getByText("4006381333931")).toBeTruthy();
     expect(screen.getByText("ACME-X1")).toBeTruthy();
@@ -393,7 +393,7 @@ describe("Product Evidence", () => {
 
     expect(screen.getByText("Partial Result")).toBeTruthy();
     expect(screen.getByText(/eBay.*不可用/)).toBeTruthy();
-    expect(screen.getByText("平台网关请求失败")).toBeTruthy();
+    expect(screen.getByText("平台数据提供商通道请求失败")).toBeTruthy();
     expect(screen.getByText("平台请求失败（TimeoutException）")).toBeTruthy();
   });
 

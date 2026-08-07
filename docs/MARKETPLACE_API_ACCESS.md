@@ -1,42 +1,62 @@
-# 国际购物平台 API 申请与接入指南
+# 数据提供商平台通道采购与接入指南
 
 > 核对日期：2026-07-30。平台资格、配额和协议会变化，提交申请前应重新打开本文链接确认。本指南是工程接入建议，不构成法律意见。
 
-## 先看结论
+> 重要边界：Shopping Agent 的 live 数据来自外部合规数据提供商的采买、授权或许可 Feed。
+> 本项目不直接申请或调用 Amazon、eBay、AliExpress、Shopee 等平台的官方 API。环境变量中的
+> `*_DATA_CHANNEL_ENDPOINT`、`*_DATA_CHANNEL_CREDENTIAL` 和可选的 `*_DATA_PROVIDER` 是数据提供商为
+> 对应平台数据通道分配的 endpoint、接入凭证和标识。旧部署的 `*_API_ENDPOINT`、`*_API_KEY` 完整别名仍兼容，
+> 但同一平台不能跨两套变量各填一半，也不能同时配置两套不同值。
+> 下文的平台官方接口只作为数据提供商可能采用的上游实现参考，不是 Shopping Agent 的直接接入要求。
 
-Shopping Agent 需要的是面向消费者的商品发现/联盟数据 API，而不是卖家用来管理自有店铺的 API。
+## 先确认数据来源
 
-| 平台 | 适合商品比价的官方产品 | 当前可申请性 | 不应混用的卖家 API |
+Shopping Agent 需要的是数据提供商提供的商品发现、价格检索或授权数据 Feed。数据提供商可以通过
+实时 API、批量 JSONL/Parquet 文件或增量 Webhook/消息推送交付数据。数据提供商负责保证其采买、
+授权和再许可范围，Shopping Agent 只接收并标准化它返回的 Product Evidence。
+
+| 平台 | 数据提供商可能使用的上游产品 | 上游可用性参考 | 不应由 Shopping Agent 直接申请的卖家 API |
 | --- | --- | --- | --- |
 | Amazon | Creators API | 有明确入口，但需 Associates 正式通过及近 30 天至少 10 笔合格销售；AI 分析型比价应先取得书面许可 | Selling Partner API (SP-API) |
 | eBay | Buy Browse API | 开发者入口清晰；官方页面对生产审批要求存在冲突，应以实际 keyset 权限和 Support 书面答复为准 | Sell Inventory API |
 | AliExpress | Affiliate `product.query`（若仍获准） | 公开文档仍可见，但所属 Affiliate API 栏目已标记“已废弃”，新申请状态不明确 | Seller/Open Platform 店铺接口 |
 | Shopee | 各站点 Affiliate Open API | 按国家/地区单独开放并审核，没有可确认的全球统一申请条件 | Open Platform Product API（授权店铺） |
 
-四个平台都不能直接套入本仓库当前的 `GET ?query=&top_k=` 协议。正确做法是在服务端部署一个自有网关，由网关处理各平台 OAuth、签名、地区参数、限流和字段映射，再把网关地址与网关密钥配置给 Shopping Agent。
+上游平台接口不能直接套入本仓库当前的 `GET ?query=&top_k=` 协议。Shopping Agent 只连接数据提供商
+或部署者维护的 Gateway，由 Gateway 处理上游授权、签名、地区参数、限流、数据采购和字段映射，
+再把数据提供商通道的 endpoint 与接入凭证配置给 Shopping Agent。若数据提供商已经提供统一检索
+接口，部署者不需要再为每个平台实现官方 SDK。
 
-## 申请前准备
+## 采购或接入前准备
 
 先准备一套可以反复用于平台审核的材料：
 
 1. 真实可访问的网站或应用、企业邮箱、主体和联系人信息。
 2. 隐私政策、服务条款、联盟披露和联系方式。
 3. Shopping Agent 的页面截图或可访问测试环境，清楚标出平台来源、价格时间、跳转链接和免责声明。
-4. 一页数据流：用户查询 -> 后端调用平台 -> 短时缓存 -> 标准化 -> 展示 -> 用户主动跳转平台。
+4. 一页数据流：用户查询 -> 后端调用数据提供商通道 -> 标准化 -> 展示 -> 用户主动跳转平台。
 5. 目标国家/站点、预计日请求量、现有流量、转化/订单数据和盈利方式。
 6. 数据保留周期、删除机制、密钥管理、日志脱敏和供应商故障处理说明。
 
-申请描述应明确写“价格比较/商品发现”，不要用含糊的“采集数据”表述，也不要隐瞒会使用 LLM 做推荐。平台是否允许内容进入模型推理、日志或训练集，必须分别确认。
+采购说明应明确写“价格比较/商品发现”、目标平台和展示方式，不要用含糊的“采集数据”表述，也不要
+隐瞒会使用 LLM 做推荐。数据提供商是否允许内容进入模型推理、日志、缓存、索引或训练集，必须在
+合同和数据处理条款中分别确认。
 
-## Amazon
+以下 Amazon、eBay、AliExpress、Shopee 小节只用于核验数据提供商的上游授权链，或用于部署者自建
+Gateway 时的合规参考。它们不是 Shopping Agent 的直接申请步骤，也不意味着项目需要持有平台官方
+API 凭证。
 
-### 应申请什么
+## 上游授权参考：Amazon
 
-新项目应申请 **Creators API**。Amazon 已正式将 PA-API 5 标记为弃用，旧调用可能返回 `403 AccessDeniedException`；Creators API 是当前受支持的商品目录入口，提供 `SearchItems`、`GetItems`、`GetVariations` 等操作。[PA-API 5 弃用通知](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/paapiv5-deprecation)、[Creators API 介绍](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/introduction)
+### 数据提供商可能采用的上游接口
+
+数据提供商可能采用 **Creators API**。Amazon 已正式将 PA-API 5 标记为弃用，旧调用可能返回 `403 AccessDeniedException`；Creators API 是当前受支持的商品目录入口，提供 `SearchItems`、`GetItems`、`GetVariations` 等操作。[PA-API 5 弃用通知](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/paapiv5-deprecation)、[Creators API 介绍](https://affiliate-program.amazon.com/creatorsapi/docs/en-us/introduction)
 
 不要把 SP-API 当成公共比价接口。`searchCatalogItems` 虽然支持关键词搜索，但前置条件包括 Selling Partner 授权、Product Listing 角色审批和应用注册角色，定位是卖家/供应商工作流。[SP-API Catalog 搜索前置条件](https://developer-docs.amazon.com/sp-api/lang-zh/docs/search-catalog-items)
 
-### 申请步骤
+### 上游授权核验步骤
+
+以下步骤只适用于数据提供商或部署者自建 Gateway 核验上游授权，不是 Shopping Agent 的配置步骤。
 
 1. 在目标 Amazon 站点加入 Associates Program，并让账户获得最终接受。
 2. 先通过普通联盟链接产生合格销售。官方当前资格说明要求近 30 天至少 10 笔 qualifying sales。
@@ -62,15 +82,17 @@ Shopping Agent 需要的是面向消费者的商品发现/联盟数据 API，而
 
 `Credential ID/Client ID`、`Credential Secret`、`Version`、目标站点 `Partner Tag` 和 marketplace。网关负责缓存 OAuth token、调用 `SearchItems`、保留 Amazon 返回的联盟链接、执行 24 小时内刷新，并输出仓库统一商品结构。
 
-## eBay
+## 上游授权参考：eBay
 
-### 应申请什么
+### 数据提供商可能采用的上游接口
 
-使用 **Buy Browse API**。它面向购物发现，可按关键词、分类、GTIN 或图片搜索，并返回商品摘要、价格、图片和链接。[Browse API 官方介绍](https://developer.ebay.com/api-docs/buy/api-browse.html)
+数据提供商可能采用 **Buy Browse API**。它面向购物发现，可按关键词、分类、GTIN 或图片搜索，并返回商品摘要、价格、图片和链接。[Browse API 官方介绍](https://developer.ebay.com/api-docs/buy/api-browse.html)
 
 Sell Inventory API 用于卖家创建和管理自己的库存/刊登，不是全站比价数据源。[Sell Inventory API 概览](https://developer.ebay.com/api-docs/sell/inventory/static/overview.html)
 
-### 申请步骤
+### 上游授权核验步骤
+
+以下步骤只适用于数据提供商或部署者自建 Gateway 核验上游授权，不是 Shopping Agent 的配置步骤。
 
 1. 注册 [eBay Developers Program](https://developer.ebay.com/signin?tab=register)。官方建议使用企业邮箱，账户审核通常约一个工作日。[注册说明](https://developer.ebay.com/api-docs/static/gs_join-the-ebay-developers-program.html)
 2. 在 [Application Keys](https://developer.ebay.com/my/keys) 创建 Sandbox 和 Production keyset。
@@ -93,7 +115,7 @@ Sell Inventory API 用于卖家创建和管理自己的库存/刊登，不是全
 
 `Client ID`、`Client Secret`、目标 `Marketplace ID`，以及可选的 EPN `Campaign ID`。网关负责生成/缓存 Application token，把仓库的 `query` 映射为 eBay 的 `q`，并统一 `itemId/title/price/currency/image/itemWebUrl` 等字段。
 
-## AliExpress
+## 上游授权参考：AliExpress
 
 ### 当前状态
 
@@ -101,9 +123,9 @@ Sell Inventory API 用于卖家创建和管理自己的库存/刊登，不是全
 
 但是，官方文档导航已将整个 **Affiliate API** 栏目标为“已废弃”，而单个 API 参考页仍在线。公开资料没有给出可确认的现行替代产品或新申请承诺。[Affiliate API 总览（已废弃）](https://developer.alibaba.com/docs/doc.htm?articleId=118192&docType=1&treeId=674)
 
-### 可尝试的申请路径
+### 历史申请路径参考
 
-以下是官方历史流程，不应视为 2026 年仍保证可申请：
+以下是数据提供商或部署者自建 Gateway 可用于核验的官方历史流程，不应视为 2026 年仍保证可申请：
 
 1. 使用与 AliExpress Portals 相同的账号登录 `https://console.aliexpress.com`。
 2. 激活开发者账号，选择 `Affiliate API` 类型并提交开发者审核。
@@ -120,7 +142,7 @@ AliExpress Seller Open Platform 的旧说明要求卖家身份；自研开发者
 
 在平台书面确认旧/新接口后，保存其颁发的 `App Key`、`App Secret`、tracking ID 及区域配置。网关负责参数签名、目标国家/语言/币种映射，并把联盟响应转换成仓库统一结构。
 
-## Shopee
+## 上游授权参考：Shopee
 
 ### 先区分两套产品
 
@@ -128,7 +150,9 @@ Shopee Open Platform 的 Product API 以 `shop_id` 和卖家授权为边界，�
 
 面向内容推广和商品发现的候选是 **Affiliate Open API**，但它按站点运营。印尼站有独立的官方 [Open API Explorer V2](https://open-api.affiliate.shopee.co.id/explorer/v2)，页面使用 `AppId` 和 `Secret`；这不能证明同一凭证或资格适用于其他国家。
 
-### 申请步骤
+### 上游授权核验步骤
+
+以下步骤只适用于数据提供商或部署者自建 Gateway 核验上游授权，不是 Shopping Agent 的配置步骤。
 
 1. 选定目标 Shopee 国家/地区，在当地加入 Affiliate Program，并保持账号正常。
 2. 从该站点 Affiliate Center 或官方 Help Center 查找 `Affiliate Open API` 申请表；不要拿 Seller Open Platform 的 partner key 替代。
@@ -161,21 +185,24 @@ Shopee Open Platform 的 Product API 以 `shop_id` 和卖家授权为边界，�
 
 ## 与 Shopping Agent 的配置映射
 
-本仓库不会把平台密钥发送到浏览器。推荐部署如下：
+本仓库不会把平台官方密钥发送到浏览器，也不要求部署者持有这些密钥。推荐部署如下：
 
 ```text
-React -> Shopping Agent FastAPI -> 自有 marketplace gateway -> 官方/合法第三方 API
+React -> Shopping Agent FastAPI -> 数据提供商平台通道 -> 采买/授权数据
 ```
 
-| 平台 | 网关内部保存 | Shopping Agent 只配置 |
+| 平台 | 数据提供商或其 Gateway 内部保存 | Shopping Agent 只配置 |
 | --- | --- | --- |
-| Amazon | Credential ID/Secret、Version、Partner Tag、marketplace | `AMAZON_API_ENDPOINT`、`AMAZON_API_KEY` |
-| eBay | Client ID/Secret、Marketplace ID、可选 Campaign ID | `EBAY_API_ENDPOINT`、`EBAY_API_KEY` |
-| AliExpress | 经确认的 App Key/Secret、tracking ID、区域 | `ALIEXPRESS_API_ENDPOINT`、`ALIEXPRESS_API_KEY` |
-| Shopee | 对应站点 Affiliate App ID/Secret | `SHOPEE_API_ENDPOINT`、`SHOPEE_API_KEY` |
-| 第三方 | 供应商 token、套餐和数据许可版本 | 对应平台 `*_API_ENDPOINT`、`*_API_KEY` |
+| Amazon | 上游授权凭证、站点参数和数据许可 | `AMAZON_DATA_PROVIDER`、`AMAZON_DATA_CHANNEL_ENDPOINT`、`AMAZON_DATA_CHANNEL_CREDENTIAL` |
+| eBay | 上游授权凭证、站点参数和数据许可 | `EBAY_DATA_PROVIDER`、`EBAY_DATA_CHANNEL_ENDPOINT`、`EBAY_DATA_CHANNEL_CREDENTIAL` |
+| AliExpress | 上游授权凭证、区域参数和数据许可 | `ALIEXPRESS_DATA_PROVIDER`、`ALIEXPRESS_DATA_CHANNEL_ENDPOINT`、`ALIEXPRESS_DATA_CHANNEL_CREDENTIAL` |
+| Shopee | 上游授权凭证、站点参数和数据许可 | `SHOPEE_DATA_PROVIDER`、`SHOPEE_DATA_CHANNEL_ENDPOINT`、`SHOPEE_DATA_CHANNEL_CREDENTIAL` |
+| 第三方 | 供应商 token、套餐和数据许可版本 | 对应平台的 `*_DATA_PROVIDER`、`*_DATA_CHANNEL_ENDPOINT`、`*_DATA_CHANNEL_CREDENTIAL` |
 
-网关向 Shopping Agent 暴露 `GET /{platform}/search?query=...&top_k=...`，使用自有 Bearer/API key 验证请求，并至少返回 `title`、`price`、`currency`。建议同时返回 `item_id`、`image_url`、`product_url`、`seller`、`availability`、`observed_at`、`marketplace`、运费/税费口径和上游来源，便于后续补强当前统一模型。
+数据提供商通道向 Shopping Agent 暴露 `GET /{platform}/search?query=...&top_k=...`，使用通道凭证
+验证请求，并至少返回 `title`、`price`、`currency`。建议同时返回 `item_id`、`image_url`、
+`product_url`、`seller`、`availability`、`observed_at`、`marketplace`、运费/税费口径、数据提供商
+和上游来源，便于后续补强当前统一模型。
 
 ## Self-hosted Beta 验收清单
 
@@ -183,7 +210,9 @@ React -> Shopping Agent FastAPI -> 自有 marketplace gateway -> 官方/合法�
 
 1. 复制 `examples/sandbox.env.example` 进行本地验收，或复制 `examples/live.env.example` 进行 live 配置；不要把两个模式混用。
 2. Sandbox 只允许在非生产环境显式启用 `SANDBOX_MODE=true`。生产环境没有完整 gateway 时，`GET /api/readiness` 必须返回 `task_ready=false`，`POST /api/task` 必须返回 HTTP 503。
-3. 每个平台都要同时填写 `*_API_ENDPOINT` 和 `*_API_KEY`。Shopping Agent 只把这两个网关配置交给后端适配器，平台原始凭证留在自有 gateway 内。
+3. 每个平台都要同时填写 `*_DATA_CHANNEL_ENDPOINT` 和 `*_DATA_CHANNEL_CREDENTIAL`，并可选填写
+   `*_DATA_PROVIDER`。这些变量填写数据提供商通道的 endpoint、接入凭证和标识，平台原始凭证留在
+   数据提供商或其 Gateway 内；已有部署可以继续使用 `*_API_ENDPOINT`、`*_API_KEY` 别名。
 4. 启动后检查 `/api/health` 和 `/api/readiness`；后者必须逐项查看 `components`，不能把 `configured` 或 `configured_not_probed` 当作已连通。
 
 ### 故障与数据边界
@@ -196,8 +225,9 @@ Sandbox fixture 和 mixed source 只用于明确的 Sandbox/developer diagnostic
 
 ## 建议执行顺序
 
-1. 先申请 eBay Developer keyset，用 Browse API 做第一个真实端到端 provider，并向 Support 确认生产比价用途。
-2. 同步运营一个合规的 Amazon Associates 站点；满足销售门槛后申请 Creators API，但在获得 AI 分析数据流书面许可前不要上线 Amazon provider。
-3. 根据实际目标市场申请 Shopee Affiliate Open API，不要用卖家接口假装全站搜索。
-4. 先向 AliExpress Support 确认 2026 年可用产品，再决定是否开发；不要依赖已废弃教程。
-5. 若采购第三方 API，先完成授权链和用途条款审查，再付费和接入。
+1. 先向数据提供商索取每个平台通道的 endpoint、接入凭证、刷新频率和故障语义。
+2. 核验数据提供商的上游授权链，确认覆盖价格比较、排序、展示、链接、图片、缓存和 LLM 推理等用途。
+3. 用受控 Gateway 验证 `GET ?query=&top_k=` 和 normalized offer 契约，再接入 Shopping Agent。
+4. 将数据提供商、平台通道、retrieved_at、原始币种、链接类型和许可边界写入 provenance 或运行文档。
+5. 只有在部署者自建数据通道时，才按上文平台小节申请或核验官方接口；这些凭证不应填入 Shopping
+   Agent 的 `*_DATA_CHANNEL_CREDENTIAL` 或兼容别名 `*_API_KEY`。

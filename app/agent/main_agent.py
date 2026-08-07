@@ -550,9 +550,10 @@ async def run_agent(
 
     async def search_branch(demand: dict[str, Any]) -> ItemSearchOutput:
         platform: Platform = demand["platform"]
+        channel = next(item for item in settings.marketplaces if item.name == platform)
         failure_metadata = ProviderMetadata(
             source="fixture" if task_data_mode == "sandbox" else "live",
-            provider=platform,
+            provider=channel.provider,
             status="unavailable",
             fallback_reason="provider request failed: unexpected exception",
             failure_reason="request_failed",
@@ -602,13 +603,16 @@ async def run_agent(
         for platform in MARKETPLACES:
             if platform in providers:
                 continue
+            channel = next(item for item in settings.marketplaces if item.name == platform)
             providers[platform] = ProviderMetadata(
                 source="live",
-                provider=platform,
+                provider=channel.provider,
                 status="unavailable",
                 fallback_reason=(
-                    f"{platform.upper()}_API_ENDPOINT and {platform.upper()}_API_KEY "
-                    "are not fully configured"
+                    f"{platform.upper()}_DATA_CHANNEL_ENDPOINT and "
+                    f"{platform.upper()}_DATA_CHANNEL_CREDENTIAL are not fully configured "
+                    f"(legacy aliases {platform.upper()}_API_ENDPOINT and "
+                    f"{platform.upper()}_API_KEY are supported)"
                 ),
                 failure_reason="not_configured",
             )

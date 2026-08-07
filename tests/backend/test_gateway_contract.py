@@ -53,6 +53,34 @@ class _GatewayClient:
         return _GatewayResponse()
 
 
+class _ProviderOmittingResponse(_GatewayResponse):
+    def json(self) -> dict[str, object]:
+        return {
+            "items": [
+                {
+                    "offer_id": "amazon-offer-without-provider",
+                    "title": "Provider channel headphones",
+                    "price": 89,
+                    "currency": "USD",
+                    "product_url": "https://shop.example/offers/amazon-provider-channel",
+                }
+            ]
+        }
+
+
+class _ProviderOmittingClient(_GatewayClient):
+    async def get(
+        self,
+        endpoint: str,
+        *,
+        params: dict[str, object],
+        headers: dict[str, str],
+    ) -> _ProviderOmittingResponse:
+        self.request = {"endpoint": endpoint, "params": params, "headers": headers}
+        type(self).request = self.request
+        return _ProviderOmittingResponse()
+
+
 def test_gateway_normalizes_wrapped_aliases_into_product_evidence() -> None:
     candidates = normalize_gateway_response(
         {
@@ -342,3 +370,29 @@ async def test_live_search_preserves_the_normalized_gateway_contract(monkeypatch
     assert offer.retrieved_at == "2026-07-30T10:00:00Z"
     assert offer.provenance.provider == "licensed-amazon-feed"
     assert offer.link_kind == "product_detail"
+
+
+async def test_data_provider_channel_credential_and_identity_are_preserved(monkeypatch) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "false")
+    monkeypatch.setenv(
+        "AMAZON_DATA_CHANNEL_ENDPOINT", "https://provider.example/channels/amazon/search"
+    )
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_CREDENTIAL", "channel-credential")
+    monkeypatch.setenv("AMAZON_DATA_PROVIDER", "purchased-catalog-provider")
+    monkeypatch.setattr(httpx, "AsyncClient", _ProviderOmittingClient)
+
+    result = await item_search("headphones", "amazon", top_k=1)
+
+    assert _ProviderOmittingClient.request == {
+        "endpoint": "https://provider.example/channels/amazon/search",
+        "params": {"query": "headphones", "top_k": 1},
+        "headers": {
+            "Authorization": "Bearer channel-credential",
+            "X-API-Key": "channel-credential",
+        },
+    }
+    assert result.provider.provider == "purchased-catalog-provider"
+    assert result.provider.status == "ok"
+    assert result.candidates[0].provenance is not None
+    assert result.candidates[0].provenance.provider == "purchased-catalog-provider"

@@ -927,7 +927,7 @@ function ResultDisclosure({ state }: { state: AgentState }) {
     <p className={styles.resultDisclosure} role="note">
       {result.data_mode === "sandbox"
         ? "本次结果仅来自显式启用的 Sandbox Result fixture。"
-        : "本次结果仅来自已配置 Marketplace Gateway 的 Live Result。"}
+        : "本次结果仅来自已配置数据提供商通道网关的 Live Result。"}
     </p>
   );
 }

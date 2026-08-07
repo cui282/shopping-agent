@@ -59,23 +59,61 @@ def _integer(name: str, default: int, minimum: int) -> int:
     return int(value)
 
 
+def _aliased_channel_value(preferred_name: str, legacy_name: str) -> str:
+    preferred = os.getenv(preferred_name, "").strip()
+    legacy = os.getenv(legacy_name, "").strip()
+    if preferred and legacy and preferred != legacy:
+        raise ConfigurationError(
+            f"{preferred_name} conflicts with legacy alias {legacy_name}; configure only one value"
+        )
+    return preferred or legacy
+
+
 @dataclass(frozen=True, slots=True)
-class MarketplaceSettings:
+class DataProviderChannelSettings:
     name: str
     endpoint: str
-    api_key: str
+    credential: str
+    provider: str
 
     @property
     def configured(self) -> bool:
-        return bool(self.endpoint and self.api_key)
+        return bool(self.endpoint and self.credential)
 
     @property
     def state(self) -> Literal["configured", "partial", "missing"]:
         if self.configured:
             return "configured"
-        if self.endpoint or self.api_key:
+        if self.endpoint or self.credential:
             return "partial"
         return "missing"
+
+
+def _data_provider_channel(name: str) -> DataProviderChannelSettings:
+    prefix = name.upper()
+    preferred_endpoint = os.getenv(f"{prefix}_DATA_CHANNEL_ENDPOINT", "").strip()
+    preferred_credential = os.getenv(f"{prefix}_DATA_CHANNEL_CREDENTIAL", "").strip()
+    legacy_endpoint = os.getenv(f"{prefix}_API_ENDPOINT", "").strip()
+    legacy_credential = os.getenv(f"{prefix}_API_KEY", "").strip()
+    if (
+        (preferred_endpoint or preferred_credential)
+        and (legacy_endpoint or legacy_credential)
+        and not (preferred_endpoint and preferred_credential)
+        and not (legacy_endpoint and legacy_credential)
+    ):
+        raise ConfigurationError(
+            f"{prefix}_DATA_CHANNEL_ENDPOINT and {prefix}_DATA_CHANNEL_CREDENTIAL "
+            f"must use the same variable family as {prefix}_API_ENDPOINT and {prefix}_API_KEY"
+        )
+    return DataProviderChannelSettings(
+        name=name,
+        endpoint=_aliased_channel_value(
+            f"{prefix}_DATA_CHANNEL_ENDPOINT", f"{prefix}_API_ENDPOINT"
+        ),
+        credential=_aliased_channel_value(f"{prefix}_DATA_CHANNEL_CREDENTIAL", f"{prefix}_API_KEY"),
+        provider=os.getenv(f"{prefix}_DATA_PROVIDER", f"{name}-data-provider-channel").strip()
+        or f"{name}-data-provider-channel",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,7 +132,7 @@ class Settings:
     preference_ttl_seconds: int
     max_upload_bytes: int
     cors_origins: tuple[str, ...]
-    marketplaces: tuple[MarketplaceSettings, ...]
+    marketplaces: tuple[DataProviderChannelSettings, ...]
     ann_backend: AnnBackend
     ann_index_path: str
     tower_query_endpoint: str
@@ -118,14 +156,7 @@ class Settings:
             ).split(",")
             if value.strip()
         )
-        marketplaces = tuple(
-            MarketplaceSettings(
-                name=name,
-                endpoint=os.getenv(f"{name.upper()}_API_ENDPOINT", "").strip(),
-                api_key=os.getenv(f"{name.upper()}_API_KEY", "").strip(),
-            )
-            for name in MARKETPLACES
-        )
+        marketplaces = tuple(_data_provider_channel(name) for name in MARKETPLACES)
         return cls(
             app_env=app_env,  # type: ignore[arg-type]
             agent_mode=agent_mode,  # type: ignore[arg-type]
@@ -251,12 +282,16 @@ class Settings:
             actions.append("Enable DEVELOPER_DIAGNOSTIC_MODE to allow fixture fallback")
         if not self.enabled_marketplaces:
             actions.append(
-                "Configure at least one marketplace endpoint/key pair, or explicitly enable SANDBOX_MODE for local testing"
+                "Configure at least one data-provider marketplace channel endpoint/credential pair, "
+                "or explicitly enable SANDBOX_MODE for local testing"
             )
         for marketplace in self.marketplaces:
             if marketplace.state == "partial":
                 actions.append(
-                    f"Complete both {marketplace.name.upper()}_API_ENDPOINT and {marketplace.name.upper()}_API_KEY"
+                    f"Complete both {marketplace.name.upper()}_DATA_CHANNEL_ENDPOINT and "
+                    f"{marketplace.name.upper()}_DATA_CHANNEL_CREDENTIAL "
+                    f"(legacy aliases {marketplace.name.upper()}_API_ENDPOINT and "
+                    f"{marketplace.name.upper()}_API_KEY are supported)"
                 )
         if self.app_env == "production" and self.store_backend == "memory":
             actions.append("Use STORE_BACKEND=redis for persistent production preferences")

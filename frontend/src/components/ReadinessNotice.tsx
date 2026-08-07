@@ -113,8 +113,8 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
                     ? capability.source === "fixture"
                       ? "sandbox fixture 可用"
                       : capability.state === "configured"
-                        ? "live gateway 已配置，尚未探测"
-                        : "live gateway 配置不完整"
+                        ? "live 数据提供商通道已配置，尚未探测"
+                        : "live 数据提供商通道配置不完整"
                     : providerReasonLabel(capability.failure_reason ?? capability.state)}
                 </span>
               </li>

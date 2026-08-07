@@ -118,14 +118,16 @@ async def test_sandbox_search_is_explicit(monkeypatch) -> None:
 async def test_failed_live_provider_is_not_reported_as_success(monkeypatch) -> None:
     monkeypatch.setenv("SANDBOX_MODE", "false")
     monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "false")
-    monkeypatch.setenv("AMAZON_API_ENDPOINT", "http://127.0.0.1:1/search")
-    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+    monkeypatch.setenv("AMAZON_DATA_PROVIDER", "purchased-catalog-provider")
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_ENDPOINT", "http://127.0.0.1:1/search")
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_CREDENTIAL", "test-credential")
     monkeypatch.setenv("PROVIDER_TIMEOUT_SECONDS", "1")
 
     result = await item_search("降噪耳机", "amazon", top_k=2)
 
     assert result.candidates == []
     assert result.provider.source == "live"
+    assert result.provider.provider == "purchased-catalog-provider"
     assert result.provider.status == "unavailable"
     assert result.provider.fallback_reason
     assert result.provider.failure_reason == "request_failed"

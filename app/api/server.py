@@ -1094,9 +1094,9 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
                     else "sandbox_fixture_active"
                 ),
                 reason=(
-                    "production rejects sandbox execution; live gateway is not used"
+                    "production rejects sandbox execution; live data-provider channel is not used"
                     if settings.app_env == "production"
-                    else "explicit Sandbox mode uses fixture providers; live gateway is not used"
+                    else "explicit Sandbox mode uses fixture providers; live data-provider channel is not used"
                 ),
             )
         elif marketplace.state == "configured":
@@ -1105,7 +1105,10 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
                 ready=False,
                 state="configured",
                 reason_code="configured_not_probed",
-                reason="live gateway endpoint and key are configured; readiness does not call the gateway",
+                reason=(
+                    "live data-provider channel endpoint and credential are configured; "
+                    "readiness does not call the provider"
+                ),
             )
         elif marketplace.state == "partial":
             gateways[marketplace.name] = _readiness_component(
@@ -1113,7 +1116,7 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
                 ready=False,
                 state="degraded",
                 reason_code="partial_configuration",
-                reason="gateway endpoint and key must both be configured",
+                reason="data-provider channel endpoint and credential must both be configured",
             )
         else:
             gateways[marketplace.name] = _readiness_component(
@@ -1121,7 +1124,7 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
                 ready=False,
                 state="unavailable",
                 reason_code="not_configured",
-                reason="live gateway endpoint and key are not configured",
+                reason="live data-provider channel endpoint and credential are not configured",
             )
 
     if preference_backend.fallback_reason:

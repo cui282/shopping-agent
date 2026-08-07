@@ -100,7 +100,7 @@ def readiness_body() -> dict[str, Any]:
                 name: component(
                     "disabled",
                     "sandbox_fixture_active",
-                    "explicit Sandbox mode uses fixture providers; live gateway is not used",
+                    "explicit Sandbox mode uses fixture providers; live data-provider channel is not used",
                 )
                 for name in MARKETPLACES
             },

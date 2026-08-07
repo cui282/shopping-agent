@@ -183,7 +183,7 @@ def test_readiness_marks_partial_and_configured_live_gateways_without_claiming_h
     client: TestClient, monkeypatch
 ) -> None:
     monkeypatch.setenv("SANDBOX_MODE", "false")
-    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example/amazon")
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_ENDPOINT", "https://gateway.example/amazon")
 
     partial = client.get("/api/readiness").json()
     assert partial["components"]["marketplace_gateways"]["amazon"] == {
@@ -191,17 +191,17 @@ def test_readiness_marks_partial_and_configured_live_gateways_without_claiming_h
         "ready": False,
         "state": "degraded",
         "reason_code": "partial_configuration",
-        "reason": "gateway endpoint and key must both be configured",
+        "reason": "data-provider channel endpoint and credential must both be configured",
     }
 
-    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_CREDENTIAL", "test-credential")
     configured = client.get("/api/readiness").json()
     assert configured["components"]["marketplace_gateways"]["amazon"] == {
         "configured": True,
         "ready": False,
         "state": "configured",
         "reason_code": "configured_not_probed",
-        "reason": "live gateway endpoint and key are configured; readiness does not call the gateway",
+        "reason": "live data-provider channel endpoint and credential are configured; readiness does not call the provider",
     }
 
 

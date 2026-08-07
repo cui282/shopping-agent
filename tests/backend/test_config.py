@@ -7,8 +7,54 @@ from app.config import MARKETPLACES, ConfigurationError, get_settings
 
 def _clear_marketplaces(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in MARKETPLACES:
+        monkeypatch.delenv(f"{name.upper()}_DATA_PROVIDER", raising=False)
+        monkeypatch.delenv(f"{name.upper()}_DATA_CHANNEL_ENDPOINT", raising=False)
+        monkeypatch.delenv(f"{name.upper()}_DATA_CHANNEL_CREDENTIAL", raising=False)
         monkeypatch.delenv(f"{name.upper()}_API_ENDPOINT", raising=False)
         monkeypatch.delenv(f"{name.upper()}_API_KEY", raising=False)
+
+
+def test_data_provider_channel_configuration_is_preferred(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv(
+        "AMAZON_DATA_CHANNEL_ENDPOINT", "https://provider.example.com/channels/amazon/search"
+    )
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_CREDENTIAL", "provider-channel-token")
+    monkeypatch.setenv("AMAZON_DATA_PROVIDER", "licensed-catalog-vendor")
+
+    settings = get_settings()
+
+    amazon = settings.marketplaces[0]
+    assert amazon.name == "amazon"
+    assert amazon.endpoint == "https://provider.example.com/channels/amazon/search"
+    assert amazon.credential == "provider-channel-token"
+    assert amazon.provider == "licensed-catalog-vendor"
+    assert amazon.configured
+
+
+def test_conflicting_legacy_and_channel_credentials_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_ENDPOINT", "https://provider.example.com/amazon")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://legacy.example.com/amazon")
+
+    with pytest.raises(ConfigurationError, match="AMAZON_DATA_CHANNEL_ENDPOINT"):
+        get_settings()
+
+
+def test_channel_endpoint_and_credential_cannot_be_combined_from_partial_alias_families(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("AMAZON_DATA_CHANNEL_ENDPOINT", "https://provider.example.com/amazon")
+    monkeypatch.setenv("AMAZON_API_KEY", "legacy-credential")
+
+    with pytest.raises(ConfigurationError, match="same variable family"):
+        get_settings()
 
 
 def test_live_runtime_requires_at_least_one_marketplace(monkeypatch: pytest.MonkeyPatch) -> None:

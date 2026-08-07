@@ -25,7 +25,7 @@ export default function App() {
           element={
             <StaticPage title="使用条款">
               <p>商品价格、库存、运费与税费会随平台变化。购买前请以目标平台结算页为准。</p>
-              <p>结果页会标明 Live Result、Sandbox Result 或 Partial Result。混合来源仅限开发诊断模式，沙盒样本不代表平台实时商品。</p>
+              <p>结果页会标明 Live Result、Sandbox Result 或 Partial Result。混合来源仅限开发诊断模式，沙盒样本不代表数据提供商通道的实时商品。</p>
             </StaticPage>
           }
         />

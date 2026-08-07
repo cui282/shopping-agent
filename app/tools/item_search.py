@@ -17,11 +17,31 @@ from app.schemas import (
 from app.tools.marketplace_gateway import normalize_gateway_response
 from app.tools.query_parser import extract_budget_cny, extract_product_subject
 
-_PLATFORM_CONFIG = {
-    "amazon": ("AMAZON_API_ENDPOINT", "AMAZON_API_KEY"),
-    "shopee": ("SHOPEE_API_ENDPOINT", "SHOPEE_API_KEY"),
-    "aliexpress": ("ALIEXPRESS_API_ENDPOINT", "ALIEXPRESS_API_KEY"),
-    "ebay": ("EBAY_API_ENDPOINT", "EBAY_API_KEY"),
+_CHANNEL_CONFIG_NAMES = {
+    "amazon": (
+        "AMAZON_DATA_CHANNEL_ENDPOINT",
+        "AMAZON_DATA_CHANNEL_CREDENTIAL",
+        "AMAZON_API_ENDPOINT",
+        "AMAZON_API_KEY",
+    ),
+    "shopee": (
+        "SHOPEE_DATA_CHANNEL_ENDPOINT",
+        "SHOPEE_DATA_CHANNEL_CREDENTIAL",
+        "SHOPEE_API_ENDPOINT",
+        "SHOPEE_API_KEY",
+    ),
+    "aliexpress": (
+        "ALIEXPRESS_DATA_CHANNEL_ENDPOINT",
+        "ALIEXPRESS_DATA_CHANNEL_CREDENTIAL",
+        "ALIEXPRESS_API_ENDPOINT",
+        "ALIEXPRESS_API_KEY",
+    ),
+    "ebay": (
+        "EBAY_DATA_CHANNEL_ENDPOINT",
+        "EBAY_DATA_CHANNEL_CREDENTIAL",
+        "EBAY_API_ENDPOINT",
+        "EBAY_API_KEY",
+    ),
 }
 
 _PLATFORM_INFO = {
@@ -183,13 +203,14 @@ def _parse_live_item(raw: dict[str, object], platform: Platform) -> Candidate | 
 
 
 async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candidate]:
-    marketplace = next(item for item in get_settings().marketplaces if item.name == platform)
+    settings = get_settings()
+    marketplace = next(item for item in settings.marketplaces if item.name == platform)
     endpoint = marketplace.endpoint
-    api_key = marketplace.api_key
-    headers = {"Authorization": f"Bearer {api_key}", "X-API-Key": api_key}
+    credential = marketplace.credential
+    headers = {"Authorization": f"Bearer {credential}", "X-API-Key": credential}
     transport = httpx.AsyncHTTPTransport(retries=2)
     async with httpx.AsyncClient(
-        timeout=get_settings().provider_timeout_seconds,
+        timeout=settings.provider_timeout_seconds,
         transport=transport,
     ) as client:
         response = await client.get(
@@ -197,7 +218,17 @@ async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candi
         )
         response.raise_for_status()
         payload = response.json()
-    return normalize_gateway_response(payload, platform)[:top_k]
+    candidates = normalize_gateway_response(payload, platform)[:top_k]
+    return [_ensure_channel_provenance(candidate, marketplace.provider) for candidate in candidates]
+
+
+def _ensure_channel_provenance(candidate: Candidate, provider: str) -> Candidate:
+    provenance = candidate.provenance
+    if provenance is None:
+        provenance = OfferProvenance(kind="marketplace_gateway", provider=provider)
+    elif provenance.provider is None:
+        provenance = provenance.model_copy(update={"provider": provider})
+    return candidate.model_copy(update={"provenance": provenance})
 
 
 async def item_search(
@@ -211,7 +242,9 @@ async def item_search(
     del user_id  # Reserved for the three-tower personalized recall channel.
     top_k = max(1, min(top_k, 50))
     settings = get_settings()
-    endpoint_env, key_env = _PLATFORM_CONFIG[platform]
+    endpoint_env, credential_env, legacy_endpoint_env, legacy_credential_env = (
+        _CHANNEL_CONFIG_NAMES[platform]
+    )
     marketplace = next(item for item in settings.marketplaces if item.name == platform)
     configured = marketplace.configured
     if settings.sandbox_mode:
@@ -223,7 +256,7 @@ async def item_search(
                 truncated=False,
                 provider=ProviderMetadata(
                     source="live",
-                    provider=platform,
+                    provider=marketplace.provider,
                     status="unavailable",
                     fallback_reason="sandbox mode is forbidden in production",
                     failure_reason="sandbox_forbidden",
@@ -259,7 +292,7 @@ async def item_search(
                         candidates[0].provenance.provider
                         if candidates[0].provenance is not None
                         and candidates[0].provenance.provider is not None
-                        else platform
+                        else marketplace.provider
                     ),
                 ),
             )
@@ -290,7 +323,7 @@ async def item_search(
                 truncated=False,
                 provider=ProviderMetadata(
                     source="live",
-                    provider=platform,
+                    provider=marketplace.provider,
                     status="unavailable",
                     fallback_reason=reason,
                     failure_reason=failure_reason,
@@ -304,9 +337,12 @@ async def item_search(
         truncated=False,
         provider=ProviderMetadata(
             source="live",
-            provider=platform,
+            provider=marketplace.provider,
             status="unavailable",
-            fallback_reason=f"{endpoint_env} and {key_env} are not fully configured",
+            fallback_reason=(
+                f"{endpoint_env} and {credential_env} are not fully configured; "
+                f"legacy aliases {legacy_endpoint_env} and {legacy_credential_env} are supported"
+            ),
             failure_reason="not_configured",
         ),
     )

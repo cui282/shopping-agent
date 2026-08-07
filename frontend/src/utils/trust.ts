@@ -30,7 +30,7 @@ export function resultBadgeLabel(dataMode: DataMode | string, resultKind: Result
 
 export function providerSourceLabel(source: ProviderSource): string {
   const labels: Record<ProviderSource, string> = {
-    live: "实时商品",
+    live: "数据提供商通道",
     curated: "策展资料",
     fixture: "沙盒样本",
     computed: "计算结果",
@@ -45,9 +45,9 @@ export function providerStatusLabel(status: "ok" | "degraded" | "unavailable"): 
 export function providerReasonLabel(reason: string): string {
   if (reason === "SANDBOX_MODE is enabled") return "已显式启用沙盒模式";
   const stableLabels: Record<ProviderFailureReason, string> = {
-    not_configured: "平台未配置完整网关",
-    request_failed: "平台网关请求失败",
-    empty_response: "平台未返回可用商品证据",
+    not_configured: "平台数据提供商通道未完整配置",
+    request_failed: "平台数据提供商通道请求失败",
+    empty_response: "平台数据提供商通道未返回可用商品证据",
     sandbox_forbidden: "生产环境拒绝沙盒数据",
   };
   if (reason in stableLabels) return stableLabels[reason as ProviderFailureReason];
@@ -75,11 +75,14 @@ export function requiredActionLabel(action: string): string {
   if (action === "Enable DEVELOPER_DIAGNOSTIC_MODE to allow fixture fallback") {
     return "fixture fallback 仅能在显式开发诊断模式使用";
   }
-  if (action.startsWith("Configure at least one marketplace")) {
-    return "至少配置一个平台的 API 地址与密钥，本地验证也可显式启用 SANDBOX_MODE";
+  if (
+    action.startsWith("Configure at least one data-provider marketplace channel") ||
+    action.startsWith("Configure at least one marketplace")
+  ) {
+    return "至少配置一个数据提供商平台通道，本地验证也可显式启用 SANDBOX_MODE";
   }
   if (action.startsWith("Complete both ")) {
-    return `补全平台配置：${action.replace("Complete both ", "")}`;
+    return `补全数据提供商通道配置：${action.replace("Complete both ", "")}`;
   }
   if (action === "Use STORE_BACKEND=redis for persistent production preferences") {
     return "生产环境使用 STORE_BACKEND=redis 持久保存偏好";

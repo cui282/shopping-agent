@@ -180,12 +180,18 @@ The service returns HTTP 202:
 
 When runtime configuration is incomplete, it returns HTTP 503:
 
+The endpoint/credential pair referenced by this readiness action is the configured data-provider
+marketplace channel credential; it is not an official marketplace credential. Preferred variables
+are `*_DATA_CHANNEL_ENDPOINT`, `*_DATA_CHANNEL_CREDENTIAL`, and optional `*_DATA_PROVIDER`; complete
+legacy `*_API_ENDPOINT` and `*_API_KEY` pairs remain accepted when they do not conflict. Do not mix
+the two variable families into a partial pair.
+
 ```json
 {
   "detail": {
     "code": "runtime_not_ready",
     "message": "Shopping Agent is not configured to run research tasks",
-    "required_actions": ["Configure at least one marketplace endpoint/key pair"]
+    "required_actions": ["Configure at least one data-provider marketplace channel endpoint/credential pair, or explicitly enable SANDBOX_MODE for local testing"]
   }
 }
 ```
@@ -246,7 +252,7 @@ with live events. Monitor events use this envelope:
     "duration_ms": 184,
     "outcome": "success",
     "source": "live",
-    "provider": "amazon_api",
+    "provider": "licensed-data-provider-amazon-channel",
     "status": "ok",
     "fallback_reason": null,
     "failure_reason": null,
@@ -725,14 +731,14 @@ shopper tasks are not task-owned and are not deleted.
   "providers": {
     "amazon": {
       "source": "live",
-      "provider": "amazon_api",
+      "provider": "licensed-data-provider-amazon-channel",
       "status": "ok",
       "fallback_reason": null,
       "failure_reason": null
     },
     "ebay": {
       "source": "live",
-      "provider": "ebay_api",
+      "provider": "licensed-data-provider-ebay-channel",
       "status": "unavailable",
       "fallback_reason": "provider request failed: TimeoutException",
       "failure_reason": "request_failed"
@@ -744,7 +750,8 @@ shopper tasks are not task-owned and are not deleted.
 
 `data_mode` and the backwards-compatible `provider_mode` are:
 
-- `live`: all marketplace candidates came from configured live gateways.
+- `live`: all marketplace candidates came from configured live data-provider channels through the
+  gateway boundary.
 - `mixed`: live and fixture candidates were combined by explicitly allowed fallback.
 - `sandbox`: all marketplace candidates came from the explicit sandbox catalog.
 
@@ -775,7 +782,9 @@ deterministic `ranking_profile`. `alternative_candidates` is never included in `
 ranking, or minimum-price conclusions.
 
 Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`, `degraded`, or
-`unavailable`. `failure_reason` is nullable and uses the stable provider failure codes above.
+`unavailable`. In live mode, `source=live` means the offer came through a configured data-provider
+channel, not that Shopping Agent called the marketplace's official API directly. `failure_reason`
+is nullable and uses the stable provider failure codes above.
 
 ### Recall provenance
 
@@ -968,9 +977,10 @@ alternative candidates separately.
 normalized to UTC; an old timestamp is preserved so the UI can disclose it, while an invalid,
 timezone-less, or absent timestamp becomes `null`. The service does not replace it with the current
 time. `provenance.kind` is `marketplace_gateway` or `sandbox_fixture`; `provider` identifies the
-gateway/feed or deterministic fixture catalog and is `null` when the gateway does not supply a
-trusted provider name. `upstream_source` is nullable. When both provenance values are unknown,
-`provenance` itself is `null`.
+data-provider gateway/feed or deterministic fixture catalog and is `null` when the gateway does not
+supply a trusted provider name. `upstream_source` is nullable and may identify the provider's source
+channel or licensed upstream feed. The `marketplace` field remains the platform represented by the
+data channel. When both provenance values are unknown, `provenance` itself is `null`.
 
 `product_url` is retained for additive compatibility, while `link_kind` supplies its authoritative
 meaning:
@@ -1144,22 +1154,36 @@ delete or resurrect the preference record.
 `SANDBOX_MODE=true` enables deterministic fixture data only for an explicit non-production sandbox
 runtime. Production rejects sandbox mode and fixture fallback, and the provider boundary fails
 closed even when called directly. In live mode, each marketplace is enabled only when both its
-endpoint and key are present. Missing or failed gateways never become live results. Fixture
-fallback is disabled unless both `ALLOW_FIXTURE_FALLBACK=true` and
+data-provider channel endpoint and channel credential are present. Missing or failed gateways never
+become live results. Fixture fallback is disabled unless both `ALLOW_FIXTURE_FALLBACK=true` and
 `DEVELOPER_DIAGNOSTIC_MODE=true` are set outside production; such a task is explicitly marked
 `data_mode=mixed` and is not a normal user result. A readiness provider has `available=true` with
-`source=fixture` in sandbox, while missing live gateway configuration is always `available=false`.
+`source=fixture` in sandbox, while missing live data-provider channel configuration is always
+`available=false`.
+
+The live endpoint and credential configured in Shopping Agent belong to a licensed data provider's
+marketplace channel. They are not Amazon, eBay, AliExpress, or Shopee official API credentials.
+The provider may use an official upstream API, a licensed feed, or its own purchased data service;
+that upstream implementation stays outside this repository. The `marketplace` field identifies the
+platform represented by the channel, while `provider` and `upstream_source` identify the configured
+gateway or feed when the upstream supplies those values.
+
+`*_DATA_PROVIDER` supplies the configured channel identity for failures and for successful offers
+whose response omits `provenance.provider`. If it is unset, the service uses the neutral
+`<marketplace>-data-provider-channel` identifier rather than claiming that the marketplace itself is
+the provider. A trusted provider value returned by the channel remains authoritative for that offer.
 
 `AGENT_MODE=auto` selects the model-assisted advisory step when model credentials are complete and otherwise uses rules. `AGENT_MODE=llm` with no credentials is unavailable unless `ALLOW_RULES_FALLBACK=true`.
 
 ### Marketplace Gateway search contract
 
-Shopping Agent calls each configured gateway with `GET`, query parameters `query` and `top_k`, and
-both `Authorization: Bearer <key>` and `X-API-Key: <key>` for compatibility. The Marketplace Gateway
-adapter owns provider-specific OAuth or API-key exchange, request signing, region/site parameters,
-pagination across upstream provider pages, rate limits, and mapping provider fields into this
-normalized contract. Shopping Agent does not receive marketplace credentials and does not contain
-Amazon-, eBay-, AliExpress-, or Shopee-specific signing logic.
+Shopping Agent calls each configured data-provider gateway with `GET`, query parameters `query` and
+`top_k`, and both `Authorization: Bearer <credential>` and `X-API-Key: <credential>` for
+compatibility. The
+provider-owned or operator-owned gateway handles any upstream OAuth or API-key exchange, request
+signing, region/site parameters, pagination across provider feeds, rate limits, and mapping source
+fields into this normalized contract. Shopping Agent does not receive official marketplace
+credentials and does not contain Amazon-, eBay-, AliExpress-, or Shopee-specific signing logic.
 
 The gateway response may be a top-level array, or an object using `items`, `products`, `results`,
 `offers`, or `data`. `data` may itself be an array or an object using any of those collection keys.

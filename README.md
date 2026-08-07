@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/cui282/shopping-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/cui282/shopping-agent/actions/workflows/ci.yml)
 
-Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用户提交预算、品类与硬约束后，Python 服务会并行查询已配置的电商网关，统一价格口径，估算运费与税费，并生成最多 3 个可追溯推荐。React 工作台通过 WebSocket 展示实际执行阶段、平台状态、降级原因和最终对比。
+Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用户提交预算、品类与硬约束后，Python 服务会并行查询已配置的数据提供商通道网关，统一价格口径，估算运费与税费，并生成最多 3 个可追溯推荐。React 工作台通过 WebSocket 展示实际执行阶段、平台状态、降级原因和最终对比。
 
 项目把可用性与数据真实性分开处理：`/api/health` 只表示进程存活，`/api/readiness` 才表示能否接受研究任务。默认配置不会静默生成商品；只有显式设置 `SANDBOX_MODE=true` 时才会使用固定的本地验证数据。
 
@@ -11,7 +11,7 @@ Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用�
 - FastAPI 异步任务 API，支持超时、取消、请求 ID 和线程级快照
 - React、TypeScript、Vite 三栏研究工作台
 - Think -> Act -> Observe -> Reflect 规则编排，可选 OpenAI-compatible 模型辅助意图分析
-- Amazon、Shopee、AliExpress、eBay 网关适配器并行检索
+- Amazon、Shopee、AliExpress、eBay 数据提供商通道网关适配器并行检索
 - 9 个类型化购物工具，覆盖规划、类目、检索、筛选、价格、到手价和总结
 - AGUI 风格 WebSocket 事件，支持连接前缓冲和断线重连
 - Live Result、Sandbox Result 与 Partial Result；开发诊断模式会额外披露 mixed source
@@ -30,7 +30,7 @@ flowchart LR
     API --> LOOP["研究工作流"]
     LOOP --> PLAN["规划与类目洞察"]
     LOOP --> BRANCH["平台并行分支"]
-    BRANCH --> GATEWAYS["电商 API 网关"]
+    BRANCH --> GATEWAYS["数据提供商通道网关"]
     LOOP --> COST["价格与到手价"]
     LOOP --> REPORT["推荐与报告"]
     LOOP --> STORE["Memory / Redis 偏好"]
@@ -91,7 +91,7 @@ make install
 cp examples/sandbox.env.example .env
 ```
 
-连接真实平台时，从默认模板开始并填写至少一组完整的 endpoint/key：
+接入数据提供商的 live 通道时，从默认模板开始并填写至少一组完整的 provider/channel endpoint/credential：
 
 ```bash
 cp .env.example .env
@@ -135,11 +135,11 @@ curl --fail http://127.0.0.1:8000/api/health
 curl --fail http://127.0.0.1:8000/api/readiness
 ```
 
-两项开发服务分别用 `Ctrl-C` 停止。浏览器访问 `http://127.0.0.1:5173`；Vite 将 `/api` 和 `/ws` 代理到后端。Sandbox 只有在 `.env` 明确设置 `SANDBOX_MODE=true` 且 `APP_ENV` 不是 `production` 时才会启用固定 fixture。未配置 live gateway 的 live runtime 会保持 `task_ready=false`，创建任务返回 HTTP 503，不会悄悄改用 fixture。
+两项开发服务分别用 `Ctrl-C` 停止。浏览器访问 `http://127.0.0.1:5173`；Vite 将 `/api` 和 `/ws` 代理到后端。Sandbox 只有在 `.env` 明确设置 `SANDBOX_MODE=true` 且 `APP_ENV` 不是 `production` 时才会启用固定 fixture。未配置 live 数据提供商通道的 live runtime 会保持 `task_ready=false`，创建任务返回 HTTP 503，不会悄悄改用 fixture。
 
-### Gateway 接入
+### 数据提供商通道接入
 
-每个 marketplace 都必须同时设置对应的 `*_API_ENDPOINT` 和 `*_API_KEY`；endpoint 是 Shopping Agent 要调用的完整搜索地址。网关接收 `GET` 的 `query`、`top_k` 参数，并返回契约中的 normalized offer。网关密钥只放在后端或 Compose 环境中，不能放入 `frontend` 的 Vite 变量或浏览器存储。配置不完整时 `/api/readiness` 会显示 `unavailable` 或 `degraded` 及 `reason_code`，生产环境不会接受任务。
+每个 marketplace 都必须同时设置对应的 `*_DATA_CHANNEL_ENDPOINT` 和 `*_DATA_CHANNEL_CREDENTIAL`，并可选设置 `*_DATA_PROVIDER` 作为数据提供商标识。这里的 endpoint 和 credential 是数据提供商为该平台数据通道分配的服务地址与接入凭证，不是 Amazon、Shopee、AliExpress 或 eBay 的官方 API 凭证。旧部署仍可使用 `*_API_ENDPOINT` 与 `*_API_KEY` 别名，但不要跨两套变量各填一半，也不要同时设置两套不同值。Shopping Agent 调用的是数据提供商的检索接口，接口返回契约中的 normalized offer；数据提供商或其 Gateway 负责处理上游平台的授权、签名和数据采购。通道凭证只放在后端或 Compose 环境中，不能放入 `frontend` 的 Vite 变量或浏览器存储。配置不完整时 `/api/readiness` 会显示 `unavailable` 或 `degraded` 及 `reason_code`，生产环境不会接受任务。
 
 ### Docker Compose 流程与数据目录
 
@@ -157,11 +157,11 @@ Compose 启动 Redis、OpenSearch、backend 和 Nginx frontend；`opensearch-ini
 make opensearch-init
 ```
 
-运行时数据分别位于 `output/`（任务快照和报告）、`uploaded/`（上传文件）和 `data/`（可选 Faiss 索引）。Compose 使用 `redis_data`、`opensearch_data`、`shopping_agent_output`、`shopping_agent_uploaded`、`shopping_agent_data` 命名卷；`make compose-down` 不删除这些卷。仓库不提交这些目录中的运行时内容。Compose 没有内置 marketplace gateway 或 tower 服务；live gateway、Faiss 索引和 tower endpoint 必须由部署者提供并显式配置。
+运行时数据分别位于 `output/`（任务快照和报告）、`uploaded/`（上传文件）和 `data/`（可选 Faiss 索引）。Compose 使用 `redis_data`、`opensearch_data`、`shopping_agent_output`、`shopping_agent_uploaded`、`shopping_agent_data` 命名卷；`make compose-down` 不删除这些卷。仓库不提交这些目录中的运行时内容。Compose 没有内置数据提供商通道网关或 tower 服务；live 通道、Faiss 索引和 tower endpoint 必须由部署者提供并显式配置。
 
 ### Readiness 与故障排查
 
-`/api/health` 只检查进程存活。`/api/readiness` 额外列出 LLM、每个平台 gateway、Redis、OpenSearch、Faiss、query/item/user tower、storage 和 image analysis 的 `configured`、`ready`、`state`、`reason_code`、`reason`。网络型依赖采用保守的配置观察：`configured`/`configured_not_probed` 不代表已成功连接；真实任务事件会披露实际 `ok`、`degraded` 或 `unavailable`。只有明确可验证的本地 storage 才会标为 `ready`。`image_analysis=false` 时只能上传和保存文件，界面不提供 Reference Image 搜索入口。
+`/api/health` 只检查进程存活。`/api/readiness` 额外列出 LLM、每个平台的数据提供商通道、Redis、OpenSearch、Faiss、query/item/user tower、storage 和 image analysis 的 `configured`、`ready`、`state`、`reason_code`、`reason`。网络型依赖采用保守的配置观察：`configured`/`configured_not_probed` 不代表已成功连接；真实任务事件会披露实际 `ok`、`degraded` 或 `unavailable`。只有明确可验证的本地 storage 才会标为 `ready`。`image_analysis=false` 时只能上传和保存文件，界面不提供 Reference Image 搜索入口。
 
 启动异常时按以下顺序检查：
 
@@ -173,7 +173,7 @@ curl --fail-with-body http://127.0.0.1:8000/api/readiness
 
 如果 backend healthcheck 不通过，先读取 `required_actions` 和 `components.*.reason`；常见原因是 live 没有完整 gateway、生产误启用 Sandbox/诊断模式、Redis 只剩内存 fallback，或 `output`、`uploaded`、`data` 不可写。OpenSearch/tower/Faiss 是可选能力，缺失时应看到明确降级而不是“ready”；补齐配置后重新启动并重新检查 readiness。
 
-## 连接真实 API
+## 接入数据提供商 live 通道
 
 部署模板位于 [examples/live.env.example](examples/live.env.example)。生产环境必须保持：
 
@@ -184,16 +184,19 @@ ALLOW_FIXTURE_FALLBACK=false
 DEVELOPER_DIAGNOSTIC_MODE=false
 ```
 
-至少配置一个平台网关：
+至少配置一个数据提供商平台通道：
 
 ```dotenv
-AMAZON_API_ENDPOINT=https://gateway.example.com/amazon/search
-AMAZON_API_KEY=replace-me
-SHOPEE_API_ENDPOINT=https://gateway.example.com/shopee/search
-SHOPEE_API_KEY=replace-me
+# 这些是数据提供商通道的标识、endpoint 和接入凭证，不是平台官方 API key。
+AMAZON_DATA_PROVIDER=licensed-catalog-vendor
+AMAZON_DATA_CHANNEL_ENDPOINT=https://gateway.example.com/amazon/search
+AMAZON_DATA_CHANNEL_CREDENTIAL=replace-me
+SHOPEE_DATA_PROVIDER=licensed-catalog-vendor
+SHOPEE_DATA_CHANNEL_ENDPOINT=https://gateway.example.com/shopee/search
+SHOPEE_DATA_CHANNEL_CREDENTIAL=replace-me
 ```
 
-Shopping Agent 向每个 endpoint 发送 `GET` 请求，查询参数为 `query` 和 `top_k`，并同时发送 `Authorization: Bearer <key>` 与 `X-API-Key: <key>`。密钥只由后端读取，不应进入 Vite 环境变量或浏览器代码。
+Shopping Agent 向数据提供商通道 endpoint 发送 `GET` 请求，查询参数为 `query` 和 `top_k`，并同时发送 `Authorization: Bearer <credential>` 与 `X-API-Key: <credential>`。这里的请求头用于验证 Shopping Agent 到数据提供商 Gateway 的调用，不代表 Shopping Agent 直接向上游平台鉴权。凭证只由后端读取，不应进入 Vite 环境变量或浏览器代码。
 
 网关可返回顶层数组，也可用 `items`、`products`、`results`、`offers` 或 `data` 包装；
 `data` 也可再包一层这些集合字段：
@@ -233,7 +236,7 @@ Shopping Agent 向每个 endpoint 发送 `GET` 请求，查询参数为 `query` 
 `item_id`，但不会把它当作跨平台身份或真实 offer 标识。其他未知可选字段保留为
 `null`，不会交给模型补全。
 
-Marketplace Gateway adapter 负责上游平台的 OAuth/鉴权、签名、地区参数、分页、限流和
+数据提供商 Gateway 或部署者维护的 Marketplace Gateway 负责上游平台的 OAuth/鉴权、签名、地区参数、分页、限流和
 原始字段映射。Shopping Agent 只接收 normalized offer。Product Detail Link 必须是 gateway
 随具体 offer 返回的安全 HTTP(S) URL；搜索页必须使用 `marketplace_search`，Sandbox 结果
 也只提供这种链接。完整字段、alias、provenance 与时间戳规则见
@@ -301,7 +304,7 @@ cp examples/sandbox.env.example .env
 make compose-up
 ```
 
-访问 `http://127.0.0.1:8080`。Compose 同时启动 Redis、OpenSearch、后端和 Nginx 前端；后端健康检查使用 readiness，因此配置不完整时前端不会被标记为可用。默认 Compose 不提供 live marketplace gateway、tower 服务或 Faiss 索引。
+访问 `http://127.0.0.1:8080`。Compose 同时启动 Redis、OpenSearch、后端和 Nginx 前端；后端健康检查使用 readiness，因此配置不完整时前端不会被标记为可用。默认 Compose 不提供 live 数据提供商通道网关、tower 服务或 Faiss 索引。
 
 只启动中间件：
 

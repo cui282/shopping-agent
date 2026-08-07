@@ -23,14 +23,21 @@ Self-Hosted Beta. It is not authentication and confers no ownership or authoriza
 _Avoid_: User account, identity
 
 **Marketplace Gateway**:
-An external integration that converts one marketplace's product-search response into Shopping
-Agent's normalized product contract. It is not the marketplace or its official API itself.
-_Avoid_: Marketplace API, provider
+An external integration that converts a data provider channel's response for one marketplace into
+Shopping Agent's normalized product contract. It is not the marketplace or its official API itself.
+The gateway may be operated by the data provider or by the self-hosting operator.
+_Avoid_: Marketplace API, official marketplace API
+
+**Data Provider Channel**:
+A per-marketplace API, batch feed, or incremental stream supplied by an external provider that
+legally acquires or licenses the underlying product data. Its endpoint and credential are issued
+by that provider. They are not credentials for the marketplace's official API.
+_Avoid_: Platform API key, direct marketplace access
 
 **Product Evidence**:
-A product fact supplied by a Marketplace Gateway or an explicitly disclosed sandbox fixture,
-including identity, price, attributes, availability, and links. Model-generated text is not Product
-Evidence.
+A product fact supplied by a Marketplace Gateway from a data provider channel, or by an explicitly
+disclosed sandbox fixture, including identity, price, attributes, availability, and links.
+Model-generated text is not Product Evidence.
 _Avoid_: LLM knowledge, plausible product detail
 
 **Agent Interpretation**:
@@ -59,9 +66,9 @@ allows Product Research to proceed and is included in the result explanation.
 _Avoid_: Hidden default, inferred constraint
 
 **Live Result**:
-A shopping result derived from a successfully configured Marketplace Gateway and labelled with its
-source. A user-facing task containing Live Results never includes fixture-backed products; an
-unavailable marketplace remains visibly unavailable.
+A shopping result derived from a successfully configured Marketplace Gateway and its data provider
+channel, labelled with its source. A user-facing task containing Live Results never includes
+fixture-backed products; an unavailable marketplace remains visibly unavailable.
 _Avoid_: Real result
 
 **Sandbox Result**:

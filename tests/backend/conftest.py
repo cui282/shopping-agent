@@ -26,6 +26,9 @@ def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("OUTPUT_ROOT", str(tmp_path / "output"))
     monkeypatch.setenv("UPLOAD_ROOT", str(tmp_path / "uploaded"))
     for prefix in ("AMAZON", "SHOPEE", "ALIEXPRESS", "EBAY"):
+        monkeypatch.delenv(f"{prefix}_DATA_PROVIDER", raising=False)
+        monkeypatch.delenv(f"{prefix}_DATA_CHANNEL_ENDPOINT", raising=False)
+        monkeypatch.delenv(f"{prefix}_DATA_CHANNEL_CREDENTIAL", raising=False)
         monkeypatch.delenv(f"{prefix}_API_ENDPOINT", raising=False)
         monkeypatch.delenv(f"{prefix}_API_KEY", raising=False)
     for name in (
