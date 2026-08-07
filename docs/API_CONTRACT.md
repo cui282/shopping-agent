@@ -86,7 +86,20 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
       "Enable ANN_BACKEND=faiss and configure ANN_INDEX_PATH for ANN recall",
       "Configure TOWER_QUERY_ENDPOINT for query-tower recall",
       "Configure TOWER_ITEM_ENDPOINT for item-tower recall"
-    ]
+    ],
+    "personalization": {
+      "configured": false,
+      "state": "unavailable",
+      "input_source": "none",
+      "preference_fields": [],
+      "preference_values": [],
+      "signal": "none",
+      "dimension": null,
+      "matched_candidate_count": 0,
+      "reason_code": "not_configured",
+      "reason": "TOWER_USER_ENDPOINT is not configured; existing recall path remains active",
+      "participated": false
+    }
   },
   "required_actions": []
 }
@@ -250,7 +263,7 @@ human-readable disclosure. Every event in one task uses the same data mode. `mix
 when explicit developer diagnostics are enabled.
 The recall tool's `tool_end.data.recall_provenance` is the same immutable object persisted on the
 terminal result and snapshot. It reports the actual recall mode, participating channels, candidate
-counts, and each channel's stable reason code.
+counts, each channel's stable reason code, and the optional personalization report.
 
 Clients must branch on `event`; `message` is display text and may change. `event_id` is stable for
 the lifetime of the event. `run_id` identifies one execution of a thread, while `sequence` starts at
@@ -741,7 +754,20 @@ Provider `source` is `live`, `curated`, `fixture`, or `computed`; status is `ok`
   "participating_channels": ["opensearch", "query_tower", "item_tower", "faiss"],
   "fallback_reason": null,
   "input_candidate_count": 12,
-  "selected_candidate_count": 8
+  "selected_candidate_count": 8,
+  "personalization": {
+    "configured": true,
+    "state": "ready",
+    "input_source": "remembered_preference",
+    "preference_fields": ["style_preferences"],
+    "preference_values": ["简约"],
+    "signal": "user_tower",
+    "dimension": 768,
+    "matched_candidate_count": 8,
+    "reason_code": "ready",
+    "reason": "user tower encoded only explicit Remembered Preference",
+    "participated": true
+  }
 }
 ```
 
@@ -752,12 +778,23 @@ reported independently with `configured`, `ready`, `degraded`, or `unavailable` 
 `reason_code`; `participated` means that channel affected the current candidate selection or
 ordering. The canonical channel order is OpenSearch, query tower, item tower, then Faiss.
 
+`personalization` is a separate optional report rather than a fifth marketplace channel. Its
+`state=ready` plus `participated=true` means that a typed User tower input changed the recall
+signal. `input_source=remembered_preference` is the only input source that may activate it;
+`preference_fields` and `preference_values` are the explicit saved fields sent to the adapter, and
+the raw embedding is never persisted. `no_saved_preference`, `not_configured`,
+`ann_backend_disabled`, `timeout`, `channel_failed`, `invalid_response`,
+`dimension_mismatch`, and `item_tower_unavailable` are disclosed reason-code examples. Any such
+degradation falls back to the existing recall path without changing Product Evidence.
+
 OpenSearch contributes category knowledge and semantic context only. Query and item embeddings
 and ANN scores can select or order candidates only from the marketplace `Product Evidence` already
 returned by the parallel gateway branches. The query/item cosine is a deterministic secondary
 recall signal after the ANN score, including tie-breaking when ANN scores are equal. Recall never
 creates an offer, fills a missing product fact, or changes `Hard Constraint`, `Identity Evidence`,
-`Landed Cost`, or the final deterministic ranking boundary. The raw `product_evidence` list remains
+`Landed Cost`, or the final deterministic ranking boundary. The user-tower signal is only a
+deterministic recall/preference-match signal; personalized and non-personalized paths use the same
+Product Evidence and decision engine. The raw `product_evidence` list remains
 complete; only the selected subset is passed into cost calculation and ranking. When recall is
 empty, unavailable, times out, or fails, the stable fallback preserves the original Product
 Evidence order and discloses the reason.
@@ -1022,9 +1059,17 @@ The delete response is also explicit about the backend used:
 }
 ```
 
-`user_id` is an anonymous storage association key, not authentication, ownership, or authorization.
+`user_id` is an Anonymous Shopper ID storage association key, not a login account, authenticated
+identity, authentication credential, ownership proof, or authorization.
 Public deployments must supply an authenticated identity at a trusted gateway and enforce ownership
 for tasks, preferences, WebSockets, and files.
+
+Only an explicit `remember`/`forget` Memory Update changes the Remembered Preference record. The
+User tower receives a typed `UserTowerInput` containing that saved record and the Anonymous Shopper
+ID. It never receives current query text, Task Override values, task outcome, or implicit behavior.
+A `remember` command is scoped to future tasks, so its new value is not encoded for the command's
+own task; a later task reads the persisted value. Deleting a task deletes only task state and cannot
+delete or resurrect the preference record.
 
 ## Provider boundary
 

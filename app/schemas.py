@@ -13,6 +13,8 @@ ResearchMode = Literal["product_research", "exact_offer_comparison"]
 RecallChannelName = Literal["opensearch", "query_tower", "item_tower", "faiss"]
 RecallChannelState = Literal["configured", "ready", "degraded", "unavailable"]
 RecallMode = Literal["hybrid", "partial_hybrid", "deterministic_fallback"]
+PersonalizationInputSource = Literal["remembered_preference", "none"]
+PersonalizationSignal = Literal["user_tower", "none"]
 JsonValue = TypeAliasType(
     "JsonValue",
     str | int | float | bool | None | list["JsonValue"] | dict[str, "JsonValue"],
@@ -151,6 +153,22 @@ class RecallChannelReport(StrictModel):
     participated: bool = False
 
 
+class PersonalizationReport(StrictModel):
+    """Trace the optional user-tower input without exposing a raw embedding."""
+
+    configured: bool = False
+    state: RecallChannelState
+    input_source: PersonalizationInputSource = "none"
+    preference_fields: list[PreferenceField] = Field(default_factory=list)
+    preference_values: list[str] = Field(default_factory=list)
+    signal: PersonalizationSignal = "none"
+    dimension: int | None = Field(default=None, ge=1)
+    matched_candidate_count: int = Field(default=0, ge=0)
+    reason_code: str = Field(min_length=1, pattern=r"^[a-z0-9_:-]+$")
+    reason: str = Field(min_length=1, max_length=4000)
+    participated: bool = False
+
+
 class RecallProvenance(StrictModel):
     mode: RecallMode
     channels: dict[RecallChannelName, RecallChannelReport] = Field(default_factory=dict)
@@ -158,12 +176,14 @@ class RecallProvenance(StrictModel):
     fallback_reason: str | None = None
     input_candidate_count: int = Field(ge=0)
     selected_candidate_count: int = Field(ge=0)
+    personalization: PersonalizationReport | None = None
 
 
 class RecallReadiness(StrictModel):
     mode: RecallMode
     channels: dict[RecallChannelName, RecallChannelReport] = Field(default_factory=dict)
     required_actions: list[str] = Field(default_factory=list)
+    personalization: PersonalizationReport | None = None
 
 
 class ProductIdentity(StrictModel):
@@ -429,6 +449,13 @@ class RememberedPreference(StrictModel):
     style_preferences: list[str] = Field(default_factory=list)
     soft_preferences: list[str] = Field(default_factory=list)
     avoid: list[str] = Field(default_factory=list)
+
+
+class UserTowerInput(StrictModel):
+    """Only explicit, persisted preferences may cross the user-tower boundary."""
+
+    anonymous_shopper_id: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    remembered_preference: RememberedPreference = Field(default_factory=RememberedPreference)
 
 
 class MemoryCommand(StrictModel):

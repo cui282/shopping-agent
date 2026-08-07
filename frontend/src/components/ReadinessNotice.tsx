@@ -6,6 +6,7 @@ import {
   recallChannelLabel,
   recallModeLabel,
   recallStateLabel,
+  personalizationInputSourceLabel,
   requiredActionLabel,
 } from "../utils/trust";
 import styles from "./ReadinessNotice.module.css";
@@ -63,6 +64,7 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
   ].map(requiredActionLabel);
   const providers = Object.entries(readiness.providers);
   const recallChannels = readiness.recall ? Object.entries(readiness.recall.channels) : [];
+  const personalization = readiness.recall?.personalization;
 
   return (
     <div className={styles.notice} data-state={blocked ? "error" : "warning"} role={blocked ? "alert" : "status"}>
@@ -112,6 +114,21 @@ export default function ReadinessNotice({ state, onRefresh }: ReadinessNoticePro
                   </li>
                 ))}
               </ul>
+            )}
+            {personalization && (
+              <div className={styles.personalization} data-state={personalization.state}>
+                <strong>
+                  个性化召回：{personalization.state === "ready" && personalization.participated
+                    ? "已生效"
+                    : personalization.state === "degraded"
+                      ? "已降级"
+                      : "未生效"}
+                </strong>
+                <span>
+                  输入来源：{personalizationInputSourceLabel(personalization.input_source)} · {personalization.reason_code}
+                </span>
+                <small>{personalization.reason}</small>
+              </div>
             )}
           </>
         )}

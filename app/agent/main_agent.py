@@ -38,6 +38,7 @@ from app.schemas import (
     TaskOverride,
     TaskRequest,
     ToolEndEventData,
+    UserTowerInput,
 )
 from app.tools import (
     category_insight,
@@ -331,6 +332,10 @@ async def run_agent(
     else:
         remembered = applied_preferences or RememberedPreference()
 
+    user_tower_input = UserTowerInput(
+        anonymous_shopper_id=request.user_id,
+        remembered_preference=remembered.model_copy(deep=True),
+    )
     preference_resolution = resolve_preferences(plan, remembered)
     task_overrides = _task_overrides(preference_resolution.decisions)
 
@@ -510,6 +515,7 @@ async def run_agent(
             candidates,
             category_insight=insight,
             top_k=20,
+            user_input=user_tower_input,
         ),
         event_thread_id=thread_id,
         data_mode=task_data_mode,

@@ -162,6 +162,24 @@ def _build_notices(report: ResearchReportSnapshot) -> list[ReportNotice]:
                 ),
             )
         )
+        personalization = report.recall_provenance.personalization
+        if personalization is not None:
+            fields = ",".join(personalization.preference_fields) or "none"
+            values = ",".join(personalization.preference_values) or "none"
+            notices.append(
+                ReportNotice(
+                    code="personalization_provenance",
+                    message=(
+                        f"Personalization state={personalization.state}；"
+                        f"input source={personalization.input_source}；"
+                        f"preference fields={fields}；values={values}；"
+                        f"signal={personalization.signal}；participated={personalization.participated}；"
+                        f"reason={personalization.reason_code}。"
+                        "Anonymous Shopper ID 仅用于关联研究与显式 Remembered Preference，"
+                        "不是登录账号、认证身份或数据所有权证明。"
+                    ),
+                )
+            )
     if report.exclusions or report.calculation_exclusions:
         notices.append(
             ReportNotice(
@@ -384,6 +402,22 @@ def render_markdown(report: ResearchReportSnapshot) -> str:
             )
         if report.recall_provenance.fallback_reason:
             lines.extend(["", f"- Fallback reason：`{report.recall_provenance.fallback_reason}`"])
+        personalization = report.recall_provenance.personalization
+        if personalization is not None:
+            lines.extend(
+                [
+                    "",
+                    "### Personalization Provenance",
+                    "",
+                    f"- State：`{personalization.state}`",
+                    f"- Input source：`{personalization.input_source}`",
+                    f"- Preference fields：`{', '.join(personalization.preference_fields) or 'none'}`",
+                    f"- Preference values：`{', '.join(personalization.preference_values) or 'none'}`",
+                    f"- Signal：`{personalization.signal}`；participated：`{str(personalization.participated).lower()}`；matched candidates：`{personalization.matched_candidate_count}`",
+                    f"- Reason：`{personalization.reason_code}`；{personalization.reason}",
+                    "- Anonymous Shopper ID 仅用于关联研究与显式 Remembered Preference，不是登录账号、认证身份或数据所有权证明。",
+                ]
+            )
     lines.extend(
         [
             "",
@@ -680,6 +714,24 @@ def render_pdf(report: ResearchReportSnapshot) -> bytes:
                 _paragraph(
                     f"{name}：state={channel.state}；participated={channel.participated}；"
                     f"reason_code={channel.reason_code}；{channel.reason}",
+                    body,
+                )
+            )
+        personalization = report.recall_provenance.personalization
+        if personalization is not None:
+            story.append(
+                _paragraph(
+                    "Personalization Provenance："
+                    f"state={personalization.state}；"
+                    f"input_source={personalization.input_source}；"
+                    f"fields={', '.join(personalization.preference_fields) or 'none'}；"
+                    f"values={', '.join(personalization.preference_values) or 'none'}；"
+                    f"signal={personalization.signal}；"
+                    f"participated={personalization.participated}；"
+                    f"matched_candidates={personalization.matched_candidate_count}；"
+                    f"reason_code={personalization.reason_code}；{personalization.reason}。"
+                    "Anonymous Shopper ID 仅用于关联研究与显式 Remembered Preference，"
+                    "不是登录账号、认证身份或数据所有权证明。",
                     body,
                 )
             )

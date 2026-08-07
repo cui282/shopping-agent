@@ -36,6 +36,7 @@ def isolated_runtime(tmp_path, monkeypatch):
         "ANN_INDEX_PATH",
         "TOWER_QUERY_ENDPOINT",
         "TOWER_ITEM_ENDPOINT",
+        "TOWER_USER_ENDPOINT",
         "RECALL_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)

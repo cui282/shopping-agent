@@ -101,6 +101,9 @@ export function requiredActionLabel(action: string): string {
   if (action.startsWith("Configure TOWER_ITEM_ENDPOINT")) {
     return "配置 TOWER_ITEM_ENDPOINT 以启用 Item tower";
   }
+  if (action.startsWith("Configure TOWER_USER_ENDPOINT")) {
+    return "配置 TOWER_USER_ENDPOINT 以启用个性化召回";
+  }
   return action;
 }
 
@@ -143,4 +146,13 @@ export function recallStateLabel(state: RecallChannelState | string): string {
     unavailable: "不可用",
   };
   return labels[state] ?? state;
+}
+
+export function personalizationInputSourceLabel(source: string): string {
+  if (source === "remembered_preference") return "显式 Remembered Preference";
+  return "无保存偏好输入";
+}
+
+export function personalizationSignalLabel(signal: string): string {
+  return signal === "user_tower" ? "User tower preference-match signal" : "未使用 user tower signal";
 }

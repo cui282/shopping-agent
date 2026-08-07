@@ -37,6 +37,8 @@ import {
   recallChannelLabel,
   recallModeLabel,
   recallStateLabel,
+  personalizationInputSourceLabel,
+  personalizationSignalLabel,
   resultBadgeLabel,
 } from "../utils/trust";
 import styles from "./ResearchContent.module.css";
@@ -559,6 +561,32 @@ function RecallDisclosure({ state }: { state: AgentState }) {
             )}
           </li>
         ))}
+        {provenance.personalization && (
+          <li
+            data-status={
+              provenance.personalization.state === "ready" && provenance.personalization.participated
+                ? "ready"
+                : provenance.personalization.state
+            }
+          >
+            <strong>
+              个性化召回 · {provenance.personalization.state === "ready" && provenance.personalization.participated
+                ? "已生效"
+                : provenance.personalization.state === "degraded"
+                  ? "已降级"
+                  : "未生效"}
+            </strong>
+            <span>
+              输入来源：{personalizationInputSourceLabel(provenance.personalization.input_source)} · {personalizationSignalLabel(provenance.personalization.signal)}
+            </span>
+            <small>
+              {provenance.personalization.reason_code}：{provenance.personalization.reason}
+              {provenance.personalization.preference_values.length > 0
+                ? `；字段值：${provenance.personalization.preference_values.join("、")}`
+                : ""}
+            </small>
+          </li>
+        )}
       </ul>
       {provenance.fallback_reason && <p>{`降级原因：${provenance.fallback_reason}`}</p>}
     </section>

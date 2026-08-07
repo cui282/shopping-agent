@@ -15,7 +15,7 @@ export default function App() {
           path="/privacy"
           element={
             <StaticPage title="隐私说明">
-              <p>最近研究与匿名用户标识保存在当前浏览器。查询与上传内容会发送到当前连接的购物研究服务。</p>
+              <p>最近研究与 Anonymous Shopper ID 保存在当前浏览器；该标识仅用于关联研究与显式 Remembered Preference，不是登录账号、认证身份或数据所有权证明。</p>
               <p>清除浏览器站点数据会移除本地研究记录。你也可以在研究过程面板中清除服务保存的偏好。</p>
             </StaticPage>
           }

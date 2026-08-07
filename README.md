@@ -194,6 +194,7 @@ Marketplace Gateway adapter 负责上游平台的 OAuth/鉴权、签名、地区
 - `STORE_BACKEND=redis` 与 `STORE_REDIS_URL` 启用带 TTL 的持久偏好；生产 readiness 会提示不要使用内存 Store。
 - `OPENSEARCH_URL` 等变量启用类目知识检索；配置后它会进入研究路径并披露请求或语义降级原因。
 - `ANN_BACKEND=faiss`、`ANN_INDEX_PATH`、`TOWER_QUERY_ENDPOINT` 和 `TOWER_ITEM_ENDPOINT` 启用真实候选召回；缺少任一可选 channel 时 readiness 与结果会显示稳定降级原因，并保留确定性 fallback。
+- `TOWER_USER_ENDPOINT` 是可选的 User tower。它只接收与 Anonymous Shopper ID 关联的显式 Remembered Preference；不会从查询、Task Override 或隐式行为学习。结果和报告会披露个性化是否生效、输入来源与降级 reason code；User tower 只能改变候选召回顺序，不能绕过资格、Product Evidence、币种、目的地、到手成本或确定性排名边界。
 
 跨币种排序应配置可维护的汇率快照：
 
@@ -277,7 +278,7 @@ make verify
 ## 数据与安全边界
 
 - 当前 API 不包含登录或租户鉴权。对外部署时必须置于可信身份网关之后，并按身份校验 `user_id`、`thread_id` 和文件访问。
-- 浏览器会生成本地匿名 ID，用于隔离同一浏览器中的偏好；它不是认证凭据。
+- 浏览器会生成本地 Anonymous Shopper ID，用于隔离同一浏览器中的研究与显式偏好；它不是登录账号、认证身份、认证凭据或数据所有权证明。
 - 任务快照与报告写入 `output/`，上传写入 `uploaded/`，两者均不纳入 Git。
 - 生产部署需要为任务、报告、上传和 Redis 偏好实现统一到期清理与用户删除流程。
 - CORS 必须使用明确来源；日志和事件不能包含密钥、Authorization 头或未脱敏隐私数据。

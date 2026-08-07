@@ -9,6 +9,8 @@ export type ResultKind = "live" | "sandbox" | "partial";
 export type RecallChannelName = "opensearch" | "query_tower" | "item_tower" | "faiss";
 export type RecallChannelState = "configured" | "ready" | "degraded" | "unavailable";
 export type RecallMode = "hybrid" | "partial_hybrid" | "deterministic_fallback";
+export type PersonalizationInputSource = "remembered_preference" | "none";
+export type PersonalizationSignal = "user_tower" | "none";
 export type ProviderFailureReason =
   | "not_configured"
   | "request_failed"
@@ -227,6 +229,20 @@ export interface RecallChannelReport {
   participated: boolean;
 }
 
+export interface PersonalizationReport {
+  configured: boolean;
+  state: RecallChannelState;
+  input_source: PersonalizationInputSource;
+  preference_fields: PreferenceField[];
+  preference_values: string[];
+  signal: PersonalizationSignal;
+  dimension: number | null;
+  matched_candidate_count: number;
+  reason_code: string;
+  reason: string;
+  participated: boolean;
+}
+
 export interface RecallProvenance {
   mode: RecallMode;
   channels: Record<RecallChannelName, RecallChannelReport>;
@@ -234,12 +250,14 @@ export interface RecallProvenance {
   fallback_reason: string | null;
   input_candidate_count: number;
   selected_candidate_count: number;
+  personalization?: PersonalizationReport | null;
 }
 
 export interface RecallReadiness {
   mode: RecallMode;
   channels: Record<RecallChannelName, RecallChannelReport>;
   required_actions: string[];
+  personalization?: PersonalizationReport | null;
 }
 
 export type TaskStatus =

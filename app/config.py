@@ -99,6 +99,7 @@ class Settings:
     ann_index_path: str
     tower_query_endpoint: str
     tower_item_endpoint: str
+    tower_user_endpoint: str
     opensearch_url: str
     opensearch_category_index: str
     opensearch_search_pipeline: str
@@ -143,6 +144,7 @@ class Settings:
             ann_index_path=os.getenv("ANN_INDEX_PATH", "./data/item_index.faiss").strip(),
             tower_query_endpoint=os.getenv("TOWER_QUERY_ENDPOINT", "").strip(),
             tower_item_endpoint=os.getenv("TOWER_ITEM_ENDPOINT", "").strip(),
+            tower_user_endpoint=os.getenv("TOWER_USER_ENDPOINT", "").strip(),
             opensearch_url=os.getenv("OPENSEARCH_URL", "").strip(),
             opensearch_category_index=os.getenv(
                 "OPENSEARCH_CATEGORY_INDEX", "shopping_agent_category_kb"

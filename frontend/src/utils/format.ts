@@ -56,6 +56,7 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
     price_compare: "价格换算",
     shipping_calc: "运税估算",
     item_picker: "候选筛选",
+    recall: "候选召回",
     shopping_summary: "建议汇总",
   };
   const toolLabel = toolLabels[tool] ?? tool.replaceAll("_", " ");
@@ -85,7 +86,18 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
         : "结果未记录";
     const provider = typeof data.provider === "string" ? data.provider : "";
     const fallback = typeof data.fallback_reason === "string" ? providerReasonLabel(data.fallback_reason) : "";
-    const note = [provider ? `数据提供方：${provider}` : "", fallback].filter(Boolean).join(" · ");
+    const recall = data.recall_provenance && typeof data.recall_provenance === "object"
+      ? (data.recall_provenance as Record<string, unknown>)
+      : null;
+    const personalization = recall?.personalization && typeof recall.personalization === "object"
+      ? (recall.personalization as Record<string, unknown>)
+      : null;
+    const personalizationState = typeof personalization?.state === "string" ? personalization.state : "";
+    const personalizationReason = typeof personalization?.reason_code === "string" ? personalization.reason_code : "";
+    const personalizationNote = personalization
+      ? `个性化召回：${personalizationState === "ready" && personalization.participated ? "已生效" : personalizationState === "degraded" ? "已降级" : "未生效"}${personalizationReason ? ` · ${personalizationReason}` : ""}`
+      : "";
+    const note = [provider ? `数据提供方：${provider}` : "", fallback, personalizationNote].filter(Boolean).join(" · ");
     return {
       label: tool ? `${toolLabel}${outcome === "失败" ? "失败" : outcome === "降级" ? "已降级" : "已完成"}` : "处理已完成",
       detail: `${duration} · ${source} · ${status} · ${outcome}`,

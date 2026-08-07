@@ -93,6 +93,28 @@
   font-weight: 650;
 }
 
+.personalization {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+  margin-top: 7px;
+  padding: 7px 9px;
+  border-left: 2px solid var(--line-strong);
+  background: color-mix(in oklch, var(--surface) 62%, transparent);
+}
+
+.personalization[data-state="ready"] {
+  border-left-color: var(--success);
+}
+
+.personalization[data-state="degraded"] {
+  border-left-color: var(--warning);
+}
+
+.personalization small {
+  overflow-wrap: anywhere;
+}
+
 .notice button {
   display: inline-flex;
   min-height: 40px;
