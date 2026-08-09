@@ -139,9 +139,10 @@ async def price_compare(
     if candidates and not ranked and valid_amount_count and unsupported_count == valid_amount_count:
         raise MissingExchangeRatesError(excluded_currencies)
     ranked.sort(key=lambda item: (item.price_cny, item.platform, item.item_id))
-    ranked = ranked[: max(1, min(top_n, 30))]
+    all_ranked = ranked
+    ranked = all_ranked[: max(1, min(top_n, 30))]
     cheapest: dict[str, PricePoint] = {}
-    for item in ranked:
+    for item in all_ranked:
         cheapest.setdefault(item.platform, item)
     return PriceCompareOutput(
         ranked=ranked,

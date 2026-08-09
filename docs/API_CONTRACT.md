@@ -292,6 +292,7 @@ Supported events:
 | Event | Meaning |
 | --- | --- |
 | `session_created` | Worker accepted the task |
+| `queue_status` | The task is waiting for a normal or heavy worker; `data.position` is 1-based while queued and `data.estimated_wait_seconds` is an estimate, not a deadline |
 | `assistant_call` | Workflow state changed |
 | `context_compression` | The transient model-only context window was bounded; `data.status` is `applied`, `degraded`, or `not_needed`, and `data.reason_code` is stable. Counts and estimated tokens are disclosed without prompt text, sensitive messages, or configuration values. |
 | `tool_start` | A typed tool started |
@@ -322,6 +323,21 @@ before the task-level `error`. `fork.data` has this shape:
 
 `assistant_call`, search `tool_start`, and `tool_end` data also carry `data_mode`.
 `assistant_call.step` identifies the workflow phase and other diagnostic fields remain extensible.
+`queue_status.data` has this shape:
+
+```json
+{
+  "thread_id": "thread-7b8cb4a9c23f",
+  "queue_type": "normal",
+  "position": 3,
+  "estimated_wait_seconds": 2.5,
+  "dialog_turns": 4,
+  "data_mode": "live"
+}
+```
+
+The queue is process-local. A deployment that needs durable scheduling must place a shared
+gateway or worker queue in front of the API; the API queue only bounds local worker contention.
 `context_compression.data` has this shape:
 
 ```json

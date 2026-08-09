@@ -70,6 +70,7 @@ ClarificationReasonCode = Literal[
 ]
 EventName = Literal[
     "session_created",
+    "queue_status",
     "intent_resolved",
     "assistant_call",
     "context_compression",
@@ -316,6 +317,15 @@ class TaskCancelledEventData(StrictModel):
     data_mode: DataMode = "live"
 
 
+class QueueStatusEventData(StrictModel):
+    thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
+    queue_type: Literal["normal", "heavy"]
+    position: int = Field(ge=0)
+    estimated_wait_seconds: float = Field(ge=0)
+    dialog_turns: int = Field(ge=0)
+    data_mode: DataMode = "live"
+
+
 class ErrorEventData(TaskCancelledEventData):
     code: str = Field(min_length=1)
 
@@ -375,6 +385,7 @@ class MonitorEvent(StrictModel):
         event = value.get("event")
         models = {
             "session_created": SessionCreatedEventData,
+            "queue_status": QueueStatusEventData,
             "intent_resolved": IntentResolvedEventData,
             "assistant_call": AssistantCallEventData,
             "context_compression": ContextCompressionEventData,

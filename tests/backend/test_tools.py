@@ -294,6 +294,34 @@ async def test_price_compare_reports_or_rejects_missing_exchange_rates() -> None
 
 
 @pytest.mark.asyncio
+async def test_price_compare_keeps_cheapest_per_platform_outside_top_n() -> None:
+    candidates = [
+        Candidate(
+            item_id="amazon-expensive",
+            platform="amazon",
+            title="Amazon expensive",
+            price=100,
+            currency="CNY",
+            source="live",
+        ),
+        Candidate(
+            item_id="shopee-cheap",
+            platform="shopee",
+            title="Shopee cheap",
+            price=1,
+            currency="CNY",
+            source="live",
+        ),
+    ]
+
+    result = await price_compare(candidates, top_n=1)
+
+    assert [item.item_id for item in result.ranked] == ["shopee-cheap"]
+    assert set(result.cheapest_per_platform) == {"amazon", "shopee"}
+    assert result.cheapest_per_platform["amazon"].item_id == "amazon-expensive"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("rate", ["NaN", "Infinity", "-Infinity"])
 async def test_price_compare_rejects_non_finite_exchange_rates(monkeypatch, rate: str) -> None:
     monkeypatch.setenv("FX_RATES_JSON", f'{{"USD": {rate}}}')

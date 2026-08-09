@@ -117,8 +117,19 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
       detail: `${retained} · 估算 ${event.data.estimated_tokens} tokens${reason}`,
     };
   }
+  if (event.event === "queue_status") {
+    const queue = event.data.queue_type === "heavy" ? "长任务队列" : "正常队列";
+    const wait = event.data.estimated_wait_seconds > 0
+      ? ` · 预计等待 ${event.data.estimated_wait_seconds}s`
+      : " · 即将开始";
+    return {
+      label: "请求排队中",
+      detail: `${queue} · 前方 ${event.data.position - 1} 个请求${wait}`,
+    };
+  }
   const labels: Record<MonitorEvent["event"], string> = {
     session_created: "会话已建立",
+    queue_status: "请求排队中",
     intent_resolved: "意图与约束已保存",
     assistant_call: stage === "thinking" ? "正在分析需求" : "分析需求",
     context_compression: "模型上下文压缩",

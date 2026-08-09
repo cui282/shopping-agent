@@ -1,0 +1,10 @@
+# Provider field aliases are deliberately data-only configuration.
+field_mapping:
+  item_name: title
+  product_desc: description
+  star_rating: rating
+  list_price: original_price
+category_mapping:
+  "Luggage & Travel Gear > Packing Organizers": ["箱包", "旅行收纳"]
+  "Home & Kitchen > Kitchen & Dining > Barware": ["家居", "酒具"]
+blocked_categories: []

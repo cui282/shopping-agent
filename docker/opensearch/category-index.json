@@ -19,7 +19,16 @@
       "raw_evidence": {"type": "text", "index": false},
       "last_updated": {"type": "date"},
       "confidence": {"type": "float"},
-      "structured": {"type": "object", "enabled": false},
+      "structured": {
+        "type": "object",
+        "properties": {
+          "components": {"type": "keyword"},
+          "bestsellers": {"type": "object", "enabled": true},
+          "attributes": {"type": "object", "enabled": true},
+          "price_tiers": {"type": "object", "enabled": true},
+          "confidence": {"type": "float"}
+        }
+      },
       "embedding": {
         "type": "knn_vector",
         "dimension": 1024,

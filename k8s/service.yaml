@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: shopping-agent
+  labels:
+    app.kubernetes.io/name: shopping-agent
+spec:
+  selector:
+    app.kubernetes.io/name: shopping-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+  type: ClusterIP

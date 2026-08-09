@@ -13,7 +13,9 @@ from app.compress import (
     ContextCompressionSettings,
     ContextMessage,
     build_context_summary,
+    compress_after_breakpoint,
     compress_model_context,
+    compute_breakpoint,
     estimate_context_tokens,
 )
 from app.schemas import (
@@ -219,6 +221,25 @@ def test_legacy_compress_messages_still_has_a_bounded_cache_breakpoint() -> None
     assert breakpoint.compressed_count == 3
     assert breakpoint.recent == messages[-2:]
     assert breakpoint.reason_code == "threshold_exceeded"
+
+
+def test_cache_breakpoint_preserves_prefix_and_bounds_recent_tool_observations() -> None:
+    messages = [
+        {"role": "system", "content": "stable"},
+        {"role": "tool", "content": "old tool result"},
+        {"role": "assistant", "content": "old decision"},
+        {"role": "tool", "content": "recent-1"},
+        {"role": "tool", "content": "x" * 40},
+        {"role": "tool", "content": "recent-3"},
+    ]
+
+    boundary = compute_breakpoint(messages, keep_recent=2)
+    compressed = compress_after_breakpoint(messages, boundary, max_tool_chars=20)
+
+    assert boundary == 4
+    assert compressed[:boundary] == messages[:boundary]
+    assert compressed[4]["content"].endswith("[...工具结果已精简]")
+    assert len(compressed[4]["content"]) <= 20
 
 
 def _wait_for_status(client: TestClient, thread_id: str, expected: str) -> dict[str, Any]:

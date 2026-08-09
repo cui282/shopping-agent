@@ -7,6 +7,8 @@ import httpx
 
 from app.config import get_settings
 from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
+from app.recall.category_norm import normalize_category
+from app.recall.category_reranker import HTTPTextReranker
 from app.recall.rag import extract_structured_card, summarize_card
 from app.recall.tower_query import encode_query
 from app.schemas import (
@@ -58,6 +60,44 @@ _LOCAL_INSIGHTS: dict[str, dict[str, Any]] = {
         ],
     },
 }
+
+COARSE_K = 30
+FINE_K_QUICK = 8
+FINE_K_DEEP = 15
+RERANK_BYPASS_TOP_SCORE = 0.92
+SEMANTIC_TOKENS = {"气质", "感觉", "风格", "感", "适合", "送", "氛围"}
+
+
+def should_disable_bm25(category: str) -> bool:
+    """Disable lexical noise for strongly semantic, non-literal category queries."""
+
+    return any(token in category for token in SEMANTIC_TOKENS)
+
+
+async def _rerank_hits(
+    category: str, hits: list[dict[str, Any]], *, top_k: int
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Rerank only when coarse results need it and a real endpoint is configured."""
+
+    if not hits:
+        return [], None
+    if len(hits) <= top_k:
+        return hits[:top_k], None
+    try:
+        top_score = float(hits[0].get("_score") or 0)
+    except (TypeError, ValueError):
+        top_score = 0.0
+    if top_score >= RERANK_BYPASS_TOP_SCORE:
+        return hits[:top_k], "rerank_bypassed_high_score"
+    if not os.getenv("RERANKER_ENDPOINT", "").strip():
+        return hits[:top_k], "rerank_not_configured"
+    summaries = [str((hit.get("_source") or {}).get("summary") or "") for hit in hits]
+    try:
+        scores = await HTTPTextReranker().score(category, summaries)
+    except Exception as exc:  # noqa: BLE001 - preserve coarse recall on optional failure
+        return hits[:top_k], f"reranker unavailable: {type(exc).__name__}"
+    ranked = [hit for _, hit in sorted(zip(scores, hits), key=lambda pair: pair[0], reverse=True)]
+    return ranked[:top_k], None
 
 
 def _default_insight(category: str) -> dict[str, Any]:
@@ -127,18 +167,16 @@ async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsight
     semantic_unavailable = None
     try:
         vector = await encode_query(category)
-        query: dict[str, Any] = {
-            "hybrid": {
-                "queries": [
-                    text_query,
-                    {"knn": {"embedding": {"vector": vector, "k": 8}}},
-                ]
-            }
-        }
+        queries: list[dict[str, Any]] = []
+        if not should_disable_bm25(category):
+            queries.append(text_query)
+        queries.append({"knn": {"embedding": {"vector": vector, "k": COARSE_K}}})
+        query: dict[str, Any] = {"hybrid": {"queries": queries}}
     except Exception as exc:  # noqa: BLE001 - semantic recall is an optional channel
         query = text_query
         semantic_unavailable = f"semantic channel unavailable: {type(exc).__name__}"
-    body = {"size": 8 if depth == "deep" else 4, "query": query}
+    fine_k = FINE_K_DEEP if depth == "deep" else FINE_K_QUICK
+    body = {"size": COARSE_K, "query": query}
     params = {}
     if "hybrid" in query and os.getenv("OPENSEARCH_SEARCH_PIPELINE"):
         params["search_pipeline"] = os.environ["OPENSEARCH_SEARCH_PIPELINE"]
@@ -150,6 +188,7 @@ async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsight
         hits = response.json().get("hits", {}).get("hits", [])
     if not hits:
         raise LookupError(f"no category cards found for {category}")
+    hits, rerank_status = await _rerank_hits(category, hits, top_k=fine_k)
     sources = [
         {
             **(hit.get("_source", {}) if isinstance(hit.get("_source"), dict) else {}),
@@ -171,8 +210,11 @@ async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsight
         provider=ProviderMetadata(
             source="live",
             provider="opensearch",
-            status="degraded" if semantic_unavailable else "ok",
-            fallback_reason=semantic_unavailable,
+            status="degraded" if semantic_unavailable or rerank_status else "ok",
+            fallback_reason="; ".join(
+                reason for reason in (semantic_unavailable, rerank_status) if reason
+            )
+            or None,
         ),
     )
 
@@ -188,6 +230,7 @@ async def category_insight(
 ) -> CategoryInsightOutput:
     """Return category conclusions from OpenSearch or the local knowledge cards."""
 
+    category = normalize_category(category)
     fallback_reason = None
     if os.getenv("OPENSEARCH_URL"):
         try:

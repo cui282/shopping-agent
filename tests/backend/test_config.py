@@ -93,6 +93,13 @@ def test_recall_defaults_to_inference_only_dual_tower(monkeypatch: pytest.Monkey
     monkeypatch.delenv("TOWER_USER_ENDPOINT", raising=False)
     assert get_settings().recall_architecture == "dual"
 
+
+def test_langfuse_host_is_supported_as_documented_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LANGFUSE_BASE_URL", raising=False)
+    monkeypatch.setenv("LANGFUSE_HOST", "https://langfuse.example.com")
+
+    assert get_settings().langfuse_base_url == "https://langfuse.example.com"
+
     monkeypatch.setenv("TOWER_USER_ENDPOINT", "https://legacy.example/user")
     assert get_settings().recall_architecture == "legacy_three"
 

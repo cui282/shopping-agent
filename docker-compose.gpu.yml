@@ -1,0 +1,98 @@
+name: shopping-agent
+
+# Opt-in inference profile. The default Compose stack stays CPU/local friendly; use this file
+# only on a Linux host with an NVIDIA runtime and approved inference images.
+services:
+  vllm:
+    profiles: ["gpu"]
+    image: "${VLLM_IMAGE:-vllm/vllm-openai:v0.8.5}"
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${VLLM_GPU_DEVICE:-0}"
+    command: >-
+      --model ${VLLM_MODEL:-Qwen/Qwen3-35B-A3B}
+      --served-model-name ${VLLM_SERVED_MODEL_NAME:-shopping-agent-main}
+      --tensor-parallel-size ${VLLM_TENSOR_PARALLEL_SIZE:-1}
+      --max-model-len ${VLLM_MAX_MODEL_LEN:-16384}
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+      --enable-auto-tool-choice
+      --tool-call-parser ${VLLM_TOOL_CALL_PARSER:-hermes}
+      --max-num-seqs ${VLLM_MAX_NUM_SEQS:-16}
+      --port 8000
+    expose:
+      - "8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8000/health >/dev/null"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 120s
+    networks:
+      - shopping_agent
+
+  embedding:
+    profiles: ["gpu"]
+    # This image is supplied by the deployment owner and must implement the documented API.
+    image: "${EMBEDDING_IMAGE:?Set EMBEDDING_IMAGE to an approved Query/Item embedding image}"
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${EMBEDDING_GPU_DEVICE:-1}"
+      MODEL_NAME: "${EMBEDDING_MODEL:-BAAI/bge-m3}"
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8080/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    networks:
+      - shopping_agent
+
+  reranker:
+    profiles: ["gpu"]
+    # This image is supplied by the deployment owner; the adapter is inference-only.
+    image: "${RERANKER_IMAGE:?Set RERANKER_IMAGE to an approved cross-encoder image}"
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "${RERANKER_GPU_DEVICE:-2}"
+      MODEL_NAME: "${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}"
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8080/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    networks:
+      - shopping_agent
+
+  backend:
+    profiles: ["app", "gpu"]
+    environment:
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-http://vllm:8000/v1}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-not-needed-local}"
+      LLM_MAIN: "${LLM_MAIN:-shopping-agent-main}"
+      LLM_WIRE_API: "${LLM_WIRE_API:-chat_completions}"
+      LLM_RESPONSE_STORAGE: "${LLM_RESPONSE_STORAGE:-false}"
+      TOWER_QUERY_ENDPOINT: "${TOWER_QUERY_ENDPOINT:-http://embedding:8080/query}"
+      TOWER_ITEM_ENDPOINT: "${TOWER_ITEM_ENDPOINT:-http://embedding:8080/item}"
+      RERANKER_ENDPOINT: "${RERANKER_ENDPOINT:-http://reranker:8080/score}"
+    depends_on:
+      vllm:
+        condition: service_healthy
+      embedding:
+        condition: service_healthy
+      reranker:
+        condition: service_healthy

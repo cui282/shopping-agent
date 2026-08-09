@@ -1,0 +1,7 @@
+field_mapping:
+  product_title: title
+  detail_description: description
+  average_star: rating
+  original_price: original_price
+category_mapping: {}
+blocked_categories: []

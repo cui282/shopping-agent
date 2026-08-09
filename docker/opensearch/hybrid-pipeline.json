@@ -9,7 +9,7 @@
         "combination": {
           "technique": "arithmetic_mean",
           "parameters": {
-            "weights": [0.45, 0.55]
+            "weights": [0.3, 0.7]
           }
         }
       }

@@ -13,6 +13,7 @@ from app.utils.thread_ctx import get_run_id
 
 _MESSAGES = {
     "session_created": "购物任务已创建",
+    "queue_status": "请求正在排队",
     "intent_resolved": "研究意图已保存",
     "assistant_call": "Agent 正在分析",
     "context_compression": "模型上下文已压缩",

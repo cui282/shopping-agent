@@ -2,6 +2,15 @@ from __future__ import annotations
 
 import pytest
 
+from app.eval.recall_metrics import (
+    assert_release_gate,
+    evaluate_recall,
+    mrr,
+    ndcg_at_k,
+    recall_at_k,
+)
+from app.recall.category_kb import CategoryCard
+from app.recall.category_norm import normalize_category
 from app.recall.orchestrator import RecallAdapters, RecallOrchestrator
 from app.recall.rag import extract_structured_card, summarize_card
 from app.schemas import Candidate, CategoryInsightOutput, ProviderMetadata
@@ -39,6 +48,37 @@ def test_rag_rejects_missing_structured_documents() -> None:
         extract_structured_card(
             [{"id": "raw", "text": "untyped facts"}, {"id": "empty", "structured": {}}]
         )
+
+
+def test_category_card_projects_structured_fields_for_opensearch() -> None:
+    card = CategoryCard(
+        card_id="headphones-1",
+        category="耳机",
+        card_type="attribute",
+        summary="降噪耳机常见关注点",
+        raw_evidence=["reviewed source"],
+        last_updated="2026-08-10T00:00:00Z",
+        confidence=0.9,
+        structured={"components": ["降噪"], "confidence": 0.9},
+    )
+
+    source = card.opensearch_source()
+    assert source["structured"]["components"] == ["降噪"]
+    assert "embedding" not in source
+
+
+def test_category_aliases_and_recall_metrics_are_deterministic() -> None:
+    assert normalize_category("  旅行收纳 ") == "旅行三件套"
+    assert recall_at_k(["noise", "c-1"], ["c-1", "c-2"], 2) == 0.5
+    assert mrr(["noise", "c-1"], ["c-1"]) == 0.5
+    assert ndcg_at_k(["c-2", "c-1"], ["c-1", "c-2"], 2) < 1
+    evaluation = evaluate_recall(
+        [(["c-1", "c-2"], ["c-1", "c-2"]), (["noise"], ["c-3"])],
+        k=2,
+    )
+    gate = assert_release_gate(evaluation, min_recall=0.4, min_mrr=0.4, min_ndcg=0.4)
+    assert gate.passed is True
+    assert evaluation.sample_count == 2
 
 
 class FakeReranker:

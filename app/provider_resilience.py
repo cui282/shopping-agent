@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 from typing import TypeVar
 
@@ -23,6 +24,7 @@ class _CircuitState:
     failures: int = 0
     opened_at: float | None = None
     half_open_in_flight: bool = False
+    outcomes: deque[bool] = field(default_factory=deque)
 
 
 def _retryable(error: BaseException) -> bool:
@@ -73,19 +75,34 @@ class ProviderResilience:
             state.half_open_in_flight = True
 
     async def _success(self, provider: str) -> None:
+        settings = get_settings()
         async with self._lock(provider):
             state = self._state(provider)
-            state.failures = 0
-            state.opened_at = None
+            was_half_open = state.half_open_in_flight
             state.half_open_in_flight = False
+            if was_half_open:
+                state.outcomes.clear()
+            else:
+                state.outcomes.append(True)
+                while len(state.outcomes) > settings.provider_circuit_window_size:
+                    state.outcomes.popleft()
+            state.failures = sum(not outcome for outcome in state.outcomes)
+            state.opened_at = None
 
     async def _failure(self, provider: str) -> None:
         settings = get_settings()
         async with self._lock(provider):
             state = self._state(provider)
-            state.failures += 1
+            state.outcomes.append(False)
+            while len(state.outcomes) > settings.provider_circuit_window_size:
+                state.outcomes.popleft()
+            state.failures = sum(not outcome for outcome in state.outcomes)
             state.half_open_in_flight = False
-            if state.failures >= settings.provider_circuit_failure_threshold:
+            failure_rate = state.failures / len(state.outcomes) if state.outcomes else 0.0
+            enough_samples = len(state.outcomes) >= min(5, settings.provider_circuit_window_size)
+            if state.failures >= settings.provider_circuit_failure_threshold or (
+                enough_samples and failure_rate >= settings.provider_circuit_failure_rate
+            ):
                 state.opened_at = monotonic()
 
     async def execute(self, provider: str, operation: Callable[[], Awaitable[T]]) -> T:

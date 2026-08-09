@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from app.agent.budget import TokenBudgetExceeded, choose_route, record_usage, start_budget
+from app.agent.budget import (
+    TokenBudgetExceeded,
+    choose_route,
+    record_usage,
+    route_model_name,
+    start_budget,
+)
 from app.agent.guard import AgentLoopGuardError, record_tool_call, reset_tool_guard
 from app.agent.tool_registry import get_execution_plan, reset_execution_plan, task_tool
 from app.utils.thread_ctx import thread_scope
@@ -65,3 +71,11 @@ def test_token_budget_routes_and_fails_closed(monkeypatch: pytest.MonkeyPatch) -
     assert choose_route() == "minimal"
     with pytest.raises(TokenBudgetExceeded):
         record_usage(output_tokens=3_000)
+
+
+def test_token_budget_enters_non_llm_fallback_at_five_percent() -> None:
+    start_budget(10_000)
+    record_usage(output_tokens=9_600)
+
+    assert choose_route() == "fallback"
+    assert route_model_name("fallback") == ""

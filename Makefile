@@ -3,10 +3,11 @@
 UV ?= uv
 NPM ?= npm
 COMPOSE ?= docker compose
+GPU_COMPOSE = $(COMPOSE) -f docker-compose.yml -f docker-compose.gpu.yml
 UV_CACHE_DIR ?= $(CURDIR)/.uv-cache
 export UV_CACHE_DIR
 
-.PHONY: help install install-production dev-backend dev-frontend test lint frontend-build browser-install browser-acceptance verify format build infra-up opensearch-init infra-down compose-up compose-down logs
+.PHONY: help install install-production dev-backend dev-frontend test lint frontend-build browser-install browser-acceptance verify format build infra-up opensearch-init infra-down compose-up compose-gpu-up compose-down logs
 
 help: ## Show available commands
 	@awk 'BEGIN {FS = ":.*## "; printf "Shopping Agent commands:\n"} /^[a-zA-Z_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -60,6 +61,9 @@ infra-down: ## Stop local middleware without deleting data volumes
 
 compose-up: ## Build and start the full application at http://127.0.0.1:8080
 	$(COMPOSE) --profile app up --build -d
+
+compose-gpu-up: ## Build and start the opt-in vLLM/embedding/reranker GPU profile
+	$(GPU_COMPOSE) --profile gpu --profile app up --build -d
 
 compose-down: ## Stop the full application without deleting data volumes
 	$(COMPOSE) --profile app down

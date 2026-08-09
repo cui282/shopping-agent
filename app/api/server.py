@@ -15,6 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Annotated, Any, Literal, TextIO
 
 from dotenv import load_dotenv
@@ -51,6 +52,11 @@ from app.reports import (
     ReportGenerationError,
     generate_reports,
     report_file_links,
+)
+from app.resilience.request_queue import (
+    PrioritizedRequest,
+    PriorityRequestQueue,
+    priority_for_user_tier,
 )
 from app.runtime import RuntimeNotAccepting, get_runtime_control
 from app.schemas import (
@@ -524,7 +530,11 @@ class TaskRecord:
 records: dict[str, TaskRecord] = {}
 task_locks: dict[str, asyncio.Lock] = {}
 preference_store: PreferenceStore = build_preference_store()
-task_slots = asyncio.Semaphore(get_settings().max_concurrent_tasks)
+_max_task_workers = get_settings().max_concurrent_tasks
+request_queue = PriorityRequestQueue(
+    normal_workers=_max_task_workers,
+    heavy_workers=max(1, _max_task_workers // 2),
+)
 runtime_control = get_runtime_control()
 
 
@@ -535,6 +545,7 @@ def _runtime_task_done(_: asyncio.Task[Any]) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     runtime_control.reset_for_startup()
+    request_queue.reset()
     yield
     runtime_control.begin_drain()
     settings = get_settings()
@@ -544,6 +555,7 @@ async def lifespan(_: FastAPI):
         task.cancel()
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
+    request_queue.reset()
 
 
 app = FastAPI(title="Shopping Agent API", version=__version__, lifespan=lifespan)
@@ -774,6 +786,7 @@ def _record_event(
         current_status = record.snapshot.status
         allowed_statuses = {
             "session_created": {"running"},
+            "queue_status": {"running"},
             "intent_resolved": {"running"},
             "assistant_call": {"running"},
             "context_compression": {"running"},
@@ -915,40 +928,70 @@ async def _execute_task(
     task_data_mode: DataMode = (
         record.snapshot.data_mode if record is not None else get_settings().data_mode
     )
+    dialog_turns = len(record.snapshot.events) if record is not None else 0
+    queue_type = request_queue.classify(dialog_turns)
+    queue_request = PrioritizedRequest(
+        priority=priority_for_user_tier(None),
+        timestamp=monotonic(),
+        thread_id=thread_id,
+        query=request.query,
+        user_id=request.user_id,
+    )
     try:
-        async with task_slots:
-            with thread_scope(thread_id, directory, run_id):
-                if not resume:
-                    await monitor.emit(
-                        thread_id,
-                        "session_created",
-                        data={
-                            "thread_id": thread_id,
-                            "reference_images": reference_images,
-                            "data_mode": task_data_mode,
-                        },
-                    )
-                result = await asyncio.wait_for(
-                    run_agent(
-                        request,
-                        monitor,
-                        preference_store,
-                        reference_images,
-                        data_mode=task_data_mode,
-                        clarification_answers=clarification_answers,
-                        resolved_intent=resolved_intent,
-                        resolved_query=resolved_query,
-                        applied_preferences=applied_preferences,
-                        constraint_relaxation_changes=constraint_relaxation_changes,
-                        history_events=(record.snapshot.events if record is not None else ()),
-                    ),
-                    timeout=get_settings().task_timeout_seconds,
-                )
+        with thread_scope(thread_id, directory, run_id):
+            if not resume:
                 await monitor.emit(
                     thread_id,
-                    "task_result",
-                    data=result.model_dump(mode="json"),
+                    "session_created",
+                    data={
+                        "thread_id": thread_id,
+                        "reference_images": reference_images,
+                        "data_mode": task_data_mode,
+                    },
                 )
+            position = await request_queue.enqueue(queue_request, queue_type)
+            try:
+                if position > 1:
+                    await monitor.emit(
+                        thread_id,
+                        "queue_status",
+                        message="已收到请求，当前排队中",
+                        data={
+                            "thread_id": thread_id,
+                            "queue_type": queue_type,
+                            "position": position,
+                            "estimated_wait_seconds": request_queue.estimate_wait_seconds(
+                                queue_request, queue_type
+                            ),
+                            "dialog_turns": dialog_turns,
+                            "data_mode": task_data_mode,
+                        },
+                        run_id=run_id,
+                    )
+                async with request_queue.acquire(queue_request, queue_type):
+                    result = await asyncio.wait_for(
+                        run_agent(
+                            request,
+                            monitor,
+                            preference_store,
+                            reference_images,
+                            data_mode=task_data_mode,
+                            clarification_answers=clarification_answers,
+                            resolved_intent=resolved_intent,
+                            resolved_query=resolved_query,
+                            applied_preferences=applied_preferences,
+                            constraint_relaxation_changes=constraint_relaxation_changes,
+                            history_events=(record.snapshot.events if record is not None else ()),
+                        ),
+                        timeout=get_settings().task_timeout_seconds,
+                    )
+                    await monitor.emit(
+                        thread_id,
+                        "task_result",
+                        data=result.model_dump(mode="json"),
+                    )
+            finally:
+                await request_queue.discard(queue_request, queue_type)
     except TaskDeletedError:
         return
     except asyncio.CancelledError:
@@ -1089,9 +1132,26 @@ async def _execute(
             )
     finally:
         record = records.get(thread_id)
+        final_status = record.snapshot.status if record is not None else "finished"
+        observer = get_observer()
+        observer.score(
+            thread_id,
+            name="task_success",
+            value=1.0 if final_status == "completed" else 0.0,
+            comment=f"task status: {final_status}",
+        )
+        if record is not None and record.snapshot.result is not None:
+            result = record.snapshot.result
+            coverage = min(1.0, len(result.recommendations) / 3)
+            observer.score(
+                thread_id,
+                name="rar_recommendation_coverage",
+                value=coverage,
+                comment="ratio of populated recommendation slots in the deterministic result",
+            )
         get_observer().end_trace(
             thread_id,
-            status=record.snapshot.status if record is not None else "finished",
+            status=final_status,
             budget=budget_state(),
         )
         record = records.get(thread_id)

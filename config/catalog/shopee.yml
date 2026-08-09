@@ -1,0 +1,7 @@
+field_mapping:
+  item_name: title
+  description_text: description
+  rating_star: rating
+  price_before_discount: original_price
+category_mapping: {}
+blocked_categories: []

@@ -44,7 +44,10 @@ def choose_route(estimated_tokens: int = 0) -> TokenRoute:
     state = budget_state()
     remaining = max(0, state.remaining - max(0, estimated_tokens))
     settings = get_settings()
-    if remaining <= settings.token_route_minimal_threshold:
+    fallback_threshold = max(256, int(state.budget * 0.05))
+    if remaining <= fallback_threshold:
+        route: TokenRoute = "fallback"
+    elif remaining <= settings.token_route_minimal_threshold:
         route: TokenRoute = "minimal"
     elif remaining <= settings.token_route_lite_threshold:
         route = "lite"
@@ -74,6 +77,9 @@ def route_model_name(route: TokenRoute) -> str:
         "fallback": "LLM_FALLBACK",
     }[route]
     import os
+
+    if route == "fallback":
+        return ""
 
     return os.getenv(settings_name, "").strip() or os.getenv("LLM_MAIN", "").strip()
 

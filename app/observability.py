@@ -7,10 +7,38 @@ included in event payloads.
 
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from typing import Any
 
 from app.agent.budget import TokenBudgetState
 from app.config import get_settings
+
+
+@dataclass(frozen=True, slots=True)
+class ToolLatencyAlert:
+    """A structured alert candidate that can be forwarded to a metrics backend."""
+
+    tool_name: str
+    duration_ms: int
+    threshold_ms: int
+    reason: str = "tool_latency_exceeded"
+
+
+def tool_latency_alert(tool_name: str, duration_ms: int) -> ToolLatencyAlert | None:
+    """Return an alert candidate without making logging or LangFuse a hard dependency."""
+
+    try:
+        threshold = max(1, int(os.getenv("OBS_TOOL_RT_ALERT_MS", "5000")))
+    except ValueError:
+        threshold = 5000
+    if duration_ms <= threshold:
+        return None
+    return ToolLatencyAlert(
+        tool_name=tool_name,
+        duration_ms=max(0, duration_ms),
+        threshold_ms=threshold,
+    )
 
 
 class TraceObserver:
@@ -42,6 +70,16 @@ class TraceObserver:
         duration_ms: int,
         status: str,
         route: str,
+    ) -> None:
+        return None
+
+    def score(
+        self,
+        thread_id: str,
+        *,
+        name: str,
+        value: float,
+        comment: str | None = None,
     ) -> None:
         return None
 
@@ -165,6 +203,39 @@ class LangFuseObserver(TraceObserver):
                 },
             )
             span.end()
+            alert = tool_latency_alert(name, duration_ms)
+            if alert is not None:
+                trace.update(
+                    output={
+                        "alert": alert.reason,
+                        "tool_name": alert.tool_name,
+                        "duration_ms": alert.duration_ms,
+                        "threshold_ms": alert.threshold_ms,
+                    }
+                )
+        except Exception:  # noqa: BLE001 - tracing must never block research
+            return
+
+    def score(
+        self,
+        thread_id: str,
+        *,
+        name: str,
+        value: float,
+        comment: str | None = None,
+    ) -> None:
+        trace = self._traces.get(thread_id)
+        if trace is None:
+            return
+        try:
+            kwargs: dict[str, Any] = {"name": name, "value": max(0.0, min(1.0, value))}
+            if comment:
+                kwargs["comment"] = comment[:500]
+            score_method = getattr(trace, "score", None)
+            if callable(score_method):
+                score_method(**kwargs)
+            elif self._client is not None:
+                self._client.score(trace_id=thread_id, **kwargs)
         except Exception:  # noqa: BLE001 - tracing must never block research
             return
 
@@ -184,4 +255,11 @@ def reset_observer() -> None:
     _observer = None
 
 
-__all__ = ["LangFuseObserver", "TraceObserver", "get_observer", "reset_observer"]
+__all__ = [
+    "LangFuseObserver",
+    "ToolLatencyAlert",
+    "TraceObserver",
+    "get_observer",
+    "reset_observer",
+    "tool_latency_alert",
+]

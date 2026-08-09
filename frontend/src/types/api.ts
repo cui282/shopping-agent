@@ -288,6 +288,7 @@ export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecti
 
 export type MonitorEventName =
   | "session_created"
+  | "queue_status"
   | "intent_resolved"
   | "assistant_call"
   | "context_compression"
@@ -344,6 +345,14 @@ export interface ToolEndEventData {
 
 export interface MonitorEventDataMap {
   session_created: { thread_id: string; reference_images: Record<string, unknown>[]; data_mode: DataMode };
+  queue_status: {
+    thread_id: string;
+    queue_type: "normal" | "heavy";
+    position: number;
+    estimated_wait_seconds: number;
+    dialog_turns: number;
+    data_mode: DataMode;
+  };
   intent_resolved: {
     resolved_query: string;
     resolved_intent: ShoppingPlan;

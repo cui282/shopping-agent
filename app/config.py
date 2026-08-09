@@ -67,6 +67,13 @@ def _percentage(name: str, default: int) -> int:
     return value
 
 
+def _fraction(name: str, default: float) -> float:
+    value = _number(name, default, 0)
+    if value > 1:
+        raise ConfigurationError(f"{name} must be at most 1")
+    return value
+
+
 def _aliased_channel_value(preferred_name: str, legacy_name: str) -> str:
     preferred = os.getenv(preferred_name, "").strip()
     legacy = os.getenv(legacy_name, "").strip()
@@ -179,6 +186,8 @@ class Settings:
     provider_retry_backoff_seconds: float
     provider_retry_backoff_max_seconds: float
     provider_circuit_failure_threshold: int
+    provider_circuit_window_size: int
+    provider_circuit_failure_rate: float
     provider_circuit_reset_seconds: float
     provider_max_concurrency: int
     token_budget: int
@@ -271,6 +280,8 @@ class Settings:
                 "PROVIDER_RETRY_BACKOFF_MAX_SECONDS", 2, 0.01
             ),
             provider_circuit_failure_threshold=_integer("PROVIDER_CIRCUIT_FAILURE_THRESHOLD", 5, 1),
+            provider_circuit_window_size=_integer("PROVIDER_CIRCUIT_WINDOW_SIZE", 20, 2),
+            provider_circuit_failure_rate=_fraction("PROVIDER_CIRCUIT_FAILURE_RATE", 0.5),
             provider_circuit_reset_seconds=_number("PROVIDER_CIRCUIT_RESET_SECONDS", 30, 1),
             provider_max_concurrency=_integer("PROVIDER_MAX_CONCURRENCY", 4, 1),
             token_budget=_integer("LLM_TOKEN_BUDGET", 12_000, 256),
@@ -278,7 +289,9 @@ class Settings:
             token_route_minimal_threshold=_integer("LLM_MINIMAL_TOKEN_THRESHOLD", 4_000, 1),
             langfuse_public_key=os.getenv("LANGFUSE_PUBLIC_KEY", "").strip(),
             langfuse_secret_key=os.getenv("LANGFUSE_SECRET_KEY", "").strip(),
-            langfuse_base_url=os.getenv("LANGFUSE_BASE_URL", "").strip(),
+            langfuse_base_url=(
+                os.getenv("LANGFUSE_BASE_URL", "").strip() or os.getenv("LANGFUSE_HOST", "").strip()
+            ),
         )
 
     @property

@@ -16,6 +16,7 @@ from app.schemas import (
     ShoppingSummaryOutput,
     TaskOverride,
 )
+from app.security import audit_output
 from app.utils.thread_ctx import get_thread_id
 
 
@@ -184,6 +185,8 @@ async def shopping_summary(
         )
     else:
         final_answer = f"已启用平台没有返回可比较的候选商品。请调整关键词后重试。\n{rationale}"
+
+    _, final_answer = audit_output(final_answer)
 
     result = ShoppingSummaryOutput(
         thread_id=thread_id,

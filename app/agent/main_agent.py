@@ -23,6 +23,9 @@ from app.compress import (
     safe_bounded_context,
 )
 from app.config import MARKETPLACES, get_settings
+from app.harness.defaults import install_default_hooks
+from app.harness.middleware import harness
+from app.harness.phase import phase_machine
 from app.memory.commands import (
     execute_memory_commands,
     parse_memory_commands,
@@ -55,6 +58,7 @@ from app.schemas import (
     ToolEndEventData,
     UserTowerInput,
 )
+from app.security import ToolCallDenied, pre_tool_check
 from app.tools import (
     category_insight,
     item_picker,
@@ -94,6 +98,7 @@ class BlockingAmbiguityError(RuntimeError):
 
 ADVISORY_TOOLS = [planner, task_tool]
 recall_orchestrator = RecallOrchestrator()
+install_default_hooks()
 
 
 async def _category_insight_with_fallback(category: str) -> CategoryInsightOutput:
@@ -180,6 +185,21 @@ async def _call_tool(
 ) -> T:
     thread_id = event_thread_id or get_thread_id()
     event_data_mode = data_mode or get_settings().data_mode
+    hook_context = await harness.run(
+        "pre_tool_call",
+        {
+            "thread_id": thread_id,
+            "tool_name": name,
+            "tool_args": args,
+            "tool_call_id": f"{thread_id}:{name}",
+            "tool_history": phase_machine.tool_history(),
+            "query": args.get("query") or args.get("category"),
+        },
+    )
+    args = dict(hook_context.get("tool_args", args))
+    denied = pre_tool_check({"name": name})
+    if denied is not None:
+        raise ToolCallDenied(denied["error"])
     record_tool_call(name, args)
     await monitor.emit(
         thread_id,
@@ -190,6 +210,23 @@ async def _call_tool(
     started = time.perf_counter()
     try:
         result = await call()
+        hook_context = await harness.run(
+            "post_tool_call",
+            {
+                **hook_context,
+                "tool_result": result,
+            },
+        )
+        result = cast(T, hook_context.get("tool_result", result))
+        phase_machine.observe_tool(name)
+        await harness.run(
+            "post_reflect",
+            {
+                **hook_context,
+                "tool_result": result,
+                "tool_history": phase_machine.tool_history(),
+            },
+        )
     except Exception as exc:
         metadata = failure_metadata
         if metadata is None:
@@ -287,6 +324,7 @@ async def _run_react_advisory(
     query: str,
     preferences: dict[str, Any],
     model_context: ModelContext | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Invoke the bounded model controller for intent and execution planning.
 
@@ -299,14 +337,18 @@ async def _run_react_advisory(
 
     reset_execution_plan()
     route = choose_route(model_context.estimated_tokens if model_context is not None else 0)
+    if route == "fallback":
+        return ""
     kwargs: dict[str, Any] = {"model": get_llm(route), "tools": ADVISORY_TOOLS}
     signature = inspect.signature(create_react_agent)
     prompt = (
-        build_system_prompt(preferences)
+        build_system_prompt(preferences, user_id=user_id)
         + "\n本轮负责理解意图并通过 task_tool 提出执行计划。只能使用 planner 和 task_tool；"
         "不得编造商品事实、价格、库存或排序结论。task_tool 只选择平台、并行策略和标准步骤，"
         "最终 Product Evidence 与价格计算由应用程序完成。"
     )
+    if route == "minimal":
+        prompt += "\n当前处于预算紧张的简洁模式：只输出必要的执行计划，避免重复解释和冗长思考。"
     if "prompt" in signature.parameters:
         kwargs["prompt"] = prompt
     else:
@@ -338,7 +380,7 @@ async def _run_react_advisory(
     return str(content)[:500]
 
 
-async def run_agent(
+async def _run_agent_impl(
     request: TaskRequest,
     monitor: Monitor,
     store: PreferenceStore,
@@ -353,6 +395,8 @@ async def run_agent(
 ) -> ShoppingSummaryOutput:
     thread_id = get_thread_id()
     settings = get_settings()
+    phase_machine.reset()
+    install_default_hooks()
     start_budget(settings.token_budget)
     get_observer().start_trace(
         thread_id,
@@ -397,6 +441,7 @@ async def run_agent(
         remembered = remembered_for_task(remembered, memory_commands)
     else:
         remembered = applied_preferences or RememberedPreference()
+        phase_machine.transition("planner_output_ready")
 
     user_tower_input = UserTowerInput(
         anonymous_shopper_id=request.user_id,
@@ -517,11 +562,15 @@ async def run_agent(
                 "context_compression",
                 data=model_context.compression_event_data(),
             )
-            preview = await _run_react_advisory(
+            advisory_args: tuple[Any, ...] = (
                 query,
                 effective_remembered.model_dump(mode="json"),
                 model_context,
             )
+            advisory_kwargs: dict[str, Any] = {}
+            if "user_id" in inspect.signature(_run_react_advisory).parameters:
+                advisory_kwargs["user_id"] = request.user_id
+            preview = await _run_react_advisory(*advisory_args, **advisory_kwargs)
             await monitor.emit(
                 thread_id,
                 "assistant_call",
@@ -530,6 +579,7 @@ async def run_agent(
                     "step": "thinking",
                     "preview": preview,
                     "source": "live",
+                    "token_route": budget_state().route,
                     "data_mode": task_data_mode,
                 },
             )
@@ -577,6 +627,30 @@ async def run_agent(
                     "step": "thinking",
                     "source": "computed",
                     "fallback_reason": type(exc).__name__,
+                    "data_mode": task_data_mode,
+                },
+            )
+        if budget_state().route == "fallback":
+            await monitor.emit(
+                thread_id,
+                "context_compression",
+                data={
+                    "status": "degraded",
+                    "reason_code": "token_budget_fallback",
+                    "compressed_message_count": 0,
+                    "retained_message_count": 0,
+                    "estimated_tokens": 0,
+                    "summary_fields": [],
+                },
+            )
+            await monitor.emit(
+                thread_id,
+                "assistant_call",
+                message="Token 预算已用尽，切换规则编排",
+                data={
+                    "step": "thinking",
+                    "source": "computed",
+                    "token_route": "fallback",
                     "data_mode": task_data_mode,
                 },
             )
@@ -790,3 +864,70 @@ async def run_agent(
         ),
     )
     return result
+
+
+async def run_agent(
+    request: TaskRequest,
+    monitor: Monitor,
+    store: PreferenceStore,
+    reference_images: list[dict[str, Any]] | None = None,
+    data_mode: DataMode | None = None,
+    clarification_answers: dict[str, str] | None = None,
+    resolved_intent: ShoppingPlan | None = None,
+    resolved_query: str | None = None,
+    applied_preferences: RememberedPreference | None = None,
+    constraint_relaxation_changes: list[ConstraintRelaxationChange] | None = None,
+    history_events: Sequence[MonitorEvent] = (),
+) -> ShoppingSummaryOutput:
+    """Run one task inside the complete Harness lifecycle."""
+
+    thread_id = get_thread_id()
+    phase_machine.reset()
+    install_default_hooks()
+    session_context = await harness.run(
+        "on_session_start",
+        {
+            "thread_id": thread_id,
+            "user_id": request.user_id,
+            "query": request.query,
+            "data_mode": data_mode or get_settings().data_mode,
+        },
+    )
+    await harness.run(
+        "pre_think",
+        {
+            **session_context,
+            "step": "thinking",
+            "tool_history": phase_machine.tool_history(),
+        },
+    )
+    result: ShoppingSummaryOutput | None = None
+    failure: BaseException | None = None
+    try:
+        result = await _run_agent_impl(
+            request,
+            monitor,
+            store,
+            reference_images=reference_images,
+            data_mode=data_mode,
+            clarification_answers=clarification_answers,
+            resolved_intent=resolved_intent,
+            resolved_query=resolved_query,
+            applied_preferences=applied_preferences,
+            constraint_relaxation_changes=constraint_relaxation_changes,
+            history_events=history_events,
+        )
+        return result
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        await harness.run(
+            "on_session_end",
+            {
+                **session_context,
+                "result": result,
+                "error": type(failure).__name__ if failure is not None else None,
+                "tool_history": phase_machine.tool_history(),
+            },
+        )

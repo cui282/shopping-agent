@@ -75,6 +75,10 @@ def bounded_tool_result(value: Any, *, max_chars: int | None = None) -> str:
         rendered = value
     else:
         rendered = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    # Keep the model boundary safe when a future tool exposes external text directly.
+    from app.security import sanitize_tool_output
+
+    rendered = sanitize_tool_output(rendered)
     if len(rendered) <= limit:
         return rendered
     suffix = "… [tool result truncated]"

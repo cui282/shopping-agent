@@ -13,6 +13,8 @@ from app.compress.breakpoint import (
     ClarificationContext,
     ContextCompressionSettings,
     ContextMessage,
+    compress_after_breakpoint,
+    compute_breakpoint,
 )
 from app.schemas import (
     ClarificationPrompt,
@@ -222,6 +224,8 @@ def compress_model_context(
     summary = typed_summary
 
     full_messages = _coerce_messages(source_messages)
+    cache_boundary = compute_breakpoint(full_messages, config.keep_recent)
+    full_messages = compress_after_breakpoint(full_messages, cache_boundary)
     full_tokens = estimate_context_tokens(full_messages)
     compressed = len(full_messages) > config.keep_recent or full_tokens > config.max_tokens
     if not compressed and inherited_status == "applied":
@@ -382,6 +386,8 @@ def compress_messages(
 
     config = settings or _settings_from_env()
     source = _coerce_messages(messages)
+    cache_boundary = compute_breakpoint(source, config.keep_recent)
+    source = compress_after_breakpoint(source, cache_boundary)
     full_tokens = estimate_context_tokens(source)
     should_compress = len(source) > config.keep_recent or full_tokens > config.max_tokens
     if not should_compress:
