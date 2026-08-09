@@ -6,12 +6,16 @@ from typing import Any, Literal
 import httpx
 
 from app.config import get_settings
+from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
+from app.recall.rag import extract_structured_card, summarize_card
 from app.recall.tower_query import encode_query
 from app.schemas import (
     AttributeDist,
     Bestseller,
+    CategoryEvidence,
     CategoryInsightOutput,
     PriceTier,
+    ProviderFailureReason,
     ProviderMetadata,
 )
 
@@ -81,8 +85,17 @@ def curated_category_insight(
     category: str,
     *,
     fallback_reason: str | None = None,
+    failure_reason: ProviderFailureReason | None = None,
 ) -> CategoryInsightOutput:
     data = _LOCAL_INSIGHTS.get(category, _default_insight(category))
+    evidence = [
+        CategoryEvidence(
+            document_id=f"curated-{category}",
+            field="curated_card",
+            summary="built-in category knowledge card; no external document was available",
+            score=1.0,
+        )
+    ]
     return CategoryInsightOutput(
         category=category,
         components=data["components"],
@@ -93,16 +106,18 @@ def curated_category_insight(
             for tier, price_range, notes in data["tiers"]
         ],
         confidence=0.86 if category in _LOCAL_INSIGHTS else 0.68,
+        evidence=evidence,
         provider=ProviderMetadata(
             source="curated",
             provider="built-in-category-kb",
             status="degraded" if fallback_reason else "ok",
             fallback_reason=fallback_reason,
+            failure_reason=failure_reason,
         ),
     )
 
 
-async def _opensearch_insight(category: str, depth: str) -> CategoryInsightOutput:
+async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsightOutput:
     base_url = os.environ["OPENSEARCH_URL"].rstrip("/")
     index = os.getenv("OPENSEARCH_CATEGORY_INDEX", "shopping_agent_category_kb")
     auth = None
@@ -135,23 +150,36 @@ async def _opensearch_insight(category: str, depth: str) -> CategoryInsightOutpu
         hits = response.json().get("hits", {}).get("hits", [])
     if not hits:
         raise LookupError(f"no category cards found for {category}")
-    sources = [hit.get("_source", {}) for hit in hits]
-    merged = next((source for source in sources if source.get("structured")), {}).get("structured")
-    if not isinstance(merged, dict):
-        raise TypeError("OpenSearch documents do not contain structured insight fields")
+    sources = [
+        {
+            **(hit.get("_source", {}) if isinstance(hit.get("_source"), dict) else {}),
+            "id": hit.get("_id"),
+            "_score": hit.get("_score"),
+        }
+        for hit in hits
+    ]
+    merged, evidence = extract_structured_card(sources)
+    components, bestsellers, attributes, price_tiers, confidence = summarize_card(category, merged)
     return CategoryInsightOutput(
         category=category,
-        components=merged.get("components", []),
-        bestsellers=[Bestseller.model_validate(item) for item in merged.get("bestsellers", [])],
-        attributes=[AttributeDist.model_validate(item) for item in merged.get("attributes", [])],
-        price_tiers=[PriceTier.model_validate(item) for item in merged.get("price_tiers", [])],
-        confidence=float(merged.get("confidence", 0.7)),
+        components=components,
+        bestsellers=bestsellers,
+        attributes=attributes,
+        price_tiers=price_tiers,
+        confidence=confidence,
+        evidence=evidence,
         provider=ProviderMetadata(
             source="live",
             provider="opensearch",
             status="degraded" if semantic_unavailable else "ok",
             fallback_reason=semantic_unavailable,
         ),
+    )
+
+
+async def _opensearch_insight(category: str, depth: str) -> CategoryInsightOutput:
+    return await get_provider_resilience().execute(
+        "opensearch", lambda: _opensearch_insight_once(category, depth)
     )
 
 
@@ -164,6 +192,13 @@ async def category_insight(
     if os.getenv("OPENSEARCH_URL"):
         try:
             return await _opensearch_insight(category, depth)
+        except ProviderCircuitOpenError as exc:
+            fallback_reason = str(exc)
+            return curated_category_insight(
+                category,
+                fallback_reason=fallback_reason,
+                failure_reason="circuit_open",
+            )
         except Exception as exc:  # noqa: BLE001 - this optional provider degrades independently
             fallback_reason = f"OpenSearch unavailable: {type(exc).__name__}"
     else:

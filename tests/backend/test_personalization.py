@@ -135,7 +135,7 @@ def test_readiness_discloses_optional_user_tower_without_making_it_required(
     unavailable = recall_readiness()
     assert unavailable.personalization is not None
     assert unavailable.personalization.configured is False
-    assert unavailable.personalization.reason_code == "not_configured"
+    assert unavailable.personalization.reason_code == "dual_tower_architecture"
 
 
 @pytest.mark.asyncio
@@ -283,7 +283,7 @@ async def test_no_saved_preference_skips_user_tower_and_preserves_existing_recal
 
     assert user_tower.inputs == []
     assert unconfigured.provenance.personalization is not None
-    assert unconfigured.provenance.personalization.reason_code == "not_configured"
+    assert unconfigured.provenance.personalization.reason_code == "dual_tower_architecture"
     assert unconfigured.provenance.personalization.input_source == "remembered_preference"
     assert unconfigured.provenance.personalization.preference_values == ["简约"]
 

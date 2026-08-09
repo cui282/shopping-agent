@@ -6,9 +6,12 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar, cast
 
+from app.agent.budget import budget_state, choose_route, record_usage, start_budget
 from app.agent.dispatch_tool import dispatch_tool
+from app.agent.guard import record_tool_call
 from app.agent.llm import active_agent_mode, allow_rules_fallback, get_llm, requested_mode
 from app.agent.system_prompt import build_system_prompt
+from app.agent.tool_registry import get_execution_plan, reset_execution_plan, task_tool
 from app.api.monitor import Monitor
 from app.compress import (
     ContextCompressionSettings,
@@ -28,6 +31,7 @@ from app.memory.commands import (
 )
 from app.memory.injector import resolve_preferences
 from app.memory.store import PreferenceStore
+from app.observability import get_observer
 from app.recall.orchestrator import RecallOrchestrator
 from app.schemas import (
     CategoryInsightOutput,
@@ -88,7 +92,7 @@ class BlockingAmbiguityError(RuntimeError):
         super().__init__(ambiguity.question)
 
 
-ADVISORY_TOOLS = [planner]
+ADVISORY_TOOLS = [planner, task_tool]
 recall_orchestrator = RecallOrchestrator()
 
 
@@ -170,11 +174,13 @@ async def _call_tool(
     call: Callable[[], Awaitable[T]],
     *,
     event_thread_id: str | None = None,
+    observer_thread_id: str | None = None,
     data_mode: DataMode | None = None,
     failure_metadata: ProviderMetadata | None = None,
 ) -> T:
     thread_id = event_thread_id or get_thread_id()
     event_data_mode = data_mode or get_settings().data_mode
+    record_tool_call(name, args)
     await monitor.emit(
         thread_id,
         "tool_start",
@@ -209,6 +215,13 @@ async def _call_tool(
             "tool_end",
             message=f"{name} 工具调用失败",
             data=failed.model_dump(mode="json"),
+        )
+        get_observer().tool_span(
+            observer_thread_id or thread_id,
+            name=name,
+            duration_ms=failed.duration_ms,
+            status=failed.status,
+            route=budget_state().route,
         )
         raise
 
@@ -260,6 +273,13 @@ async def _call_tool(
         message=f"{name} 工具调用完成",
         data=completed.model_dump(mode="json"),
     )
+    get_observer().tool_span(
+        observer_thread_id or thread_id,
+        name=name,
+        duration_ms=completed.duration_ms,
+        status=completed.status,
+        route=budget_state().route,
+    )
     return result
 
 
@@ -268,15 +288,24 @@ async def _run_react_advisory(
     preferences: dict[str, Any],
     model_context: ModelContext | None = None,
 ) -> str:
-    """Invoke the configured LangGraph ReAct agent as the intent-analysis entry point."""
+    """Invoke the bounded model controller for intent and execution planning.
+
+    The controller may call ``planner`` and ``task_tool``. Result-producing tools remain owned by
+    the deterministic application path below, which keeps Product Evidence and ranking outside
+    the language model.
+    """
 
     from langgraph.prebuilt import create_react_agent
 
-    kwargs: dict[str, Any] = {"model": get_llm(), "tools": ADVISORY_TOOLS}
+    reset_execution_plan()
+    route = choose_route(model_context.estimated_tokens if model_context is not None else 0)
+    kwargs: dict[str, Any] = {"model": get_llm(route), "tools": ADVISORY_TOOLS}
     signature = inspect.signature(create_react_agent)
     prompt = (
         build_system_prompt(preferences)
-        + "\n本轮只完成意图分析；如需工具，仅调用 planner，然后给出精炼计划。"
+        + "\n本轮负责理解意图并通过 task_tool 提出执行计划。只能使用 planner 和 task_tool；"
+        "不得编造商品事实、价格、库存或排序结论。task_tool 只选择平台、并行策略和标准步骤，"
+        "最终 Product Evidence 与价格计算由应用程序完成。"
     )
     if "prompt" in signature.parameters:
         kwargs["prompt"] = prompt
@@ -300,6 +329,12 @@ async def _run_react_advisory(
     if not messages:
         return ""
     content = getattr(messages[-1], "content", "")
+    usage = getattr(messages[-1], "usage_metadata", None)
+    if isinstance(usage, dict):
+        record_usage(
+            int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
+            int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
+        )
     return str(content)[:500]
 
 
@@ -318,6 +353,12 @@ async def run_agent(
 ) -> ShoppingSummaryOutput:
     thread_id = get_thread_id()
     settings = get_settings()
+    start_budget(settings.token_budget)
+    get_observer().start_trace(
+        thread_id,
+        query_length=len(request.query),
+        data_mode=data_mode or settings.data_mode,
+    )
     task_data_mode = data_mode or settings.data_mode
     answers = clarification_answers or {}
     query = resolved_query or strip_memory_commands(
@@ -343,7 +384,7 @@ async def run_agent(
         )
 
     if resolved_intent is None:
-        stored_preferences = await store.get(request.user_id)
+        stored_preferences = await store.read_relevant(request.user_id, query, limit=5)
         remembered = RememberedPreference.model_validate(
             {
                 field: stored_preferences.get(field, [])
@@ -407,6 +448,7 @@ async def run_agent(
         },
     )
     agent_mode = active_agent_mode()
+    execution_plan = None
     if requested_mode() == "llm" and agent_mode == "unavailable":
         await monitor.emit(
             thread_id,
@@ -491,6 +533,21 @@ async def run_agent(
                     "data_mode": task_data_mode,
                 },
             )
+            execution_plan = get_execution_plan()
+            if execution_plan is not None:
+                await monitor.emit(
+                    thread_id,
+                    "assistant_call",
+                    message="模型已提出受限执行计划，应用将继续做确定性校验",
+                    data={
+                        "step": "planning",
+                        "platforms": list(execution_plan.platforms),
+                        "fork": execution_plan.fork,
+                        "steps": list(execution_plan.steps),
+                        "source": execution_plan.source,
+                        "data_mode": task_data_mode,
+                    },
+                )
         except Exception as exc:
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -524,18 +581,23 @@ async def run_agent(
                 },
             )
 
+    selected_platforms = (
+        execution_plan.platforms
+        if execution_plan is not None and execution_plan.platforms
+        else settings.enabled_marketplaces
+    )
     await monitor.emit(
         thread_id,
         "assistant_call",
-        message=f"Act：并行检索 {len(settings.enabled_marketplaces)} 个已启用平台，并准备类目召回",
+        message=f"Act：检索 {len(selected_platforms)} 个已选平台，并准备类目召回",
         data={
             "step": "acting",
             "category": plan.category,
-            "platforms": list(settings.enabled_marketplaces),
+            "platforms": list(selected_platforms),
             "data_mode": task_data_mode,
         },
     )
-    platforms = [cast(Platform, name) for name in settings.enabled_marketplaces]
+    platforms = [cast(Platform, name) for name in selected_platforms]
 
     insight_task = asyncio.create_task(
         _call_tool(
@@ -567,6 +629,7 @@ async def run_agent(
                 event_thread_id=thread_id,
                 data_mode=task_data_mode,
                 failure_metadata=failure_metadata,
+                observer_thread_id=get_thread_id(),
             )
         except Exception as exc:  # noqa: BLE001 - one marketplace cannot cancel siblings
             failure_reason: ProviderFailureReason = "request_failed"
@@ -585,12 +648,16 @@ async def run_agent(
             )
 
     try:
-        searches = await dispatch_tool(
-            [{"platform": platform, "query": query} for platform in platforms],
-            search_branch,
-            monitor,
-            data_mode=task_data_mode,
-        )
+        demands = [{"platform": platform, "query": query} for platform in platforms]
+        if execution_plan is not None and not execution_plan.fork:
+            searches = [await search_branch(demand) for demand in demands]
+        else:
+            searches = await dispatch_tool(
+                demands,
+                search_branch,
+                monitor,
+                data_mode=task_data_mode,
+            )
     except BaseException:
         if not insight_task.done():
             insight_task.cancel()

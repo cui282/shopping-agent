@@ -501,7 +501,7 @@ def _paragraph(text: str, style: Any) -> Any:
 def _pdf_font() -> str:
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfbase.ttfonts import TTFError, TTFont
 
     configured = os.getenv("REPORT_PDF_FONT")
     if not configured:
@@ -520,7 +520,7 @@ def _pdf_font() -> str:
         try:
             pdfmetrics.registerFont(TTFont("ShoppingReportFont", path, subfontIndex=0))
             return "ShoppingReportFont"
-        except (OSError, ValueError, TypeError):
+        except (OSError, TTFError, ValueError, TypeError):
             continue
     pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
     return "STSong-Light"

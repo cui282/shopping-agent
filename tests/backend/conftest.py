@@ -11,9 +11,12 @@ os.environ.setdefault("SANDBOX_MODE", "true")
 os.environ.setdefault("ALLOW_FIXTURE_FALLBACK", "false")
 os.environ.setdefault("STORE_BACKEND", "memory")
 
+from app.agent.dispatch_tool import reset_child_slots
 from app.api import server
 from app.api.connection import manager
 from app.memory.store import InMemoryPreferenceStore
+from app.provider_resilience import reset_provider_resilience
+from app.security import rate_limiter
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +53,10 @@ def isolated_runtime(tmp_path, monkeypatch):
     manager._generations.clear()
     manager._discarded.clear()
     server.preference_store = InMemoryPreferenceStore()
+    server.runtime_control.reset_for_startup()
+    rate_limiter.clear()
+    reset_provider_resilience()
+    reset_child_slots()
     yield
     for record in list(server.records.values()):
         if not record.task.done():

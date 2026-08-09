@@ -88,6 +88,18 @@ def test_sandbox_is_explicit_and_never_production_ready(monkeypatch: pytest.Monk
     assert "Disable SANDBOX_MODE in production" in production.required_actions
 
 
+def test_recall_defaults_to_inference_only_dual_tower(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RECALL_ARCHITECTURE", raising=False)
+    monkeypatch.delenv("TOWER_USER_ENDPOINT", raising=False)
+    assert get_settings().recall_architecture == "dual"
+
+    monkeypatch.setenv("TOWER_USER_ENDPOINT", "https://legacy.example/user")
+    assert get_settings().recall_architecture == "legacy_three"
+
+    monkeypatch.setenv("RECALL_ARCHITECTURE", "dual")
+    assert get_settings().recall_architecture == "dual"
+
+
 def test_fixture_fallback_is_never_production_ready(monkeypatch: pytest.MonkeyPatch) -> None:
     _clear_marketplaces(monkeypatch)
     monkeypatch.setenv("APP_ENV", "production")

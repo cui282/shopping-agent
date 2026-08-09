@@ -31,6 +31,7 @@ ProviderFailureReason = Literal[
     "request_failed",
     "empty_response",
     "sandbox_forbidden",
+    "circuit_open",
 ]
 OfferLinkKind = Literal["product_detail", "marketplace_search"]
 ConstraintStatus = Literal["satisfied", "violated", "unknown"]
@@ -117,6 +118,7 @@ class TaskDeleteResponse(StrictModel):
 class TaskTombstone(StrictModel):
     thread_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")
     user_id: str | None = Field(default=None, max_length=120, pattern=r"^[A-Za-z0-9_-]+$")
+    tenant_id: str = Field(default="default", max_length=160, pattern=r"^[A-Za-z0-9_.:@-]+$")
     generation: int = Field(ge=1)
     deleted_at: str = Field(min_length=1)
 
@@ -214,6 +216,37 @@ class OfferProvenance(StrictModel):
 class MarketplaceDemand(StrictModel):
     platform: Platform
     query: str = Field(min_length=1, max_length=4000)
+
+
+AgentStep = Literal[
+    "planner",
+    "category_insight",
+    "item_search",
+    "recall",
+    "price_compare",
+    "shipping_calc",
+    "item_picker",
+    "shopping_summary",
+]
+
+
+class TaskToolCommand(StrictModel):
+    """A model request to schedule research work; it never contains Product Evidence."""
+
+    platforms: list[Platform] = Field(default_factory=list, max_length=4)
+    parallel: bool = True
+    steps: list[AgentStep] = Field(default_factory=list, max_length=8)
+    reason: str = Field(default="", max_length=1000)
+
+
+class AgentExecutionPlan(StrictModel):
+    """Validated, bounded execution intent produced by the model boundary."""
+
+    platforms: list[Platform] = Field(default_factory=list, max_length=4)
+    fork: bool = False
+    steps: list[AgentStep] = Field(default_factory=list, max_length=8)
+    reason: str = Field(default="", max_length=1000)
+    source: Literal["model", "rules"] = "rules"
 
 
 class ForkEventData(StrictModel):
@@ -630,6 +663,13 @@ class PriceTier(StrictModel):
     notes: str
 
 
+class CategoryEvidence(StrictModel):
+    document_id: str = Field(min_length=1)
+    field: str = Field(min_length=1)
+    summary: str = Field(min_length=1, max_length=4000)
+    score: float = Field(ge=0)
+
+
 class CategoryInsightOutput(StrictModel):
     category: str
     components: list[str]
@@ -637,6 +677,7 @@ class CategoryInsightOutput(StrictModel):
     attributes: list[AttributeDist]
     price_tiers: list[PriceTier]
     confidence: float = Field(ge=0, le=1)
+    evidence: list[CategoryEvidence] = Field(default_factory=list)
     provider: ProviderMetadata
 
 
@@ -978,6 +1019,7 @@ class TaskSnapshot(StrictModel):
     status: Literal["running", "awaiting_clarification", "completed", "cancelled", "error"]
     query: str
     user_id: str
+    tenant_id: str = Field(default="default", max_length=160, pattern=r"^[A-Za-z0-9_.:@-]+$")
     data_mode: DataMode = "live"
     created_at: str
     updated_at: str
@@ -1165,3 +1207,7 @@ class ReadinessResponse(StrictModel):
     recall: RecallReadiness = Field(
         default_factory=lambda: RecallReadiness(mode="deterministic_fallback")
     )
+    release_channel: Literal["stable", "canary"] = "stable"
+    release_id: str = "local"
+    draining: bool = False
+    rollback: bool = False

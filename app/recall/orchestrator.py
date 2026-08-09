@@ -9,6 +9,7 @@ from typing import Any, Protocol
 from app.config import Settings, get_settings
 from app.recall import tower_item, tower_query, tower_user
 from app.recall.ann import FaissANN
+from app.recall.reranker import HTTPReranker, Reranker
 from app.schemas import (
     Candidate,
     CategoryInsightOutput,
@@ -83,6 +84,7 @@ class RecallAdapters:
     item_tower: ItemTower = field(default_factory=HTTPItemTower)
     ann: ANNIndex = field(default_factory=FaissIndex)
     user_tower: UserTower = field(default_factory=HTTPUserTower)
+    reranker: Reranker = field(default_factory=HTTPReranker)
 
 
 def _configured_report(
@@ -193,6 +195,16 @@ def _personalization_report(
     user_input: UserTowerInput | None = None,
 ) -> PersonalizationReport:
     fields, values = _preference_trace(user_input)
+    if settings.recall_architecture == "dual":
+        return PersonalizationReport(
+            configured=False,
+            state="unavailable",
+            input_source="remembered_preference" if values else "none",
+            preference_fields=fields,
+            preference_values=values,
+            reason_code="dual_tower_architecture",
+            reason="Inference-only Query/Item dual-tower recall is active; User Tower is disabled",
+        )
     configured = bool(settings.tower_user_endpoint)
     if not configured:
         return PersonalizationReport(
@@ -605,6 +617,7 @@ class RecallOrchestrator:
         user_scores: dict[int, float],
         ann_hits: list[tuple[float, int]] | None,
         top_k: int,
+        rerank_scores: dict[int, float] | None = None,
     ) -> tuple[list[Candidate], set[RecallChannelName], str | None]:
         category_scores = {
             index: _category_score(candidate, category_insight)
@@ -630,6 +643,7 @@ class RecallOrchestrator:
                 mapped.sort(
                     key=lambda hit: (
                         -hit[0],
+                        -(rerank_scores or {}).get(hit[1], 0.0),
                         -user_scores.get(hit[1], 0.0),
                         -item_scores.get(hit[1], 0.0),
                         -category_scores.get(hit[1], 0.0),
@@ -640,11 +654,12 @@ class RecallOrchestrator:
                 return selected, {"opensearch", "query_tower", "item_tower", "faiss"}, None
             return candidates, set(), "faiss_id_mapping_failed"
 
-        if user_scores or any(score > 0 for score in category_scores.values()):
+        if user_scores or rerank_scores or any(score > 0 for score in category_scores.values()):
             ordered = sorted(
                 range(len(candidates)),
                 key=lambda index: (
                     -user_scores.get(index, 0.0),
+                    -(rerank_scores or {}).get(index, 0.0),
                     -category_scores[index],
                     index,
                 ),
@@ -657,6 +672,31 @@ class RecallOrchestrator:
             )
 
         return candidates, set(), None
+
+    async def _rerank_scores(
+        self,
+        query: str,
+        candidates: list[Candidate],
+        settings: Settings,
+    ) -> dict[int, float]:
+        if not settings.reranker_endpoint or not candidates:
+            return {}
+        try:
+            values = await _await_with_timeout(
+                self.adapters.reranker.score(query, candidates), settings.rerank_timeout_seconds
+            )
+            if not isinstance(values, (list, tuple)) or len(values) != len(candidates):
+                return {}
+            return {
+                index: float(value)
+                for index, value in enumerate(values)
+                if math.isfinite(float(value))
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - optional reranking fails open
+            del exc
+            return {}
 
     async def recall(
         self,
@@ -707,6 +747,7 @@ class RecallOrchestrator:
         item_vectors: dict[int, list[float]] = {}
         user_vector: list[float] | None = None
         user_scores: dict[int, float] = {}
+        rerank_scores: dict[int, float] = {}
         user_failure: str | None = None
         ann_hits: list[tuple[float, int]] | None = None
         ann_failure: str | None = None
@@ -748,6 +789,7 @@ class RecallOrchestrator:
             user_scores, user_failure = self._user_scores(
                 user_vector, item_vectors, len(candidate_pool)
             )
+            rerank_scores = await self._rerank_scores(query, candidate_pool, settings)
             if user_vector is not None and user_failure is not None:
                 personalization = personalization.model_copy(
                     update={
@@ -772,6 +814,8 @@ class RecallOrchestrator:
                     "reason": "ANN backend is disabled; existing deterministic recall path remains active",
                 }
             )
+        if settings.reranker_endpoint and not rerank_scores:
+            rerank_scores = await self._rerank_scores(query, candidate_pool, settings)
         selected, used_channels, selection_failure = self._select(
             candidate_pool,
             category_insight,
@@ -780,6 +824,7 @@ class RecallOrchestrator:
             user_scores,
             ann_hits,
             limit,
+            rerank_scores,
         )
         if selection_failure is not None:
             _set_channel(

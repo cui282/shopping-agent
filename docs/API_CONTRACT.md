@@ -15,6 +15,18 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
 ```
 
 `GET /api/readiness` reports the effective runtime and user-facing capabilities.
+It also exposes `release_channel`, `release_id`, `draining`, and `rollback`; a draining or rollback
+worker reports `task_ready=false` and rejects new task creation with `detail.code=runtime_draining`.
+Canary requests outside `RELEASE_TRAFFIC_PERCENT` are rejected with
+`detail.code=release_not_selected` so an upstream load balancer can route them to the stable release.
+
+When `AUTH_ENABLED=true`, the deployment's trusted identity gateway must inject the configured
+user and tenant headers (defaults `X-Auth-User` and `X-Auth-Tenant`). Task, WebSocket, upload,
+report/file, preference, history, rerun, clarification, relaxation, cancel, and delete reads or
+mutations are scoped to that principal. An optional `AUTH_SHARED_SECRET` validates the injected
+headers with `X-Auth-Signature`; the application does not parse JWTs. `RATE_LIMIT_ENABLED` adds
+process-local protection and should be paired with a shared gateway/Redis limiter in multi-worker
+deployments.
 
 ```json
 {
@@ -96,8 +108,8 @@ This document describes the HTTP and WebSocket contract for version `0.1.x`. Pyd
       "signal": "none",
       "dimension": null,
       "matched_candidate_count": 0,
-      "reason_code": "not_configured",
-      "reason": "TOWER_USER_ENDPOINT is not configured; existing recall path remains active",
+      "reason_code": "dual_tower_architecture",
+      "reason": "Inference-only Query/Item dual-tower recall is active; User Tower is disabled",
       "participated": false
     }
   },
@@ -123,7 +135,7 @@ configuration boundary for the self-hosted runtime and uses this shape:
     "faiss": {"configured": false, "ready": false, "state": "disabled", "reason_code": "backend_disabled", "reason": "..."},
     "query_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "ann_backend_disabled", "reason": "..."},
     "item_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "ann_backend_disabled", "reason": "..."},
-    "user_tower": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+    "user_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "dual_tower_architecture", "reason": "..."},
     "storage": {"configured": true, "ready": true, "state": "ready", "reason_code": "writable", "reason": "..."},
     "image_analysis": {"configured": false, "ready": false, "state": "disabled", "reason_code": "not_configured", "reason": "..."}
   }
@@ -132,7 +144,7 @@ configuration boundary for the self-hosted runtime and uses this shape:
 
 Every component status has `configured`, `ready`, `state` (`ready`, `configured`, `degraded`,
 `unavailable`, or `disabled`), a stable `reason_code`, and a human-readable `reason`. Gateway,
-LLM, Redis, OpenSearch, and tower configuration is intentionally not probed by readiness, so
+LLM, Redis, OpenSearch, and Query/Item tower configuration is intentionally not probed by readiness, so
 `state=configured` and `reason_code=configured_not_probed` are not network-health claims. The
 backend checks local storage writability. Actual provider and recall outcomes are reported by task
 events and terminal result provenance. A capability that is absent or disabled must never be
@@ -145,6 +157,19 @@ not a runtime health claim; terminal result provenance and `tool_end` carry the 
 `degraded`, or `unavailable` state for each channel. Missing optional recall configuration keeps
 the marketplace task runnable when the core runtime is ready, but readiness remains visibly
 degraded and lists the required action.
+
+The default `RECALL_ARCHITECTURE=dual` is an inference-only Query/Item architecture. Query and
+Item vectors are produced by externally hosted inference endpoints and are used only to select or
+order the normalized Product Evidence already returned by a licensed data-provider channel. This
+repository contains no SFT, Agentic RL, embedding training, checkpoint update, or fine-tuning
+workflow. `TOWER_USER_ENDPOINT` is accepted only as a compatibility path for an older deployment
+when `RECALL_ARCHITECTURE` is omitted; setting `RECALL_ARCHITECTURE=dual` always disables it and
+reports `dual_tower_architecture`.
+
+`RERANKER_ENDPOINT` is an optional inference-only adapter. It receives the query and typed
+candidates, and any timeout, invalid response, or provider failure fails open to the existing
+Query/Item or deterministic order. The reranker never creates Product Evidence or changes hard
+constraint, landed-cost, or final ranking decisions.
 
 ## Task lifecycle
 
@@ -331,7 +356,7 @@ persisted and replayable. A degraded reason code means the recent-message fallba
 the task remains intact. Rebuilding a context after restart starts from durable typed state, so
 repeated compression does not accumulate a semantic loss or re-ask a resolved Blocking Ambiguity.
 `tool_end` carries nullable
-`failure_reason` with one of `not_configured`, `request_failed`, `empty_response`, or
+`failure_reason` with one of `not_configured`, `request_failed`, `empty_response`, `circuit_open`, or
 `sandbox_forbidden`; this code is stable for client handling while `fallback_reason` remains a
 human-readable disclosure. Every event in one task uses the same data mode. `mixed` is emitted only
 when explicit developer diagnostics are enabled.
@@ -361,6 +386,7 @@ another task. A still-running first snapshot is not treated as the end of recove
   "status": "running",
   "query": "预算 1200 元，找一款轻便降噪耳机，不要皮革",
   "user_id": "browser-7f3c1f7a",
+  "tenant_id": "default",
   "data_mode": "live",
   "resolved_query": null,
   "resolved_intent": null,
@@ -842,7 +868,7 @@ is nullable and uses the stable provider failure codes above.
     "dimension": 768,
     "matched_candidate_count": 8,
     "reason_code": "ready",
-    "reason": "user tower encoded only explicit Remembered Preference",
+    "reason": "legacy User Tower encoded only explicit Remembered Preference",
     "participated": true
   }
 }
@@ -855,12 +881,15 @@ reported independently with `configured`, `ready`, `degraded`, or `unavailable` 
 `reason_code`; `participated` means that channel affected the current candidate selection or
 ordering. The canonical channel order is OpenSearch, query tower, item tower, then Faiss.
 
-`personalization` is a separate optional report rather than a fifth marketplace channel. Its
-`state=ready` plus `participated=true` means that a typed User tower input changed the recall
-signal. `input_source=remembered_preference` is the only input source that may activate it;
+`personalization` is a separate optional compatibility report rather than a marketplace channel.
+In the default dual architecture it has `state=unavailable`, `reason_code=dual_tower_architecture`,
+and `signal=none`; explicit remembered values may still be listed as the input source for
+transparency, but they are never encoded by a User Tower. In the legacy compatibility architecture,
+`state=ready` plus `participated=true` means that a typed User tower input changed the recall signal.
+`input_source=remembered_preference` is the only input source that may activate that legacy path;
 `preference_fields` and `preference_values` are the explicit saved fields sent to the adapter, and
 the raw embedding is never persisted. `no_saved_preference`, `not_configured`,
-`ann_backend_disabled`, `timeout`, `channel_failed`, `invalid_response`,
+`dual_tower_architecture`, `ann_backend_disabled`, `timeout`, `channel_failed`, `invalid_response`,
 `dimension_mismatch`, and `item_tower_unavailable` are disclosed reason-code examples. Any such
 degradation falls back to the existing recall path without changing Product Evidence.
 
@@ -869,7 +898,8 @@ and ANN scores can select or order candidates only from the marketplace `Product
 returned by the parallel gateway branches. The query/item cosine is a deterministic secondary
 recall signal after the ANN score, including tie-breaking when ANN scores are equal. Recall never
 creates an offer, fills a missing product fact, or changes `Hard Constraint`, `Identity Evidence`,
-`Landed Cost`, or the final deterministic ranking boundary. The user-tower signal is only a
+`Landed Cost`, or the final deterministic ranking boundary. The legacy user-tower signal, when
+explicitly enabled for compatibility, is only a
 deterministic recall/preference-match signal; personalized and non-personalized paths use the same
 Product Evidence and decision engine. The raw `product_evidence` list remains
 complete; only the selected subset is passed into cost calculation and ranking. When recall is
@@ -1137,14 +1167,15 @@ The delete response is also explicit about the backend used:
 }
 ```
 
-`user_id` is an Anonymous Shopper ID storage association key, not a login account, authenticated
-identity, authentication credential, ownership proof, or authorization.
-Public deployments must supply an authenticated identity at a trusted gateway and enforce ownership
-for tasks, preferences, WebSockets, and files.
+Without `AUTH_ENABLED`, `user_id` remains an Anonymous Shopper ID association key and is not an
+authentication credential. Public deployments must enable the trusted gateway identity boundary
+and enforce ownership for tasks, preferences, WebSockets, uploads, reports, and files.
 
-Only an explicit `remember`/`forget` Memory Update changes the Remembered Preference record. The
-User tower receives a typed `UserTowerInput` containing that saved record and the Anonymous Shopper
-ID. It never receives current query text, Task Override values, task outcome, or implicit behavior.
+Only an explicit `remember`/`forget` Memory Update changes the Remembered Preference record. In the
+legacy compatibility architecture, the User tower receives a typed `UserTowerInput` containing
+that saved record and the Anonymous Shopper ID. The default dual architecture does not encode a
+User tower input. Even in compatibility mode, it never receives current query text, Task Override
+values, task outcome, or implicit behavior.
 A `remember` command is scoped to future tasks, so its new value is not encoded for the command's
 own task; a later task reads the persisted value. Deleting a task deletes only task state and cannot
 delete or resurrect the preference record.

@@ -5,6 +5,7 @@ import os
 from typing import Any, Literal, Protocol
 
 from app.config import get_settings
+from app.memory.relevance import rank_relevant_preferences
 from app.schemas import PreferenceBackendStatus
 
 
@@ -17,6 +18,9 @@ class PreferenceStore(Protocol):
     def backend_status(self) -> PreferenceBackendStatus: ...
 
     async def get(self, user_id: str) -> dict[str, Any]: ...
+    async def read_relevant(
+        self, user_id: str, query: str, *, limit: int = 5
+    ) -> dict[str, Any]: ...
     async def put(self, user_id: str, preferences: dict[str, Any]) -> None: ...
     async def delete(self, user_id: str) -> None: ...
 
@@ -42,6 +46,9 @@ class InMemoryPreferenceStore:
 
     async def get(self, user_id: str) -> dict[str, Any]:
         return dict(self._values.get(user_id, {}))
+
+    async def read_relevant(self, user_id: str, query: str, *, limit: int = 5) -> dict[str, Any]:
+        return rank_relevant_preferences(self._values.get(user_id, {}), query, limit=limit)
 
     async def put(self, user_id: str, preferences: dict[str, Any]) -> None:
         self._values[user_id] = dict(preferences)
@@ -74,6 +81,9 @@ class RedisPreferenceStore:
     async def get(self, user_id: str) -> dict[str, Any]:
         value = await self._client.get(self._key(user_id))
         return json.loads(value) if value else {}
+
+    async def read_relevant(self, user_id: str, query: str, *, limit: int = 5) -> dict[str, Any]:
+        return rank_relevant_preferences(await self.get(user_id), query, limit=limit)
 
     async def put(self, user_id: str, preferences: dict[str, Any]) -> None:
         await self._client.set(
@@ -115,6 +125,13 @@ class ResilientPreferenceStore:
         except Exception as exc:  # noqa: BLE001 - runtime backend failure is disclosed
             self._fallback_or_raise("get", exc)
             return await self._fallback.get(user_id)
+
+    async def read_relevant(self, user_id: str, query: str, *, limit: int = 5) -> dict[str, Any]:
+        try:
+            return await self._primary.read_relevant(user_id, query, limit=limit)
+        except Exception as exc:  # noqa: BLE001 - runtime backend failure is disclosed
+            self._fallback_or_raise("read_relevant", exc)
+            return await self._fallback.read_relevant(user_id, query, limit=limit)
 
     async def put(self, user_id: str, preferences: dict[str, Any]) -> None:
         try:

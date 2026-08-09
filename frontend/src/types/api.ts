@@ -15,7 +15,8 @@ export type ProviderFailureReason =
   | "not_configured"
   | "request_failed"
   | "empty_response"
-  | "sandbox_forbidden";
+  | "sandbox_forbidden"
+  | "circuit_open";
 export type OfferLinkKind = "product_detail" | "marketplace_search";
 export type ConstraintStatus = "satisfied" | "violated" | "unknown";
 export type ConstraintKind = "budget" | "material" | "attribute" | "specification";
@@ -708,6 +709,10 @@ export interface ReadinessResponse {
   components?: ReadinessComponents;
   preference_backend?: PreferenceBackendStatus;
   recall?: RecallReadiness;
+  release_channel?: "stable" | "canary";
+  release_id?: string;
+  draining?: boolean;
+  rollback?: boolean;
 }
 
 export interface PreferencesResponse {

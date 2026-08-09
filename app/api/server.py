@@ -30,9 +30,10 @@ from fastapi import (
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app import __version__
+from app.agent.budget import budget_state
 from app.agent.main_agent import (
     BlockingAmbiguityError,
     ProvidersUnavailableError,
@@ -44,12 +45,14 @@ from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.commands import execute_memory_commands
 from app.memory.store import PreferenceStore, PreferenceStoreError, build_preference_store
+from app.observability import get_observer
 from app.recall.orchestrator import recall_readiness
 from app.reports import (
     ReportGenerationError,
     generate_reports,
     report_file_links,
 )
+from app.runtime import RuntimeNotAccepting, get_runtime_control
 from app.schemas import (
     ClarificationCommand,
     ClarificationCommandResponse,
@@ -90,6 +93,13 @@ from app.schemas import (
     TaskStarted,
     TaskTombstone,
     UploadResponse,
+)
+from app.security import (
+    AuthenticationError,
+    Principal,
+    principal_from_headers,
+    rate_limit_key,
+    rate_limiter,
 )
 from app.tools.clarification import InvalidClarificationResponse, normalize_clarification_response
 from app.tools.price_compare import MissingExchangeRatesError
@@ -312,6 +322,7 @@ def _write_tombstone(
     thread_id: str,
     *,
     user_id: str | None,
+    tenant_id: str = "default",
     generation: int,
 ) -> TaskTombstone:
     with _task_mutation_lock(thread_id):
@@ -322,6 +333,7 @@ def _write_tombstone(
         payload = TaskTombstone(
             thread_id=thread_id,
             user_id=user_id,
+            tenant_id=tenant_id,
             generation=max(1, generation),
             deleted_at=_now(),
         )
@@ -513,11 +525,20 @@ records: dict[str, TaskRecord] = {}
 task_locks: dict[str, asyncio.Lock] = {}
 preference_store: PreferenceStore = build_preference_store()
 task_slots = asyncio.Semaphore(get_settings().max_concurrent_tasks)
+runtime_control = get_runtime_control()
+
+
+def _runtime_task_done(_: asyncio.Task[Any]) -> None:
+    runtime_control.finish_task()
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    runtime_control.reset_for_startup()
     yield
+    runtime_control.begin_drain()
+    settings = get_settings()
+    await runtime_control.wait_for_idle(settings.shutdown_grace_seconds)
     pending = [record.task for record in records.values() if not record.task.done()]
     for task in pending:
         task.cancel()
@@ -538,6 +559,69 @@ app.add_middleware(
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,96}$")
 _THREAD_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 _USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
+_AUTH_EXEMPT_PATHS = {"/api/health", "/api/readiness", "/docs", "/openapi.json", "/redoc"}
+
+
+def _request_principal(
+    request: Request | None, declared_user_id: str | None = None
+) -> Principal | None:
+    settings = get_settings()
+    principal = getattr(getattr(request, "state", None), "principal", None)
+    if settings.auth_enabled:
+        if not isinstance(principal, Principal):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "authentication_required",
+                    "message": "Authenticated identity required",
+                },
+            )
+        if declared_user_id is not None and declared_user_id != principal.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "user_identity_mismatch",
+                    "message": "Request user does not match authenticated identity",
+                },
+            )
+        return principal
+    if declared_user_id:
+        return Principal(user_id=declared_user_id)
+    return None
+
+
+def _authorize_snapshot(
+    snapshot: TaskSnapshot,
+    request: Request | None,
+    *,
+    declared_user_id: str | None = None,
+) -> Principal | None:
+    principal = _request_principal(request, declared_user_id)
+    if principal is None or not get_settings().auth_enabled:
+        return None
+    if snapshot.user_id != principal.user_id or snapshot.tenant_id != principal.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "task_not_found", "message": "Task not found"},
+        )
+    return principal
+
+
+def _authorize_tombstone(
+    tombstone: TaskTombstone,
+    request: Request | None,
+    *,
+    declared_user_id: str | None = None,
+) -> Principal | None:
+    principal = _request_principal(request, declared_user_id)
+    if principal is None or not get_settings().auth_enabled:
+        return None
+    if tombstone.user_id != principal.user_id or tombstone.tenant_id != principal.tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "task_not_found", "message": "Task not found"},
+        )
+    return principal
 
 
 @app.middleware("http")
@@ -545,8 +629,49 @@ async def request_id_middleware(request: Request, call_next):
     incoming = request.headers.get("X-Request-ID", "")
     request_id = incoming if _REQUEST_ID_PATTERN.fullmatch(incoming) else uuid.uuid4().hex
     request.state.request_id = request_id
+    settings = get_settings()
+    try:
+        request.state.principal = (
+            None
+            if request.url.path in _AUTH_EXEMPT_PATHS or request.method == "OPTIONS"
+            else principal_from_headers(request.headers)
+        )
+    except AuthenticationError as exc:
+        response = JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": {"code": "authentication_required", "message": str(exc)}},
+        )
+        response.headers["X-Request-ID"] = request_id
+        return response
+    if settings.rate_limit_enabled and request.url.path not in _AUTH_EXEMPT_PATHS:
+        key = rate_limit_key(
+            principal=request.state.principal,
+            client_host=request.client.host if request.client else None,
+        )
+        allowed, retry_after = rate_limiter.allow(
+            key,
+            limit=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
+        if not allowed:
+            response = JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={
+                    "detail": {
+                        "code": "rate_limited",
+                        "message": "Too many requests; retry later",
+                    }
+                },
+            )
+            response.headers["Retry-After"] = str(max(1, round(retry_after)))
+            response.headers["X-Request-ID"] = request_id
+            return response
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    snapshot = runtime_control.snapshot()
+    response.headers["X-Release-Channel"] = snapshot.release_channel
+    response.headers["X-Release-ID"] = snapshot.release_id
+    response.headers["X-Release-Draining"] = str(snapshot.draining).lower()
     return response
 
 
@@ -964,6 +1089,12 @@ async def _execute(
             )
     finally:
         record = records.get(thread_id)
+        get_observer().end_trace(
+            thread_id,
+            status=record.snapshot.status if record is not None else "finished",
+            budget=budget_state(),
+        )
+        record = records.get(thread_id)
         if record is not None and record.owner_handle is owner_handle:
             record.owner_handle = None
         _release_lock_handle(owner_handle)
@@ -1188,12 +1319,14 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
     if personalization is None or personalization.reason_code in {
         "ann_backend_disabled",
         "not_configured",
+        "dual_tower_architecture",
     }:
         user_tower = _readiness_component(
             configured=bool(personalization and personalization.configured),
             ready=False,
             state="disabled"
-            if personalization and personalization.reason_code == "ann_backend_disabled"
+            if personalization
+            and personalization.reason_code in {"ann_backend_disabled", "dual_tower_architecture"}
             else "unavailable",
             reason_code=personalization.reason_code if personalization else "not_configured",
             reason=personalization.reason if personalization else "user tower is not configured",
@@ -1274,7 +1407,17 @@ def _readiness_response() -> ReadinessResponse:
         required_actions.append(
             "Redis preference backend unavailable; local evaluation is non-persistent"
         )
-    task_ready = settings.task_ready and components.storage.ready
+    runtime_snapshot = runtime_control.snapshot()
+    if runtime_snapshot.draining:
+        required_actions.append("Worker is draining; route new tasks to another release")
+    if runtime_snapshot.rollback:
+        required_actions.append("Release is marked for rollback; deploy the previous version")
+    task_ready = (
+        settings.task_ready
+        and components.storage.ready
+        and not runtime_snapshot.draining
+        and not runtime_snapshot.rollback
+    )
     readiness_status = settings.status if task_ready else "not_ready"
     if preference_backend.fallback_reason and readiness_status == "ready":
         readiness_status = "degraded"
@@ -1303,6 +1446,10 @@ def _readiness_response() -> ReadinessResponse:
         components=components,
         preference_backend=preference_backend,
         recall=recall_readiness(settings),
+        release_channel=runtime_snapshot.release_channel,
+        release_id=runtime_snapshot.release_id,
+        draining=runtime_snapshot.draining,
+        rollback=runtime_snapshot.rollback,
     )
 
 
@@ -1317,10 +1464,21 @@ async def readiness() -> ReadinessResponse:
 
 
 @app.post("/api/task", response_model=TaskStarted, status_code=status.HTTP_202_ACCEPTED)
-async def create_task(request: TaskRequest) -> TaskStarted:
+async def create_task(request: TaskRequest, http_request: Request) -> TaskStarted:
     settings = get_settings()
+    principal = _request_principal(http_request, request.user_id)
     readiness_state = _readiness_response()
     if not readiness_state.task_ready:
+        runtime_snapshot = runtime_control.snapshot()
+        if runtime_snapshot.draining or runtime_snapshot.rollback:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "runtime_draining",
+                    "message": "Worker is not accepting new tasks during release transition",
+                },
+                headers={"Retry-After": "5"},
+            )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
@@ -1330,7 +1488,16 @@ async def create_task(request: TaskRequest) -> TaskStarted:
             },
         )
     _prune_records(settings.task_retention_seconds)
-    resolved_uploads = _resolve_uploads(request.upload_ids)
+    resolved_uploads = _resolve_uploads(request.upload_ids, principal=principal)
+    try:
+        runtime_control.begin_task(getattr(http_request.state, "request_id", uuid.uuid4().hex))
+    except RuntimeNotAccepting as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": exc.code, "message": str(exc)},
+            headers={"Retry-After": "5"},
+        ) from exc
+    runtime_task_accepted = True
     thread_id = request.thread_id or f"thread-{uuid.uuid4().hex[:12]}"
     request = request.model_copy(update={"thread_id": thread_id})
     async with _task_lock(thread_id):
@@ -1378,6 +1545,7 @@ async def create_task(request: TaskRequest) -> TaskStarted:
             generation=0,
             query=request.query,
             user_id=request.user_id,
+            tenant_id=principal.tenant_id if principal is not None else "default",
             data_mode=settings.data_mode,
             created_at=created_at,
             updated_at=created_at,
@@ -1410,6 +1578,7 @@ async def create_task(request: TaskRequest) -> TaskStarted:
                 _execute(request, run_id, directory, reference_images, owner_handle=owner_handle),
                 name=f"shopping-agent:{thread_id}",
             )
+            task.add_done_callback(_runtime_task_done)
             records[thread_id] = TaskRecord(
                 run_id=run_id,
                 snapshot=snapshot,
@@ -1418,7 +1587,10 @@ async def create_task(request: TaskRequest) -> TaskStarted:
                 generation=snapshot.generation,
             )
             owner_handle = None
+            runtime_task_accepted = False
         except Exception:
+            if runtime_task_accepted:
+                runtime_control.finish_task()
             _release_lock_handle(owner_handle)
             if not directory_existed:
                 try:
@@ -1435,7 +1607,7 @@ async def create_task(request: TaskRequest) -> TaskStarted:
 
 
 @app.get("/api/task/{thread_id}", response_model=TaskSnapshot)
-async def get_task(thread_id: str) -> TaskSnapshot:
+async def get_task(thread_id: str, http_request: Request) -> TaskSnapshot:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
     async with _task_lock(thread_id):
@@ -1451,9 +1623,11 @@ async def get_task(thread_id: str) -> TaskSnapshot:
                 detail={"code": "task_not_found", "message": "Task not found"},
             )
         if record is not None:
+            _authorize_snapshot(record.snapshot, http_request)
             return record.snapshot
         persisted = _load_snapshot(thread_id)
         if persisted is not None:
+            _authorize_snapshot(persisted, http_request)
             return persisted
     raise HTTPException(
         status_code=404,
@@ -1461,7 +1635,7 @@ async def get_task(thread_id: str) -> TaskSnapshot:
     )
 
 
-def _history_snapshots(user_id: str) -> list[TaskSnapshot]:
+def _history_snapshots(user_id: str, tenant_id: str = "default") -> list[TaskSnapshot]:
     snapshots: dict[str, TaskSnapshot] = {}
     root = output_root()
     for directory in root.iterdir():
@@ -1474,10 +1648,10 @@ def _history_snapshots(user_id: str) -> list[TaskSnapshot]:
         if directory.name in records:
             continue
         snapshot = _load_snapshot(directory.name)
-        if snapshot is not None and snapshot.user_id == user_id:
+        if snapshot is not None and snapshot.user_id == user_id and snapshot.tenant_id == tenant_id:
             snapshots[snapshot.thread_id] = snapshot
     for thread_id, record in records.items():
-        if record.snapshot.user_id == user_id:
+        if record.snapshot.user_id == user_id and record.snapshot.tenant_id == tenant_id:
             snapshots[thread_id] = record.snapshot
     return sorted(
         snapshots.values(),
@@ -1491,8 +1665,9 @@ def _find_idempotent_child(
     command_key: str,
     relation: Literal["rerun", "constraint_relaxation"],
     user_id: str,
+    tenant_id: str = "default",
 ) -> TaskSnapshot | None:
-    for snapshot in _history_snapshots(user_id):
+    for snapshot in _history_snapshots(user_id, tenant_id):
         lineage = snapshot.lineage
         if (
             lineage is not None
@@ -1545,6 +1720,7 @@ def _start_child_task(
         generation=0,
         query=parent.query,
         user_id=parent.user_id,
+        tenant_id=parent.tenant_id,
         data_mode=parent.data_mode,
         created_at=created_at,
         updated_at=created_at,
@@ -1561,6 +1737,16 @@ def _start_child_task(
     owner_handle = _try_acquire_owner_lock(child_thread_id)
     if owner_handle is None:
         raise SnapshotPersistenceError("child task owner lock is already held")
+    try:
+        runtime_control.begin_task(child.run_id)
+    except RuntimeNotAccepting as exc:
+        _release_lock_handle(owner_handle)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": exc.code, "message": str(exc)},
+            headers={"Retry-After": "5"},
+        ) from exc
+    runtime_task_accepted = True
     request = TaskRequest(
         query=parent.query,
         thread_id=child_thread_id,
@@ -1588,6 +1774,7 @@ def _start_child_task(
             ),
             name=f"shopping-agent:{lineage.relation}:{child_thread_id}",
         )
+        task.add_done_callback(_runtime_task_done)
         records[child_thread_id] = TaskRecord(
             run_id=child.run_id,
             snapshot=child,
@@ -1596,7 +1783,10 @@ def _start_child_task(
             generation=child.generation,
         )
         owner_handle = None
+        runtime_task_accepted = False
     except Exception:
+        if runtime_task_accepted:
+            runtime_control.finish_task()
         _release_lock_handle(owner_handle)
         raise
     return child
@@ -1606,16 +1796,28 @@ def _start_child_task(
 @app.get("/api/research/snapshots", response_model=ResearchHistoryResponse)
 async def recent_research(
     user_id: str = Query(..., min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_-]+$"),
+    http_request: Request = None,  # type: ignore[assignment]
 ) -> ResearchHistoryResponse:
-    return ResearchHistoryResponse(snapshots=_history_snapshots(user_id))
+    principal = _request_principal(http_request, user_id)
+    return ResearchHistoryResponse(
+        snapshots=_history_snapshots(
+            principal.user_id if principal is not None else user_id,
+            principal.tenant_id if principal is not None else "default",
+        )
+    )
 
 
 @app.get("/api/research/{thread_id}", response_model=TaskSnapshot)
-async def get_research_snapshot(thread_id: str) -> TaskSnapshot:
-    return await get_task(thread_id)
+async def get_research_snapshot(thread_id: str, http_request: Request) -> TaskSnapshot:
+    return await get_task(thread_id, http_request)
 
 
-def _load_report_snapshot(thread_id: str, *, rebuild_missing: bool = True) -> TaskSnapshot:
+def _load_report_snapshot(
+    thread_id: str,
+    *,
+    rebuild_missing: bool = True,
+    http_request: Request | None = None,
+) -> TaskSnapshot:
     with _task_mutation_lock(thread_id):
         if _task_is_deleted(thread_id):
             raise HTTPException(
@@ -1643,6 +1845,7 @@ def _load_report_snapshot(thread_id: str, *, rebuild_missing: bool = True) -> Ta
                     "message": "Research Snapshot not found",
                 },
             )
+        _authorize_snapshot(snapshot, http_request)
         if snapshot.status != "completed" or snapshot.result is None:
             raise HTTPException(
                 status_code=409,
@@ -1670,10 +1873,10 @@ def _load_report_snapshot(thread_id: str, *, rebuild_missing: bool = True) -> Ta
 
 @app.get("/api/task/{thread_id}/reports", response_model=ReportListResponse)
 @app.get("/api/reports/{thread_id}", response_model=ReportListResponse)
-async def list_reports(thread_id: str) -> ReportListResponse:
+async def list_reports(thread_id: str, http_request: Request) -> ReportListResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
-    snapshot = _load_report_snapshot(thread_id)
+    snapshot = _load_report_snapshot(thread_id, http_request=http_request)
     assert snapshot.result is not None
     return ReportListResponse(
         snapshot_id=snapshot.snapshot_id,
@@ -1683,10 +1886,10 @@ async def list_reports(thread_id: str) -> ReportListResponse:
 
 
 @app.post("/api/task/{thread_id}/reports", response_model=ReportGenerationResponse)
-async def generate_task_reports(thread_id: str) -> ReportGenerationResponse:
+async def generate_task_reports(thread_id: str, http_request: Request) -> ReportGenerationResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
-    snapshot = _load_report_snapshot(thread_id)
+    snapshot = _load_report_snapshot(thread_id, http_request=http_request)
     assert snapshot.result is not None
     return ReportGenerationResponse(
         snapshot_id=snapshot.snapshot_id,
@@ -1700,6 +1903,7 @@ async def generate_task_reports(thread_id: str) -> ReportGenerationResponse:
 async def rerun_task(
     thread_id: str,
     command: RerunCommand,
+    http_request: Request,
 ) -> TaskRerunResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
@@ -1716,6 +1920,7 @@ async def rerun_task(
                     "message": "Research Snapshot not found",
                 },
             )
+        _authorize_snapshot(parent, http_request, declared_user_id=command.user_id)
         if parent.user_id != command.user_id:
             raise HTTPException(
                 status_code=404,
@@ -1730,6 +1935,7 @@ async def rerun_task(
                 command_key,
                 "rerun",
                 command.user_id,
+                parent.tenant_id,
             )
             if existing is not None and existing.lineage is not None:
                 return TaskRerunResponse(
@@ -1771,6 +1977,7 @@ async def rerun_task(
 async def relax_task(
     thread_id: str,
     command: ConstraintRelaxationCommand,
+    http_request: Request,
 ) -> TaskRerunResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
@@ -1802,6 +2009,7 @@ async def relax_task(
                     "message": "Research Snapshot not found",
                 },
             )
+        _authorize_snapshot(parent, http_request, declared_user_id=command.user_id)
         if parent.user_id != command.user_id:
             raise HTTPException(
                 status_code=404,
@@ -1816,6 +2024,7 @@ async def relax_task(
                 command_key,
                 "constraint_relaxation",
                 command.user_id,
+                parent.tenant_id,
             )
             if existing is not None and existing.lineage is not None:
                 return TaskRerunResponse(
@@ -1920,6 +2129,7 @@ def _is_duplicate_clarification_response(
 async def _clarify_task_locked(
     thread_id: str,
     command: ClarificationCommand,
+    http_request: Request | None = None,
 ) -> ClarificationCommandResponse:
     record = records.get(thread_id)
     persisted = _read_persisted_snapshot(thread_id)
@@ -1929,6 +2139,7 @@ async def _clarify_task_locked(
             status_code=404,
             detail={"code": "task_not_found", "message": "Task not found"},
         )
+    _authorize_snapshot(snapshot, http_request)
     if snapshot.status != "awaiting_clarification":
         duplicate_field = _is_duplicate_clarification_response(snapshot, command.response)
         if duplicate_field is not None:
@@ -2031,6 +2242,15 @@ async def _clarify_task_locked(
             user_id=snapshot.user_id,
             upload_ids=[],
         )
+        try:
+            runtime_control.begin_task(record.run_id)
+        except RuntimeNotAccepting as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={"code": exc.code, "message": str(exc)},
+                headers={"Retry-After": "5"},
+            ) from exc
+        runtime_task_accepted = True
         record.task = asyncio.create_task(
             _execute(
                 request,
@@ -2043,7 +2263,11 @@ async def _clarify_task_locked(
             ),
             name=f"shopping-agent:resume:{thread_id}",
         )
+        record.task.add_done_callback(_runtime_task_done)
+        runtime_task_accepted = False
     except Exception:
+        if "runtime_task_accepted" in locals() and runtime_task_accepted:
+            runtime_control.finish_task()
         if created_record:
             records.pop(thread_id, None)
         if record.owner_handle is owner_handle:
@@ -2064,6 +2288,7 @@ async def _clarify_task_locked(
 async def clarify_task(
     thread_id: str,
     command: ClarificationCommand,
+    http_request: Request,
 ) -> ClarificationCommandResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
@@ -2071,19 +2296,21 @@ async def clarify_task(
     async with _task_lock(thread_id):
         directory = _task_directory(thread_id)
         if not directory.is_dir():
-            return await _clarify_task_locked(thread_id, command)
+            return await _clarify_task_locked(thread_id, command, http_request)
         with _command_lock(thread_id):
-            return await _clarify_task_locked(thread_id, command)
+            return await _clarify_task_locked(thread_id, command, http_request)
 
 
 @app.delete("/api/task/{thread_id}", response_model=TaskDeleteResponse)
 async def delete_task(
     thread_id: str,
     command: TaskDeleteCommand,
+    http_request: Request,
 ) -> TaskDeleteResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
     requested_user_id = command.user_id
+    _request_principal(http_request, requested_user_id)
     lock = _task_lock(thread_id)
     try:
         async with lock:
@@ -2096,6 +2323,11 @@ async def delete_task(
             owner_handle = record.owner_handle if record is not None else None
 
             if tombstone is not None:
+                _authorize_tombstone(
+                    tombstone,
+                    http_request,
+                    declared_user_id=requested_user_id,
+                )
                 owner = tombstone.user_id
                 if owner is None or requested_user_id != owner:
                     raise HTTPException(
@@ -2105,6 +2337,11 @@ async def delete_task(
                 if record is not None:
                     record.deleting = True
             elif snapshot is not None:
+                _authorize_snapshot(
+                    snapshot,
+                    http_request,
+                    declared_user_id=requested_user_id,
+                )
                 if requested_user_id != snapshot.user_id:
                     raise HTTPException(
                         status_code=404,
@@ -2116,6 +2353,7 @@ async def delete_task(
                     tombstone = _write_tombstone(
                         thread_id,
                         user_id=snapshot.user_id,
+                        tenant_id=snapshot.tenant_id,
                         generation=snapshot.generation + 1,
                     )
                 except Exception:
@@ -2165,7 +2403,10 @@ async def delete_task(
 
 
 @app.post("/api/task/{thread_id}/cancel")
-async def cancel_task(thread_id: str) -> dict[str, str]:
+async def cancel_task(
+    thread_id: str,
+    http_request: Request = None,  # type: ignore[assignment]
+) -> dict[str, str]:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
     async with _task_lock(thread_id):
@@ -2180,6 +2421,7 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
             if persisted is None:
                 raise HTTPException(status_code=404, detail="task not found")
             if persisted.status not in {"running", "awaiting_clarification"}:
+                _authorize_snapshot(persisted, http_request)
                 return {"status": persisted.status, "thread_id": thread_id}
             if persisted.status == "awaiting_clarification":
                 owner_handle = _try_acquire_owner_lock(thread_id)
@@ -2198,6 +2440,7 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
                     owner_handle=owner_handle,
                 )
                 records[thread_id] = record
+                _authorize_snapshot(record.snapshot, http_request)
                 try:
                     await monitor.emit(
                         thread_id,
@@ -2221,6 +2464,7 @@ async def cancel_task(thread_id: str) -> dict[str, str]:
                 status_code=404,
                 detail={"code": "task_not_found", "message": "Task not found"},
             )
+        _authorize_snapshot(record.snapshot, http_request)
         if record.snapshot.status == "awaiting_clarification":
             owner_handle = record.owner_handle
             if owner_handle is None:
@@ -2272,6 +2516,23 @@ async def task_socket(websocket: WebSocket, thread_id: str) -> None:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         await websocket.close(code=1008, reason="invalid thread id")
         return
+    try:
+        principal = principal_from_headers(websocket.headers)
+    except AuthenticationError:
+        await websocket.close(code=1008, reason="authentication required")
+        return
+    settings = get_settings()
+    if settings.rate_limit_enabled:
+        allowed, _ = rate_limiter.allow(
+            rate_limit_key(
+                principal=principal, client_host=websocket.client.host if websocket.client else None
+            ),
+            limit=settings.rate_limit_requests,
+            window_seconds=settings.rate_limit_window_seconds,
+        )
+        if not allowed:
+            await websocket.close(code=1013, reason="rate limited")
+            return
     async with _task_lock(thread_id):
         if _task_is_deleted(thread_id):
             await websocket.close(code=1008, reason="task not found")
@@ -2281,6 +2542,18 @@ async def task_socket(websocket: WebSocket, thread_id: str) -> None:
             await websocket.close(code=1008, reason="task not found")
             return
         if record is None and _load_snapshot(thread_id) is None:
+            await websocket.close(code=1008, reason="task not found")
+            return
+        snapshot = record.snapshot if record is not None else _load_snapshot(thread_id)
+        if (
+            settings.auth_enabled
+            and principal is not None
+            and (
+                snapshot is None
+                or snapshot.user_id != principal.user_id
+                or snapshot.tenant_id != principal.tenant_id
+            )
+        ):
             await websocket.close(code=1008, reason="task not found")
             return
         connected = await manager.connect(
@@ -2315,6 +2588,7 @@ async def task_socket(websocket: WebSocket, thread_id: str) -> None:
 
 _ALLOWED_UPLOAD_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
 _UPLOAD_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+_UPLOAD_OWNER_SUFFIX = ".owner.json"
 
 
 def _valid_image_signature(content_type: str, content: bytes) -> bool:
@@ -2327,7 +2601,39 @@ def _valid_image_signature(content_type: str, content: bytes) -> bool:
     return False
 
 
-def _resolve_uploads(upload_ids: list[str]) -> list[ResolvedUpload]:
+def _upload_owner_path(upload_id: str) -> Path:
+    if not _UPLOAD_ID_PATTERN.fullmatch(upload_id):
+        raise ValueError("invalid upload id")
+    return safe_join(upload_root(), f"{upload_id}{_UPLOAD_OWNER_SUFFIX}")
+
+
+def _read_upload_owner(upload_id: str) -> tuple[str, str] | None:
+    path = _upload_owner_path(upload_id)
+    if path.is_symlink() or not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    user_id = payload.get("user_id") if isinstance(payload, dict) else None
+    tenant_id = payload.get("tenant_id", "default") if isinstance(payload, dict) else None
+    if not isinstance(user_id, str) or not isinstance(tenant_id, str):
+        return None
+    return user_id, tenant_id
+
+
+def _write_upload_owner(upload_id: str, principal: Principal | None) -> None:
+    if principal is None or not get_settings().auth_enabled:
+        return
+    _atomic_json_write(
+        _upload_owner_path(upload_id),
+        {"user_id": principal.user_id, "tenant_id": principal.tenant_id},
+    )
+
+
+def _resolve_uploads(
+    upload_ids: list[str], *, principal: Principal | None = None
+) -> list[ResolvedUpload]:
     references: list[ResolvedUpload] = []
     root = upload_root().resolve()
     for upload_id in upload_ids:
@@ -2342,6 +2648,13 @@ def _resolve_uploads(upload_ids: list[str]) -> list[ResolvedUpload]:
                 matches.append(path)
         if len(matches) != 1:
             raise HTTPException(status_code=422, detail=f"upload not found: {upload_id}")
+        if get_settings().auth_enabled and principal is not None:
+            owner = _read_upload_owner(upload_id)
+            if owner != (principal.user_id, principal.tenant_id):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail={"code": "upload_not_found", "message": "Upload not found"},
+                )
         path = matches[0]
         content_type = next(
             content_type
@@ -2456,7 +2769,10 @@ def _clone_reference_images(parent: TaskSnapshot, child_thread_id: str) -> list[
 
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload_reference(file: Annotated[UploadFile, File()]) -> UploadResponse:
+async def upload_reference(
+    file: Annotated[UploadFile, File()], http_request: Request
+) -> UploadResponse:
+    principal = _request_principal(http_request)
     content_type = file.content_type or ""
     suffix = _ALLOWED_UPLOAD_TYPES.get(content_type)
     if suffix is None:
@@ -2471,6 +2787,7 @@ async def upload_reference(file: Annotated[UploadFile, File()]) -> UploadRespons
     name = f"{upload_id}{suffix}"
     destination = safe_join(upload_root(), name)
     destination.write_bytes(content)
+    _write_upload_owner(upload_id, principal)
     return UploadResponse(
         upload_id=upload_id,
         name=name,
@@ -2480,7 +2797,7 @@ async def upload_reference(file: Annotated[UploadFile, File()]) -> UploadRespons
 
 
 @app.get("/api/files/{thread_id}/{name}")
-async def download_file(thread_id: str, name: str) -> FileResponse:
+async def download_file(thread_id: str, name: str, http_request: Request) -> FileResponse:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         raise HTTPException(status_code=422, detail="invalid thread id")
     if not name or "/" in name or "\\" in name or name in {".", ".."}:
@@ -2500,6 +2817,7 @@ async def download_file(thread_id: str, name: str) -> FileResponse:
             status_code=404,
             detail={"code": "file_not_found", "message": "File not found"},
         )
+    _authorize_snapshot(original, http_request)
     snapshot = _load_report_snapshot(thread_id)
     assert snapshot.result is not None
     file_ref = next((file for file in snapshot.result.files if file.name == name), None)
@@ -2557,18 +2875,22 @@ def _preference_error(exc: PreferenceStoreError) -> HTTPException:
 
 
 @app.get("/api/preferences/{user_id}", response_model=PreferenceResponse)
-async def get_preferences(user_id: str) -> PreferenceResponse:
+async def get_preferences(user_id: str, http_request: Request) -> PreferenceResponse:
     if not _USER_ID_PATTERN.fullmatch(user_id):
         raise HTTPException(status_code=422, detail="invalid user id")
+    _request_principal(http_request, user_id)
     try:
         return _preference_response(user_id, await preference_store.get(user_id))
     except PreferenceStoreError as exc:
         raise _preference_error(exc) from exc
 
 
-async def _update_preferences(user_id: str, command: MemoryCommand) -> PreferenceResponse:
+async def _update_preferences(
+    user_id: str, command: MemoryCommand, http_request: Request | None = None
+) -> PreferenceResponse:
     if not _USER_ID_PATTERN.fullmatch(user_id):
         raise HTTPException(status_code=422, detail="invalid user id")
+    _request_principal(http_request, user_id)
     try:
         await execute_memory_commands(preference_store, user_id, [command])
         return _preference_response(user_id, await preference_store.get(user_id))
@@ -2577,19 +2899,24 @@ async def _update_preferences(user_id: str, command: MemoryCommand) -> Preferenc
 
 
 @app.put("/api/preferences/{user_id}", response_model=PreferenceResponse)
-async def update_preferences(user_id: str, command: MemoryCommand) -> PreferenceResponse:
-    return await _update_preferences(user_id, command)
+async def update_preferences(
+    user_id: str, command: MemoryCommand, http_request: Request
+) -> PreferenceResponse:
+    return await _update_preferences(user_id, command, http_request)
 
 
 @app.post("/api/preferences/{user_id}/commands", response_model=PreferenceResponse)
-async def apply_preference_command(user_id: str, command: MemoryCommand) -> PreferenceResponse:
-    return await _update_preferences(user_id, command)
+async def apply_preference_command(
+    user_id: str, command: MemoryCommand, http_request: Request
+) -> PreferenceResponse:
+    return await _update_preferences(user_id, command, http_request)
 
 
 @app.delete("/api/preferences/{user_id}", response_model=PreferenceDeleteResponse)
-async def delete_preferences(user_id: str) -> PreferenceDeleteResponse:
+async def delete_preferences(user_id: str, http_request: Request) -> PreferenceDeleteResponse:
     if not _USER_ID_PATTERN.fullmatch(user_id):
         raise HTTPException(status_code=422, detail="invalid user id")
+    _request_principal(http_request, user_id)
     try:
         await preference_store.delete(user_id)
     except PreferenceStoreError as exc:

@@ -15,7 +15,8 @@ Shopping Agent 是一个前后端完整的跨平台购物研究工作台。用�
 - 9 个类型化购物工具，覆盖规划、类目、检索、筛选、价格、到手价和总结
 - AGUI 风格 WebSocket 事件，支持连接前缓冲和断线重连
 - Live Result、Sandbox Result 与 Partial Result；开发诊断模式会额外披露 mixed source
-- Redis 偏好存储与可选 OpenSearch、Faiss、三塔召回扩展边界；未配置能力会在 readiness 中明确标记
+- Redis 偏好存储与可选 OpenSearch、Faiss、推理型 Query/Item 双塔召回；未配置能力会在 readiness 中明确标记
+- LangGraph 只负责受限意图/执行计划，商品证据、价格、资格和排序由确定性工具完成；项目不包含 SFT、Agentic RL 或微调流程
 - Markdown、JSON、PDF 报告和受控文件下载
 - GitHub Actions、Dependabot 和统一的 `make verify` 质量门禁
 
@@ -47,7 +48,7 @@ HTTP 层负责接纳、协调和恢复任务状态。每个任务使用独立 `t
 | 后端 | Python 3.10+、FastAPI、Pydantic、asyncio、Uvicorn |
 | Agent | LangChain、LangGraph、规则工作流、OpenAI-compatible 模型边界 |
 | 前端 | React 19、TypeScript、Vite、Lucide icons、CSS Modules |
-| 检索 | OpenSearch hybrid query、Faiss、三塔 HTTP 扩展点 |
+| 检索 | OpenSearch hybrid query、Faiss、Query/Item 双塔与可选推理 reranker |
 | 记忆 | 进程内 Store 或 Redis TTL Store |
 | 部署 | Docker Compose、Nginx WebSocket 反向代理 |
 
@@ -60,7 +61,7 @@ HTTP 层负责接纳、协调和恢复任务状态。每个任务使用独立 `t
 │   ├── api/            # FastAPI、任务状态和 WebSocket
 │   ├── tools/          # 9 个购物工具与提供方适配器
 │   ├── memory/         # 偏好存储
-│   ├── recall/         # ANN 与三塔客户端
+│   ├── recall/         # ANN、Query/Item 双塔、RAG 与 reranker 客户端
 │   ├── compress/       # 上下文压缩
 │   └── prompt/         # 系统提示词配置
 ├── frontend/           # React 工作台
@@ -161,7 +162,7 @@ make opensearch-init
 
 ### Readiness 与故障排查
 
-`/api/health` 只检查进程存活。`/api/readiness` 额外列出 LLM、每个平台的数据提供商通道、Redis、OpenSearch、Faiss、query/item/user tower、storage 和 image analysis 的 `configured`、`ready`、`state`、`reason_code`、`reason`。网络型依赖采用保守的配置观察：`configured`/`configured_not_probed` 不代表已成功连接；真实任务事件会披露实际 `ok`、`degraded` 或 `unavailable`。只有明确可验证的本地 storage 才会标为 `ready`。`image_analysis=false` 时只能上传和保存文件，界面不提供 Reference Image 搜索入口。
+`/api/health` 只检查进程存活。`/api/readiness` 额外列出 LLM、每个平台的数据提供商通道、Redis、OpenSearch、Faiss、Query/Item 双塔、兼容用 User Tower、storage 和 image analysis 的 `configured`、`ready`、`state`、`reason_code`、`reason`。默认 `RECALL_ARCHITECTURE=dual` 时 User Tower 会明确显示 `dual_tower_architecture`/`disabled`；只有未显式指定架构且旧部署仍提供 `TOWER_USER_ENDPOINT` 时才启用兼容路径。网络型依赖采用保守的配置观察：`configured`/`configured_not_probed` 不代表已成功连接；真实任务事件会披露实际 `ok`、`degraded` 或 `unavailable`。只有明确可验证的本地 storage 才会标为 `ready`。`image_analysis=false` 时只能上传和保存文件，界面不提供 Reference Image 搜索入口。
 
 启动异常时按以下顺序检查：
 
@@ -245,12 +246,19 @@ Shopping Agent 向数据提供商通道 endpoint 发送 `GET` 请求，查询参
 ### 模型与中间件
 
 - `AGENT_MODE=auto` 在 `OPENAI_API_KEY` 和 `LLM_MAIN` 完整时启用模型辅助意图分析，否则使用规则规划。
+- `LLM_REASONING_EFFORT` 可选地把供应商支持的推理档位传给 OpenAI-compatible 模型；`LLM_WIRE_API=responses` 使用 Responses API，`LLM_RESPONSE_STORAGE=false` 映射为 `store=false`。
+- `LLM_LITE`、`LLM_MINIMAL` 和 `LLM_FALLBACK` 是可选的低成本模型路由；未配置时回落到 `LLM_MAIN`，不会改变确定性工具边界。
 - `ALLOW_RULES_FALLBACK=false` 可要求模型配置完整，否则运行状态不可用。
 - `web_search` 提供 Tavily 适配器扩展点，但尚未接入默认研究工作流；仅设置 `TAVILY_API_KEY` 不会改变推荐结果。
 - `STORE_BACKEND=redis` 与 `STORE_REDIS_URL` 启用带 TTL 的持久偏好；生产 readiness 会提示不要使用内存 Store。
 - `OPENSEARCH_URL` 等变量启用类目知识检索；配置后它会进入研究路径并披露请求或语义降级原因。
-- `ANN_BACKEND=faiss`、`ANN_INDEX_PATH`、`TOWER_QUERY_ENDPOINT` 和 `TOWER_ITEM_ENDPOINT` 启用真实候选召回；缺少任一可选 channel 时 readiness 与结果会显示稳定降级原因，并保留确定性 fallback。
-- `TOWER_USER_ENDPOINT` 是可选的 User tower。它只接收与 Anonymous Shopper ID 关联的显式 Remembered Preference；不会从查询、Task Override 或隐式行为学习。结果和报告会披露个性化是否生效、输入来源与降级 reason code；User tower 只能改变候选召回顺序，不能绕过资格、Product Evidence、币种、目的地、到手成本或确定性排名边界。
+- `ANN_BACKEND=faiss`、`ANN_INDEX_PATH`、`TOWER_QUERY_ENDPOINT` 和 `TOWER_ITEM_ENDPOINT` 启用不训练的 Query/Item 双塔候选召回；缺少任一可选 channel 时 readiness 与结果会显示稳定降级原因，并保留确定性 fallback。
+- `RERANKER_ENDPOINT` 可接入已训练好的外部推理 reranker；服务只发送查询和已有 Product Evidence，不在本项目内训练或微调。
+- `TOWER_USER_ENDPOINT` 仅为旧部署保留兼容路径。默认双塔不会调用它，也不会把查询、Task Override 或隐式行为编码成用户向量；显式 Remembered Preference 仍可作为确定性记忆输入并披露来源。
+- Agent loop 默认限制 fork 深度、子分支数量、全局子分支并发、工具调用次数、重复调用和单次工具结果长度；provider 适配器统一使用重试退避、每 provider 并发隔离和 circuit breaker。
+- `AUTH_ENABLED=true` 时，可信 identity gateway 注入 `X-Auth-User`/`X-Auth-Tenant`，任务、WebSocket、上传、报告、文件和偏好都按 tenant ownership 隔离；`RATE_LIMIT_ENABLED=true` 启用进程内保护，多 worker 仍需共享 gateway/Redis 限流。
+- `RELEASE_CHANNEL=canary` 与 `RELEASE_TRAFFIC_PERCENT` 提供确定性灰度 gate，`RELEASE_ROLLBACK=true` 停止接收新任务；收到 SIGTERM 后会等待 `SHUTDOWN_GRACE_SECONDS` 再取消剩余长任务。
+- `LLM_TOKEN_BUDGET` 可启用 main/lite/minimal 路由；LangFuse 配置后主 trace、Fork 子 span 和工具 span 使用 thread/parent thread 形成嵌套链路，仍需额外安装 SDK。
 
 跨币种排序应配置可维护的汇率快照：
 

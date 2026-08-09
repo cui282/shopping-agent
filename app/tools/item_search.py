@@ -6,6 +6,7 @@ from urllib.parse import quote_plus
 import httpx
 
 from app.config import get_settings
+from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
 from app.schemas import (
     Candidate,
     ItemSearchOutput,
@@ -202,13 +203,13 @@ def _parse_live_item(raw: dict[str, object], platform: Platform) -> Candidate | 
     return candidates[0] if candidates else None
 
 
-async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candidate]:
+async def _live_search_once(query: str, platform: Platform, top_k: int) -> list[Candidate]:
     settings = get_settings()
     marketplace = next(item for item in settings.marketplaces if item.name == platform)
     endpoint = marketplace.endpoint
     credential = marketplace.credential
     headers = {"Authorization": f"Bearer {credential}", "X-API-Key": credential}
-    transport = httpx.AsyncHTTPTransport(retries=2)
+    transport = httpx.AsyncHTTPTransport(retries=0)
     async with httpx.AsyncClient(
         timeout=settings.provider_timeout_seconds,
         transport=transport,
@@ -220,6 +221,16 @@ async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candi
         payload = response.json()
     candidates = normalize_gateway_response(payload, platform)[:top_k]
     return [_ensure_channel_provenance(candidate, marketplace.provider) for candidate in candidates]
+
+
+async def _live_search(query: str, platform: Platform, top_k: int) -> list[Candidate]:
+    async def operation() -> list[Candidate]:
+        candidates = await _live_search_once(query, platform, top_k)
+        if not candidates:
+            raise LookupError("provider returned no valid products")
+        return candidates
+
+    return await get_provider_resilience().execute(platform, operation)
 
 
 def _ensure_channel_provenance(candidate: Candidate, provider: str) -> Candidate:
@@ -239,7 +250,7 @@ async def item_search(
 ) -> ItemSearchOutput:
     """Search one marketplace and disclose unavailable or fixture-backed results."""
 
-    del user_id  # Reserved for the three-tower personalized recall channel.
+    del user_id  # Kept for API compatibility; the default dual-tower path has no User Tower.
     top_k = max(1, min(top_k, 50))
     settings = get_settings()
     endpoint_env, credential_env, legacy_endpoint_env, legacy_credential_env = (
@@ -294,6 +305,20 @@ async def item_search(
                         and candidates[0].provenance.provider is not None
                         else marketplace.provider
                     ),
+                ),
+            )
+        except ProviderCircuitOpenError as exc:
+            return ItemSearchOutput(
+                platform=platform,
+                candidates=[],
+                total_recall=0,
+                truncated=False,
+                provider=ProviderMetadata(
+                    source="live",
+                    provider=marketplace.provider,
+                    status="unavailable",
+                    fallback_reason=str(exc),
+                    failure_reason="circuit_open",
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - provider failures become typed metadata

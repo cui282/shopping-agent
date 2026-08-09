@@ -1,1 +1,1 @@
-"""Three-tower recall integration boundaries."""
+"""Inference-only Query/Item dual-tower recall integration boundaries."""

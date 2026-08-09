@@ -5,6 +5,7 @@ import os
 import httpx
 
 from app.config import get_settings
+from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
 from app.schemas import ProviderMetadata, SearchResult, WebSearchOutput
 
 
@@ -24,8 +25,8 @@ async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
             ),
         )
 
-    try:
-        transport = httpx.AsyncHTTPTransport(retries=2)
+    async def request_provider() -> dict[str, object]:
+        transport = httpx.AsyncHTTPTransport(retries=0)
         async with httpx.AsyncClient(
             timeout=get_settings().provider_timeout_seconds,
             transport=transport,
@@ -35,7 +36,22 @@ async def web_search(query: str, max_results: int = 5) -> WebSearchOutput:
                 json={"api_key": api_key, "query": query, "max_results": min(max_results, 10)},
             )
             response.raise_for_status()
-            payload = response.json()
+            return response.json()
+
+    try:
+        payload = await get_provider_resilience().execute("tavily", request_provider)
+    except ProviderCircuitOpenError as exc:
+        return WebSearchOutput(
+            query=query,
+            results=[],
+            provider=ProviderMetadata(
+                source="live",
+                provider="tavily",
+                status="unavailable",
+                fallback_reason=str(exc),
+                failure_reason="circuit_open",
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - web evidence is an optional provider
         return WebSearchOutput(
             query=query,

@@ -123,6 +123,23 @@ def test_three_reports_share_one_typed_snapshot_and_stable_delivery_contract(
     assert all(notice["code"] in pdf_text for notice in json_report["notices"])
 
 
+def test_task_completes_when_ttf_pdf_font_is_unavailable(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reportlab.pdfbase import ttfonts
+
+    def reject_ttf_font(*_args: Any, **_kwargs: Any) -> Any:
+        raise ttfonts.TTFError("font unavailable in container")
+
+    monkeypatch.setattr(ttfonts, "TTFont", reject_ttf_font)
+
+    snapshot = _start_completed(client)
+
+    assert snapshot["status"] == "completed"
+    assert any(file["format"] == "pdf" for file in snapshot["result"]["files"])
+
+
 def _write_temp_pdf(client: TestClient, thread_id: str, file: dict[str, Any]) -> Path:
     destination = Path("/tmp") / f"{thread_id}-report-test.pdf"
     destination.write_bytes(_report_bytes(client, thread_id, file))

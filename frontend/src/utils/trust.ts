@@ -49,6 +49,7 @@ export function providerReasonLabel(reason: string): string {
     request_failed: "平台数据提供商通道请求失败",
     empty_response: "平台数据提供商通道未返回可用商品证据",
     sandbox_forbidden: "生产环境拒绝沙盒数据",
+    circuit_open: "平台暂时熔断",
   };
   if (reason in stableLabels) return stableLabels[reason as ProviderFailureReason];
   if (reason.startsWith("provider request failed:")) {
@@ -171,7 +172,7 @@ export function readinessComponentLabel(name: string): string {
     faiss: "Faiss",
     query_tower: "Query tower",
     item_tower: "Item tower",
-    user_tower: "User tower",
+    user_tower: "User tower（旧部署兼容）",
     storage: "Storage",
     image_analysis: "Image analysis",
   };
@@ -185,5 +186,5 @@ export function personalizationInputSourceLabel(source: string): string {
 }
 
 export function personalizationSignalLabel(signal: string): string {
-  return signal === "user_tower" ? "User tower preference-match signal" : "未使用 user tower signal";
+  return signal === "user_tower" ? "User tower preference-match signal（旧部署兼容）" : "未使用 User tower signal";
 }
