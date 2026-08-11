@@ -12,6 +12,8 @@ const backendPort = Number(process.env.SHOPPING_AGENT_BACKEND_PORT ?? 8000);
 const frontendPort = Number(process.env.SHOPPING_AGENT_FRONTEND_PORT ?? 5173);
 const baseUrl = `http://127.0.0.1:${frontendPort}`;
 const outputDir = resolve(projectRoot, "output/playwright/issue-29");
+const interactionTimeoutMs = Number(process.env.BROWSER_ACCEPTANCE_INTERACTION_TIMEOUT_MS ?? 30_000);
+const scenarioTimeoutMs = Number(process.env.BROWSER_ACCEPTANCE_SCENARIO_TIMEOUT_MS ?? 90_000);
 
 const viewports = [
   { name: "desktop-1280", width: 1280, height: 900 },
@@ -33,6 +35,24 @@ const scenarios = [
 
 function sleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      rejectPromise(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolvePromise(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        rejectPromise(error);
+      },
+    );
+  });
 }
 
 function startProcess(command, args, options) {
@@ -421,6 +441,8 @@ async function main() {
           viewport: { width: viewport.width, height: viewport.height },
           reducedMotion: "reduce",
         });
+        context.setDefaultTimeout(interactionTimeoutMs);
+        context.setDefaultNavigationTimeout(interactionTimeoutMs);
         const page = await context.newPage();
         const consoleErrors = [];
         page.on("console", (message) => {
@@ -428,7 +450,13 @@ async function main() {
         });
         page.on("pageerror", (error) => consoleErrors.push(error.message));
         try {
-          const scenarioScreenshotTaken = await runScenario(page, scenario, viewport);
+          const scenarioLabel = `${viewport.name}/${scenario}`;
+          console.log(`Browser acceptance starting: ${scenarioLabel}`);
+          const scenarioScreenshotTaken = await withTimeout(
+            runScenario(page, scenario, viewport),
+            scenarioTimeoutMs,
+            scenarioLabel,
+          );
           if (!scenarioScreenshotTaken) {
             await page.screenshot({
               path: join(outputDir, `${viewport.name}-${scenario}.png`),
@@ -442,6 +470,7 @@ async function main() {
             throw new Error(`${viewport.name}/${scenario}: console errors ${JSON.stringify(consoleErrors)}`);
           }
           checks += 1;
+          console.log(`Browser acceptance passed: ${scenarioLabel}`);
         } finally {
           await context.close();
         }
