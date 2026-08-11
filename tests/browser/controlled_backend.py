@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import uvicorn
@@ -245,19 +245,62 @@ def score_breakdown() -> dict[str, Any]:
     }
 
 
+def shopping_plan(destination: str = "中国大陆") -> dict[str, Any]:
+    return {
+        "mode": "product_research",
+        "budget_cny": 1200,
+        "category": "降噪耳机",
+        "material_preferences": [],
+        "style_preferences": ["简约"],
+        "hard_constraints": [
+            {
+                "id": "battery_hours:gte:20",
+                "kind": "specification",
+                "field": "battery_hours",
+                "operator": "gte",
+                "value": 20,
+                "unit": "小时",
+                "label": "续航至少 20 小时",
+            }
+        ],
+        "soft_preferences": ["佩戴舒适"],
+        "destination": destination,
+        "ranking_profile": {
+            "priority_order": [
+                "landed_cost",
+                "preference_match",
+                "evidence_quality",
+                "delivery_time",
+            ],
+            "explicit": False,
+        },
+        "working_assumptions": [],
+        "source": "computed",
+    }
+
+
 def product(source: str = "fixture", platform: str = "amazon") -> dict[str, Any]:
+    observed_at = now()
+    expires_at = (
+        (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    )
+    sandbox = source == "fixture"
     return {
         "item_id": f"controlled-{platform}",
         "platform": platform,
         "title": "Controlled acceptance headphones with a deliberately long title for wrapping",
-        "price": 799,
-        "currency": "CNY",
-        "price_cny": 799,
-        "shipping_cny": 0,
-        "duty_cny": 0,
+        "price": 100,
+        "currency": "USD",
+        "price_cny": 700,
+        "shipping_cny": 70,
+        "insurance_cny": 0,
+        "duty_cny": None,
+        "import_vat_cny": None,
+        "consumption_tax_cny": None,
+        "import_tax_cny": 29,
         "landed_cny": 799,
         "eta_days": 5,
-        "duty_tier": "免征",
+        "duty_tier": "标准",
         "rating": 4.7,
         "sales": 2384,
         "image_url": None,
@@ -272,9 +315,84 @@ def product(source: str = "fixture", platform: str = "amazon") -> dict[str, Any]
         "availability": "in_stock",
         "retrieved_at": "2026-08-07T00:00:00Z",
         "provenance": {
-            "kind": "sandbox_fixture",
+            "kind": "sandbox_fixture" if sandbox else "marketplace_gateway",
             "provider": "controlled-acceptance-backend",
             "upstream_source": "local acceptance fixture",
+        },
+        "price_conversion": {
+            "source_currency": "USD",
+            "target_currency": "CNY",
+            "rate_to_cny": 7,
+            "purpose": "comparison_estimate",
+            "rate_type": "sandbox_fixture" if sandbox else "provider_quote",
+            "markup_status": "excluded",
+            "markup_bps": None,
+            "provider": "controlled-fx-feed",
+            "source_reference": "controlled-price-fx-quote",
+            "observed_at": observed_at,
+            "expires_at": None if sandbox else expires_at,
+        },
+        "shipping_quote": {
+            "quote_type": "sandbox_fixture" if sandbox else "carrier_quote",
+            "currency": "USD",
+            "total_amount": 10,
+            "base_amount": 8,
+            "surcharge_amount": 2,
+            "discount_amount": 0,
+            "actual_weight_kg": 0.42,
+            "dimensional_weight_kg": 0.58,
+            "chargeable_weight_kg": 0.58,
+            "length_cm": 24,
+            "width_cm": 18,
+            "height_cm": 12,
+            "dimensional_divisor": 6000,
+            "origin_country": "US",
+            "destination_country": "CN",
+            "service_name": "Controlled Tracked Air",
+            "eta_min_days": 4,
+            "eta_max_days": 5,
+            "provider": "controlled-logistics-feed",
+            "source_reference": "controlled-shipping-quote",
+            "observed_at": observed_at,
+            "expires_at": None if sandbox else expires_at,
+            "currency_conversion": {
+                "source_currency": "USD",
+                "target_currency": "CNY",
+                "rate_to_cny": 7,
+                "purpose": "comparison_estimate",
+                "rate_type": "sandbox_fixture" if sandbox else "provider_quote",
+                "markup_status": "excluded",
+                "markup_bps": None,
+                "provider": "controlled-fx-feed",
+                "source_reference": "controlled-shipping-fx-quote",
+                "observed_at": observed_at,
+                "expires_at": None if sandbox else expires_at,
+            },
+        },
+        "customs": {
+            "hs_code": "8518300000",
+            "country_of_origin": "CN",
+            "destination_country": "CN",
+            "ship_from_country": "US",
+            "import_regime": "seller_collected",
+            "rate_type": "provider_quote",
+            "tariff_rate": None,
+            "import_vat_rate": None,
+            "consumption_tax_rate": 0,
+            "personal_postal_tax_rate": None,
+            "personal_postal_assessed_value_cny": None,
+            "personal_postal_total_value_cny": None,
+            "personal_postal_value_limit_cny": None,
+            "personal_postal_tax_exemption_threshold_cny": None,
+            "personal_postal_single_indivisible_item": None,
+            "personal_postal_eligible": None,
+            "seller_collected_tax_cny": 29,
+            "insurance_cny": 0,
+            "valuation": None,
+            "cross_border_ecommerce_eligible": None,
+            "provider": "controlled-customs-feed",
+            "source_reference": "controlled-checkout-tax-quote",
+            "effective_date": "2026-08-11",
         },
         "link_kind": "marketplace_search",
         "identity_evidence": {
@@ -283,12 +401,14 @@ def product(source: str = "fixture", platform: str = "amazon") -> dict[str, Any]
             "matched_fields": [],
             "missing_fields": [],
             "conflicting_fields": [],
-            "explanation": "Product Research 不要求跨平台同款证明。",
+            "explanation": "不同商品推荐不要求跨平台同款证明。",
         },
         "shipping_estimate": {
             "estimated": True,
-            "source": "controlled acceptance",
-            "calculation_basis": "fixture",
+            "source": "controlled-logistics-feed",
+            "calculation_basis": (
+                "Controlled Tracked Air；USD 10.00；计费重量 0.58kg；时效 4-5 天"
+            ),
         },
         "duty_estimate": {
             "estimated": True,
@@ -297,8 +417,44 @@ def product(source: str = "fixture", platform: str = "amazon") -> dict[str, Any]
         },
         "delivery_estimate": {
             "estimated": True,
-            "source": "controlled acceptance",
-            "calculation_basis": "fixture",
+            "source": "controlled-logistics-feed",
+            "calculation_basis": "Controlled Tracked Air 报价时效 4-5 天；排序采用上限",
+        },
+        "tax_estimate": {
+            "estimated": True,
+            "source": "controlled-customs-feed",
+            "calculation_basis": "使用受控结算页已代收进口税费报价",
+        },
+        "tax_breakdown": {
+            "import_regime": "seller_collected",
+            "calculation_method": "provider_quote",
+            "hs_code": "8518300000",
+            "country_of_origin": "CN",
+            "destination_country": "CN",
+            "customs_value_cny": 770,
+            "customs_valuation": None,
+            "rate_type": "provider_quote",
+            "tariff_rate": None,
+            "import_vat_rate": None,
+            "consumption_tax_rate": 0,
+            "personal_postal_tax_rate": None,
+            "personal_postal_assessed_value_cny": None,
+            "personal_postal_total_value_cny": None,
+            "personal_postal_value_limit_cny": None,
+            "personal_postal_tax_exemption_threshold_cny": None,
+            "personal_postal_single_indivisible_item": None,
+            "policy_factor": 1,
+            "tariff_cny": None,
+            "import_vat_cny": None,
+            "consumption_tax_cny": None,
+            "tax_before_exemption_cny": None,
+            "tax_exemption_cny": 0,
+            "tax_exemption_reason": None,
+            "total_import_tax_cny": 29,
+            "provider": "controlled-customs-feed",
+            "source_reference": "controlled-checkout-tax-quote",
+            "effective_date": "2026-08-11",
+            "calculation_basis": "使用受控结算页已代收进口税费报价",
         },
         "reason": "受控后端返回的可追溯验收候选。",
         "rank": 1,
@@ -326,7 +482,7 @@ def result_for(task: dict[str, Any], scenario: str) -> dict[str, Any]:
     comparison = [item]
     unavailable: list[str] = []
     result_kind = "sandbox"
-    final_answer = "受控后端已完成一次 Shopping Agent 研究，结果仅用于浏览器验收。"
+    final_answer = "受控后端已完成一次购物研究，结果仅用于浏览器验收。"
 
     if scenario == "partial":
         providers["ebay"] = {
@@ -338,7 +494,7 @@ def result_for(task: dict[str, Any], scenario: str) -> dict[str, Any]:
         }
         unavailable = ["ebay"]
         result_kind = "partial"
-        final_answer = "部分平台返回了 Product Evidence；另一个平台以稳定失败原因标记为不可用。"
+        final_answer = "部分平台返回了商品证据；另一个平台以稳定失败原因标记为不可用。"
     elif scenario == "empty":
         providers = {
             name: {
@@ -355,7 +511,7 @@ def result_for(task: dict[str, Any], scenario: str) -> dict[str, Any]:
         comparison = []
         unavailable = list(MARKETPLACES)
         result_kind = "partial"
-        final_answer = "受控后端模拟了平台没有返回 Product Evidence 的空结果。"
+        final_answer = "受控后端模拟了平台没有返回商品证据的空结果。"
     elif scenario == "no-match":
         final_answer = "受控后端返回了候选，但它们没有同时满足全部硬性条件。"
         item["constraint_evaluations"] = [
@@ -385,13 +541,13 @@ def result_for(task: dict[str, Any], scenario: str) -> dict[str, Any]:
             "failure_reason": "request_failed",
         }
         result_kind = "partial"
-        final_answer = "开发诊断模式下混合了受控 live 标记和 fixture 标记；这不是普通用户结果。"
+        final_answer = "开发诊断模式下混合了受控实时标记和演示标记；这不是普通用户结果。"
 
     return {
         "thread_id": task["thread_id"],
         "final_answer": final_answer,
         "resolved_query": task["query"],
-        "resolved_intent": None,
+        "resolved_intent": task["resolved_intent"],
         "applied_preferences": {
             "material_preferences": [],
             "style_preferences": [],
@@ -409,14 +565,22 @@ def result_for(task: dict[str, Any], scenario: str) -> dict[str, Any]:
         "files": [],
         "provider_mode": "mixed" if mixed else "sandbox",
         "providers": providers,
-        "calculation_notice": "运费、关税和配送时效均为受控估算；这不是 checkout guarantee。",
+        "calculation_notice": (
+            "比较货币为 CNY；商品与运费使用逐报价换算证据；"
+            "最终支付、运输与税费以平台、发卡行、承运商及海关核定为准。"
+        ),
         "exchange_rate": {
             "base_currency": "CNY",
-            "source": "controlled acceptance",
-            "effective_date": "2026-08-07",
+            "source": "offer-level-quotes",
+            "effective_date": now(),
             "calculation_basis": "original_amount * rate_to_cny",
+            "providers": ["controlled-fx-feed"],
+            "quote_count": 1,
+            "settlement_notice": "人民币金额仅用于受控比较，最终支付以结算页和发卡行为准。",
         },
         "calculation_exclusions": [],
+        "shipping_exclusions": [],
+        "tax_exclusions": [],
         "ranking_profile": {
             "priority_order": [
                 "landed_cost",
@@ -456,7 +620,7 @@ def snapshot(task: dict[str, Any]) -> dict[str, Any]:
         "resolved_query": task.get("result", {}).get("resolved_query")
         if task.get("result")
         else None,
-        "resolved_intent": None,
+        "resolved_intent": task.get("resolved_intent"),
         "mode": "product_research" if task.get("result") else None,
         "working_assumptions": [],
         "applied_preferences": {
@@ -550,6 +714,7 @@ async def create_task(payload: dict[str, Any]) -> dict[str, Any]:
         "clarification": None,
         "clarification_answers": {},
         "result": None,
+        "resolved_intent": None,
         "error_code": None,
         "error": None,
     }
@@ -560,6 +725,27 @@ async def create_task(payload: dict[str, Any]) -> dict[str, Any]:
         "研究任务已创建",
         {"thread_id": thread_id, "reference_images": [], "data_mode": task["data_mode"]},
     )
+
+    if scenario != "awaiting-clarification":
+        task["resolved_intent"] = shopping_plan()
+        append(
+            task,
+            "intent_resolved",
+            "已理解本次购物需求",
+            {
+                "resolved_query": query,
+                "resolved_intent": task["resolved_intent"],
+                "applied_preferences": {
+                    "material_preferences": [],
+                    "style_preferences": [],
+                    "soft_preferences": [],
+                    "avoid": [],
+                },
+                "task_overrides": [],
+                "constraint_relaxations": [],
+                "data_mode": task["data_mode"],
+            },
+        )
 
     if scenario == "awaiting-clarification":
         task["status"] = "awaiting_clarification"
@@ -646,6 +832,25 @@ async def clarify_task(thread_id: str, payload: dict[str, Any]) -> dict[str, Any
             "reason_code": prompt["reason_code"],
             "response": response,
             "resolved_value": response,
+            "data_mode": task["data_mode"],
+        },
+    )
+    task["resolved_intent"] = shopping_plan(response)
+    append(
+        task,
+        "intent_resolved",
+        "已理解本次购物需求",
+        {
+            "resolved_query": task["query"],
+            "resolved_intent": task["resolved_intent"],
+            "applied_preferences": {
+                "material_preferences": [],
+                "style_preferences": [],
+                "soft_preferences": [],
+                "avoid": [],
+            },
+            "task_overrides": [],
+            "constraint_relaxations": [],
             "data_mode": task["data_mode"],
         },
     )

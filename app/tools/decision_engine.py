@@ -352,11 +352,19 @@ def _score_breakdown(
 
 def _recommendation_reason(offer: LandedCost, profile: RankingProfile) -> str:
     priorities = "、".join(_RANKING_LABELS[dimension] for dimension in profile.priority_order)
+    import_tax = offer.import_tax_cny
+    if import_tax is None:
+        import_tax = offer.duty_cny or 0
+    tax_source = (
+        offer.tax_estimate.source
+        if offer.tax_estimate.source != "unspecified"
+        else offer.duty_estimate.source
+    )
     return (
         f"全部硬性条件均已通过 Product Evidence 或确定性计算验证；按{priorities}排序。"
         f"商品价为 {offer.currency} {offer.price:.2f}（折合 CNY {offer.price_cny:.2f}），"
         f"运费 ¥{offer.shipping_cny:.2f}（估算，来源：{offer.shipping_estimate.source}），"
-        f"关税 ¥{offer.duty_cny:.2f}（估算，来源：{offer.duty_estimate.source}），"
+        f"进口税费 ¥{import_tax:.2f}（估算，来源：{tax_source}），"
         f"到手约 ¥{offer.landed_cny:.2f}；配送 {offer.eta_days} 天"
         f"（估算，来源：{offer.delivery_estimate.source}）。"
     )
@@ -408,7 +416,7 @@ def decision_engine(
                     "identity_evidence": IdentityEvidence(
                         decision="not_required",
                         basis="not_required",
-                        explanation="Product Research 可以比较不同 Product Variant，不要求同款证明。",
+                        explanation="不同商品推荐可以比较不同商品版本，不要求同款证明。",
                     )
                 }
             )

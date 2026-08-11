@@ -89,6 +89,6 @@ describe("SessionRail", () => {
       </MemoryRouter>,
     );
 
-    expect(markup).toContain("Research Rerun · 第 1 代");
+    expect(markup).toContain("重新研究 · 第 1 代");
   });
 });

@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { ReadinessResponse } from "../types/api";
-import { providerModeLabel, providerReasonLabel, requiredActionLabel, taskDisabledReason } from "./trust";
+import {
+  providerModeLabel,
+  providerReasonLabel,
+  recallFallbackReasonLabel,
+  requiredActionLabel,
+  taskDisabledReason,
+} from "./trust";
 
 const ready: ReadinessResponse = {
   status: "ready",
@@ -25,8 +31,8 @@ describe("trust state", () => {
   });
 
   it("uses an explicit unverified source state", () => {
-    expect(providerModeLabel("unverified")).toBe("Result source pending");
-    expect(providerModeLabel("sandbox")).toBe("Sandbox Result");
+    expect(providerModeLabel("unverified")).toBe("数据来源待确认");
+    expect(providerModeLabel("sandbox")).toBe("演示数据");
     expect(providerReasonLabel("SANDBOX_MODE is enabled")).toBe("已显式启用沙盒模式");
   });
 
@@ -36,5 +42,11 @@ describe("trust state", () => {
         "Configure at least one data-provider marketplace channel endpoint/credential pair, or explicitly enable SANDBOX_MODE for local testing",
       ),
     ).toBe("至少配置一个数据提供商平台通道，本地验证也可显式启用 SANDBOX_MODE");
+  });
+
+  it("keeps recall fallback codes out of customer-facing copy", () => {
+    const label = recallFallbackReasonLabel("optional_recall_unavailable");
+    expect(label).toContain("基础召回");
+    expect(label).not.toContain("optional_recall_unavailable");
   });
 });

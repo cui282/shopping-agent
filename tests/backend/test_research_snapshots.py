@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import time
 from typing import Any
 
@@ -12,8 +11,6 @@ from pydantic import ValidationError
 
 from app.api import server
 from app.schemas import Candidate, ShoppingSummaryOutput, TaskSnapshot
-
-price_compare_module = importlib.import_module("app.tools.price_compare")
 
 
 def _wait_for_terminal(client: TestClient, thread_id: str, timeout: float = 5) -> dict[str, Any]:
@@ -64,7 +61,7 @@ def test_completed_snapshot_persists_full_contract_and_reopen_is_read_only(
     assert any(event["event"] == "intent_resolved" for event in snapshot["events"])
 
     before = client.get(f"/api/task/{snapshot['thread_id']}").json()
-    calls = {"gateway": 0, "recall": 0, "fx": 0}
+    calls = {"gateway": 0, "recall": 0}
 
     async def no_gateway(*_args, **_kwargs):
         calls["gateway"] += 1
@@ -74,19 +71,14 @@ def test_completed_snapshot_persists_full_contract_and_reopen_is_read_only(
         calls["recall"] += 1
         raise AssertionError("opening a Research Snapshot must not recall preferences")
 
-    def no_rates(*_args, **_kwargs):
-        calls["fx"] += 1
-        raise AssertionError("opening a Research Snapshot must not refresh exchange rates")
-
     monkeypatch.setattr("app.api.server.run_agent", no_gateway)
     monkeypatch.setattr("app.memory.store.InMemoryPreferenceStore.get", no_recall)
-    monkeypatch.setattr(price_compare_module, "_rates", no_rates)
 
     reopened = client.get(f"/api/research/{snapshot['thread_id']}").json()
     listed = client.get("/api/research", params={"user_id": snapshot["user_id"]}).json()
     assert reopened == before
     assert any(item["thread_id"] == snapshot["thread_id"] for item in listed["snapshots"])
-    assert calls == {"gateway": 0, "recall": 0, "fx": 0}
+    assert calls == {"gateway": 0, "recall": 0}
 
 
 def test_reopening_completed_snapshot_does_not_write_legacy_migrations(

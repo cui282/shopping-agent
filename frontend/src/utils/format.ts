@@ -54,7 +54,7 @@ export function eventMeta(event: MonitorEvent): { label: string; detail: string;
     web_search: "网页检索",
     item_search: "商品检索",
     price_compare: "价格换算",
-    shipping_calc: "运税估算",
+    shipping_calc: "到手成本核算",
     item_picker: "候选筛选",
     recall: "候选召回",
     shopping_summary: "建议汇总",

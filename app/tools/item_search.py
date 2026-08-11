@@ -9,11 +9,16 @@ from app.config import get_settings
 from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
 from app.schemas import (
     Candidate,
+    CurrencyConversionEvidence,
+    CustomsExchangeRateEvidence,
+    CustomsTaxEvidence,
+    CustomsValuationEvidence,
     ItemSearchOutput,
     OfferProvenance,
     Platform,
     ProviderFailureReason,
     ProviderMetadata,
+    ShippingQuoteEvidence,
 )
 from app.tools.marketplace_gateway import normalize_gateway_response
 from app.tools.query_parser import extract_budget_cny, extract_product_subject
@@ -80,6 +85,23 @@ _CATEGORY_BASE_CNY = {
     "运动鞋": 620,
     "手机": 4200,
     "商品": 800,
+}
+
+_SANDBOX_HS_CODES = {
+    "耳机": "8518300000",
+    "咖啡机": "8516713000",
+    "背包": "4202920000",
+    "键盘": "8471607100",
+    "运动鞋": "6404110000",
+    "手机": "8517130000",
+    "商品": "0000000000",
+}
+
+_SANDBOX_SHIPPING = {
+    "amazon": (85.0, "US", "Sandbox international priority", 8, 12),
+    "shopee": (35.0, "SG", "Sandbox cross-border standard", 7, 10),
+    "aliexpress": (20.0, "CN", "Sandbox consolidated delivery", 18, 25),
+    "ebay": (90.0, "US", "Sandbox international tracked", 10, 14),
 }
 
 _CATEGORY_IMAGES = {
@@ -173,12 +195,26 @@ def _fixture_candidates(query: str, platform: Platform, top_k: int) -> list[Cand
     items: list[Candidate] = []
     for index, (variant, multiplier, attributes, rating, sales) in enumerate(variants):
         item_id = f"fixture-{platform}-{subject_hash}-{index + 1}"
+        price_conversion = CurrencyConversionEvidence(
+            source_currency=info["currency"],
+            rate_to_cny=fx,
+            rate_type="sandbox_fixture",
+            markup_status="excluded",
+            provider="deterministic-sandbox-fx-fixture",
+            source_reference="sandbox fixture; not a payment or settlement rate",
+            observed_at="2026-01-01T00:00:00Z",
+        )
+        shipping_cny, origin_country, service_name, eta_min, eta_max = _SANDBOX_SHIPPING[platform]
+        shipping_amount = round(shipping_cny / fx, 2)
+        weight = float(attributes.get("weight_kg", 0.5))
+        price_amount = round(base_cny * multiplier / fx, 2)
+        goods_value_cny = round(price_amount * fx, 2)
         items.append(
             Candidate(
                 item_id=item_id,
                 platform=platform,
                 title=f"{info['label']} {variant}{subject}",
-                price=round(base_cny * multiplier / fx, 2),
+                price=price_amount,
                 currency=info["currency"],
                 rating=rating,
                 sales=sales,
@@ -190,6 +226,66 @@ def _fixture_candidates(query: str, platform: Platform, top_k: int) -> list[Cand
                     kind="sandbox_fixture",
                     provider=f"{platform}-sandbox",
                     upstream_source="deterministic-fixture-catalog",
+                ),
+                price_conversion=price_conversion,
+                shipping_quote=ShippingQuoteEvidence(
+                    quote_type="sandbox_fixture",
+                    currency=info["currency"],
+                    total_amount=shipping_amount,
+                    base_amount=shipping_amount,
+                    actual_weight_kg=weight,
+                    chargeable_weight_kg=weight,
+                    origin_country=origin_country,
+                    destination_country="CN",
+                    service_name=service_name,
+                    eta_min_days=eta_min,
+                    eta_max_days=eta_max,
+                    provider="deterministic-sandbox-shipping-fixture",
+                    source_reference="sandbox fixture; not a carrier or checkout quote",
+                    observed_at="2026-01-01T00:00:00Z",
+                    currency_conversion=CurrencyConversionEvidence(
+                        source_currency=info["currency"],
+                        rate_to_cny=fx,
+                        rate_type="sandbox_fixture",
+                        markup_status="excluded",
+                        provider="deterministic-sandbox-fx-fixture",
+                        source_reference="sandbox shipping conversion fixture",
+                        observed_at="2026-01-01T00:00:00Z",
+                    ),
+                ),
+                customs=CustomsTaxEvidence(
+                    hs_code=_SANDBOX_HS_CODES.get(subject, "0000000000"),
+                    country_of_origin="CN",
+                    destination_country="CN",
+                    import_regime="cross_border_ecommerce",
+                    rate_type="cross_border_policy",
+                    tariff_rate=0,
+                    import_vat_rate=0.13,
+                    consumption_tax_rate=0,
+                    valuation=CustomsValuationEvidence(
+                        goods_value_original=price_amount,
+                        goods_currency=info["currency"],
+                        goods_value_cny=goods_value_cny,
+                        international_shipping_cny=shipping_cny,
+                        insurance_cny=0,
+                        customs_value_cny=round(goods_value_cny + shipping_cny, 2),
+                        customs_conversion=CustomsExchangeRateEvidence(
+                            source_currency=info["currency"],
+                            rate_to_cny=fx,
+                            declaration_date="2026-01-15",
+                            assessment_month="2026-01",
+                            provider="deterministic-sandbox-customs-fx-fixture",
+                            source_reference=(
+                                "sandbox monthly customs FX fixture; not an official customs rate"
+                            ),
+                        ),
+                        provider="deterministic-sandbox-customs-valuation-fixture",
+                        source_reference="sandbox CIF fixture; not a customs assessment",
+                    ),
+                    cross_border_ecommerce_eligible=True,
+                    provider="deterministic-sandbox-tax-fixture",
+                    source_reference="sandbox fixture; not a legal tariff classification",
+                    effective_date="2026-01-01",
                 ),
                 link_kind="marketplace_search",
                 source="fixture",

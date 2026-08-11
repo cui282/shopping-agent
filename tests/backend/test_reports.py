@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import json
 import time
 from pathlib import Path
@@ -13,8 +12,10 @@ from app.agent import main_agent
 from app.api import server
 from app.schemas import (
     Candidate,
+    CustomsTaxEvidence,
     ItemSearchOutput,
     ProviderMetadata,
+    ShippingQuoteEvidence,
     TaskSnapshot,
 )
 
@@ -99,11 +100,33 @@ def test_three_reports_share_one_typed_snapshot_and_stable_delivery_contract(
     assert json_report["ranking_profile"] == result["ranking_profile"]
     assert json_report["product_evidence"] == result["product_evidence"]
     assert json_report["recommendations"] == result["recommendations"]
+    assert json_report["recommendations"][0]["tax_breakdown"]["hs_code"]
+    assert json_report["recommendations"][0]["tax_breakdown"]["country_of_origin"]
+    assert json_report["recommendations"][0]["price_conversion"]["rate_to_cny"] > 0
+    assert json_report["recommendations"][0]["shipping_quote"]["chargeable_weight_kg"] > 0
+    assert json_report["recommendations"][0]["customs"]["valuation"]["customs_value_cny"] > 0
     assert json_report["notices"]
-    assert all(notice["message"] in markdown for notice in json_report["notices"])
-    assert "Working Assumption" in markdown
-    assert "Ranking Profile" in markdown
-    assert "不是 checkout guarantee" in markdown
+    assert "# Shopping Agent 购物研究报告" in markdown
+    assert "## 购买建议" in markdown
+    assert "## 推荐结果与到手价比较" in markdown
+    assert "## 推荐商品详情" in markdown
+    assert "预估进口税费" in markdown
+    assert "HS Code" in markdown
+    assert "原产地" in markdown
+    assert "换算依据" in markdown
+    assert "运费依据" in markdown
+    assert "计费重量" in markdown
+    assert "最终支付" in markdown
+    assert "## 工作假设" in markdown
+    assert "## 数据来源与价格说明" in markdown
+    assert "请以平台结算页、发卡行、承运商及海关核定为准" in markdown
+    assert "```json" not in markdown
+    assert "reason_code" not in markdown
+    assert "item_id" not in markdown
+    assert "Product Evidence" not in markdown
+    assert "Research Snapshot" not in markdown
+    assert "checkout guarantee" not in markdown
+    assert len(markdown) < 12_000
 
     for file in files:
         response = client.get(f"/api/files/{snapshot['thread_id']}/{file['name']}")
@@ -118,9 +141,19 @@ def test_three_reports_share_one_typed_snapshot_and_stable_delivery_contract(
     assert len(reader.pages) >= 1
     pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
     assert "购物研究报告" in pdf_text
-    assert "Research Snapshot" in pdf_text
-    assert "checkout guarantee" in pdf_text
-    assert all(notice["code"] in pdf_text for notice in json_report["notices"])
+    assert "推荐结果一览" in pdf_text
+    assert "数据来源与价格说明" in pdf_text
+    assert "进口税费" in pdf_text
+    assert "HS Code" in pdf_text
+    assert "计费重量" in pdf_text
+    assert "最终支付" in pdf_text
+    assert "平台结算页、发卡行、承运商及海关核定为准" in pdf_text
+    assert len(reader.pages) <= 4
+    assert "Research Snapshot" not in pdf_text
+    assert "reason_code" not in pdf_text
+    assert "item_id" not in pdf_text
+    assert "Product Evidence" not in pdf_text
+    assert "{" not in pdf_text
 
 
 def test_task_completes_when_ttf_pdf_font_is_unavailable(
@@ -157,7 +190,7 @@ def test_report_generation_is_read_only_for_research_and_rebuilds_deterministica
     }
     missing = next(item for item in snapshot["result"]["files"] if item["format"] == "pdf")
     (Path(server.output_root()) / snapshot["thread_id"] / missing["name"]).unlink()
-    calls = {"gateway": 0, "recall": 0, "fx": 0}
+    calls = {"gateway": 0, "recall": 0}
 
     async def fail_research(*_args: Any, **_kwargs: Any) -> Any:
         calls["gateway"] += 1
@@ -167,18 +200,13 @@ def test_report_generation_is_read_only_for_research_and_rebuilds_deterministica
         calls["recall"] += 1
         raise AssertionError("report generation must not recall preferences")
 
-    def fail_fx(*_args: Any, **_kwargs: Any) -> Any:
-        calls["fx"] += 1
-        raise AssertionError("report generation must not refresh exchange rates")
-
     monkeypatch.setattr(server, "run_agent", fail_research)
     monkeypatch.setattr(server.preference_store, "get", fail_recall)
-    monkeypatch.setattr(importlib.import_module("app.tools.price_compare"), "_rates", fail_fx)
 
     rebuilt = client.post(f"/api/task/{snapshot['thread_id']}/reports")
     assert rebuilt.status_code == 200
     assert rebuilt.json()["idempotent"] is True
-    assert calls == {"gateway": 0, "recall": 0, "fx": 0}
+    assert calls == {"gateway": 0, "recall": 0}
 
     for file in snapshot["result"]["files"]:
         assert _report_bytes(client, snapshot["thread_id"], file) == before[file["file_id"]]
@@ -187,7 +215,7 @@ def test_report_generation_is_read_only_for_research_and_rebuilds_deterministica
     restarted = client.get(f"/api/reports/{snapshot['thread_id']}")
     assert restarted.status_code == 200
     assert restarted.json()["files"] == snapshot["result"]["files"]
-    assert calls == {"gateway": 0, "recall": 0, "fx": 0}
+    assert calls == {"gateway": 0, "recall": 0}
 
 
 def test_reports_reject_unfinished_tasks_missing_files_and_path_traversal(
@@ -231,8 +259,36 @@ def test_reports_keep_partial_and_no_match_notices(client: TestClient, monkeypat
                         item_id="partial-evidence",
                         platform="amazon",
                         title="Partial live headphones",
-                        price=100,
-                        currency="USD",
+                        price=718,
+                        currency="CNY",
+                        shipping_quote=ShippingQuoteEvidence(
+                            quote_type="carrier_quote",
+                            currency="CNY",
+                            total_amount=85,
+                            base_amount=85,
+                            actual_weight_kg=0.5,
+                            chargeable_weight_kg=0.5,
+                            origin_country="US",
+                            destination_country="CN",
+                            service_name="Test international service",
+                            eta_min_days=10,
+                            eta_max_days=12,
+                            provider="licensed-carrier-rate-feed",
+                            source_reference="shipping/report-test",
+                            observed_at="2026-08-11T01:00:00Z",
+                            expires_at="2099-01-01T00:00:00Z",
+                        ),
+                        customs=CustomsTaxEvidence(
+                            hs_code="8518300000",
+                            country_of_origin="US",
+                            destination_country="CN",
+                            import_regime="seller_collected",
+                            rate_type="provider_quote",
+                            seller_collected_tax_cny=0,
+                            provider="licensed-customs-feed",
+                            source_reference="checkout/report-test-tax",
+                            effective_date="2026-08-11",
+                        ),
                         source="live",
                     )
                 ],
@@ -260,8 +316,9 @@ def test_reports_keep_partial_and_no_match_notices(client: TestClient, monkeypat
     assert partial["result"]["result_kind"] == "partial"
     assert any(notice["code"] == "partial_result" for notice in partial_report["notices"])
     assert any("reason=not_configured" in notice["message"] for notice in partial_report["notices"])
-    assert "partial_result" in partial_markdown
-    assert "partial_result" in "\n".join(
+    assert "部分平台数据暂不可用" in partial_markdown
+    assert "partial_result" not in partial_markdown
+    assert "部分平台数据暂不可用" in "\n".join(
         page.extract_text() or ""
         for page in pytest.importorskip("pypdf").PdfReader(partial_pdf).pages
     )
@@ -285,8 +342,13 @@ def test_reports_keep_partial_and_no_match_notices(client: TestClient, monkeypat
     assert any(notice["code"] == "no_match" for notice in no_match_report["notices"])
     assert no_match_report["exclusions"]
     assert any(notice["code"] == "exclusion" for notice in no_match_report["notices"])
-    assert "no_match" in no_match_markdown
-    assert "no_match" in "\n".join(
+    assert "暂不建议直接购买" in no_match_markdown
+    assert "当前没有商品同时满足全部硬性条件" in no_match_markdown
+    assert "no_match" not in no_match_markdown
+    no_match_pdf_text = "\n".join(
         page.extract_text() or ""
         for page in pytest.importorskip("pypdf").PdfReader(no_match_pdf).pages
     )
+    assert "暂不建议直接购买" in no_match_pdf_text
+    assert "当前没有商品同时满足全部硬性条件" in no_match_pdf_text
+    assert "no_match" not in no_match_pdf_text

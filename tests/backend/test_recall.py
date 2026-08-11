@@ -535,4 +535,6 @@ def test_configured_recall_runs_in_real_task_path_and_persists_provenance(
     assert recall_end["data"]["recall_provenance"] == result["recall_provenance"]
     report = client.get(f"/api/files/{started.json()['thread_id']}/shopping-report.md")
     assert report.status_code == 200
-    assert "Recall Provenance" in report.text
+    assert "## 数据来源与价格说明" in report.text
+    assert "Recall Provenance" not in report.text
+    assert "reason_code" not in report.text

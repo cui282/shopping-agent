@@ -92,10 +92,10 @@ def resolve_preferences(
                 reason = "当前请求已明确表达相同偏好，记忆不重复参与本任务。"
             elif current_values or material_conflict:
                 status = "overridden"
-                reason = "当前请求存在冲突表达，Remembered Preference 不覆盖当前任务。"
+                reason = "当前请求存在冲突表达，已保存的偏好不覆盖本次研究。"
             else:
                 status = "applied"
-                reason = "作为本任务的透明默认值参与 preference match ranking。"
+                reason = "作为本次研究的透明默认值参与偏好匹配排序。"
                 effective[field].append(value)
             decisions.append(
                 PreferenceDecision(

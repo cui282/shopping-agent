@@ -40,12 +40,13 @@ export default function WorkspacePage() {
   const [deletingThreadId, setDeletingThreadId] = useState<string | null>(null);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyNotice, setHistoryNotice] = useState<string | null>(null);
+  const [preferenceRevision, setPreferenceRevision] = useState(0);
   const [commandPending, setCommandPending] = useState<"rerun" | "relaxation" | null>(null);
   const rerunCommandKeysRef = useRef(new Map<string, string>());
   const relaxationCommandKeysRef = useRef(new Map<string, string>());
   const historyLengthRef = useRef(history.length);
   const wasAwaitingClarificationRef = useRef(false);
-  const busy = ["starting", "connecting", "running"].includes(state.status);
+  const busy = state.loadingSnapshot || ["starting", "connecting", "running"].includes(state.status);
   const canCancel = Boolean(state.threadId) && ["connecting", "running", "awaiting_clarification"].includes(state.status);
   const disabledReason = taskDisabledReason(state.serviceStatus, state.readiness);
   const allowImageUpload = state.readiness?.capabilities.image_analysis === true;
@@ -65,6 +66,7 @@ export default function WorkspacePage() {
   }, [state.query, state.status]);
 
   useEffect(() => {
+    if (state.loadingSnapshot || state.loadError) return;
     if (state.threadId) {
       updateStatus(
         state.threadId,
@@ -81,6 +83,8 @@ export default function WorkspacePage() {
     state.snapshot?.lineage,
     state.result?.mode,
     state.snapshot?.resolved_intent?.mode,
+    state.loadingSnapshot,
+    state.loadError,
     updateStatus,
   ]);
 
@@ -114,6 +118,7 @@ export default function WorkspacePage() {
   }, [upsert, userId]);
 
   useEffect(() => {
+    if (state.loadingSnapshot || state.loadError) return;
     if (!state.threadId || !state.query) return;
     upsert({
       threadId: state.threadId,
@@ -124,7 +129,17 @@ export default function WorkspacePage() {
       lineage: state.snapshot?.lineage,
       mode: state.result?.mode ?? state.snapshot?.resolved_intent?.mode,
     });
-  }, [state.threadId, state.query, state.status, state.providerMode, state.result, state.snapshot, upsert]);
+  }, [
+    state.threadId,
+    state.query,
+    state.status,
+    state.providerMode,
+    state.result,
+    state.snapshot,
+    state.loadingSnapshot,
+    state.loadError,
+    upsert,
+  ]);
 
   const clearWorkspace = () => {
     setDraft("");
@@ -161,7 +176,7 @@ export default function WorkspacePage() {
     setDraft(session.query);
     setResultView("recommendations");
     setMobileView("workspace");
-    void loadThread(session.threadId, session.query);
+    void loadThread(session.threadId, session.query, session.status);
   };
 
   const deleteSession = async (session: SessionHistoryItem) => {
@@ -211,10 +226,10 @@ export default function WorkspacePage() {
         lineage: response.lineage,
         mode: state.result?.mode,
       });
-      await loadThread(response.thread_id, state.query);
+      await loadThread(response.thread_id, state.query, "running");
       setMobileView("workspace");
     } catch (error) {
-      setHistoryError(error instanceof Error ? error.message : "Research Rerun 启动失败");
+      setHistoryError(error instanceof Error ? error.message : "重新研究启动失败");
     } finally {
       setCommandPending(null);
     }
@@ -222,7 +237,7 @@ export default function WorkspacePage() {
 
   const relaxConstraint = async (constraintId: string) => {
     if (!state.threadId || state.status !== "completed" || commandPending) return;
-    if (!window.confirm("确认放宽这项 Hard Constraint 并开始新的 Shopping Research Task？")) return;
+    if (!window.confirm("确认放宽这项必要条件并开始新的研究？")) return;
     const commandScope = `${state.threadId}:${constraintId}`;
     const commandKey = relaxationCommandKeysRef.current.get(commandScope) ?? idempotencyKey();
     relaxationCommandKeysRef.current.set(commandScope, commandKey);
@@ -243,12 +258,27 @@ export default function WorkspacePage() {
         lineage: response.lineage,
         mode: state.result?.mode,
       });
-      await loadThread(response.thread_id, state.query);
+      await loadThread(response.thread_id, state.query, "running");
       setMobileView("workspace");
     } catch (error) {
-      setHistoryError(error instanceof Error ? error.message : "Constraint Relaxation 启动失败");
+      setHistoryError(error instanceof Error ? error.message : "放宽条件后启动研究失败");
     } finally {
       setCommandPending(null);
+    }
+  };
+
+  const rememberStylePreference = async (value: string) => {
+    try {
+      await api.updatePreferences(userId, {
+        action: "remember",
+        field: "style_preferences",
+        values: [value],
+        scope: "future_tasks",
+      });
+      setPreferenceRevision((revision) => revision + 1);
+      return true;
+    } catch {
+      return false;
     }
   };
 
@@ -305,8 +335,14 @@ export default function WorkspacePage() {
                 window.setTimeout(() => document.querySelector<HTMLTextAreaElement>('textarea[name="shopping-query"]')?.focus(), 0);
               }}
               onReset={newResearch}
+              onRetryLoad={
+                state.threadId
+                  ? () => void loadThread(state.threadId as string, state.query, state.status)
+                  : undefined
+              }
               onRerun={state.status === "completed" && !commandPending ? () => void rerunResearch() : undefined}
               onRelax={state.status === "completed" && !commandPending ? (constraintId) => void relaxConstraint(constraintId) : undefined}
+              onRememberPreference={rememberStylePreference}
             />
           </div>
           {state.status === "awaiting_clarification" && state.clarification ? (
@@ -337,6 +373,7 @@ export default function WorkspacePage() {
             userId={userId}
             preferenceStore={state.readiness?.preference_store}
             preferenceBackend={state.readiness?.preference_backend}
+            preferenceRevision={preferenceRevision}
             onClose={() => setActivityOpen(false)}
           />
         </div>

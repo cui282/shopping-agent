@@ -4,18 +4,34 @@
   flex: 0 0 auto;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: start;
-  gap: 9px;
-  padding: 10px clamp(16px, 3vw, 28px);
+  gap: 8px;
+  padding: 7px clamp(16px, 2.5vw, 26px);
   border-bottom: 1px solid var(--line);
   color: var(--ink-muted);
   background: var(--surface-muted);
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1.55;
 }
 
 .notice[data-state="warning"] {
   color: color-mix(in oklch, var(--warning) 68%, var(--ink));
-  background: var(--warning-soft);
+  background: color-mix(in oklch, var(--warning-soft) 66%, var(--surface));
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+
+.notice[data-state="disclosure"] {
+  min-height: 36px;
+  align-items: center;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  color: var(--ink-muted);
+  background: color-mix(in oklch, var(--warning-soft) 28%, var(--surface));
+  box-shadow: inset 2px 0 0 color-mix(in oklch, var(--warning) 68%, var(--line));
+}
+
+.notice[data-state="disclosure"] > svg {
+  margin-top: 0;
+  color: color-mix(in oklch, var(--warning) 74%, var(--ink));
 }
 
 .notice[data-state="error"] {
@@ -29,14 +45,18 @@
 }
 
 .notice > div {
-  display: grid;
+  display: block;
   min-width: 0;
-  gap: 1px;
+}
+
+.notice > div > strong,
+.notice > div > span {
+  display: block;
 }
 
 .notice strong {
   color: var(--ink);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 670;
 }
 
@@ -48,23 +68,80 @@
 .notice ul {
   display: grid;
   gap: 2px;
-  margin: 5px 0 0;
+  margin: 4px 0 0;
   padding-left: 17px;
 }
 
-.providers {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 4px 12px;
-  margin-top: 7px !important;
-  padding-left: 0 !important;
+.environmentDisclosure {
+  min-width: 0;
+}
+
+.environmentDisclosure > summary {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--ink);
+  cursor: pointer;
   list-style: none;
+}
+
+.environmentDisclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.summaryLabel {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.summaryLabel strong {
+  flex: 0 0 auto;
+}
+
+.summaryLabel > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-muted);
+  text-overflow: ellipsis;
+}
+
+.disclosureChevron {
+  flex: 0 0 auto;
+  transition: transform 160ms ease;
+}
+
+.environmentDisclosure[open] .disclosureChevron {
+  transform: rotate(180deg);
+}
+
+.environmentDetails {
+  padding: 6px 4px 5px 0;
+  border-top: 1px solid color-mix(in oklch, var(--warning) 18%, var(--line));
+}
+
+.environmentDetails > p {
+  margin: 0;
+  color: var(--ink-muted);
+}
+
+.notice ul.providers {
+  display: flex;
+  gap: 5px 12px;
+  margin-top: 5px !important;
+  padding-left: 0 !important;
+  overflow-x: auto;
+  list-style: none;
+  scrollbar-width: thin;
 }
 
 .providers li {
   display: flex;
-  min-width: 0;
-  flex-wrap: wrap;
+  min-width: max-content;
   align-items: baseline;
   gap: 4px;
   color: var(--ink-muted);
@@ -94,9 +171,8 @@
 }
 
 .componentDisclosure {
-  margin-top: 8px;
-  padding-top: 7px;
-  border-top: 1px solid color-mix(in oklch, currentColor 18%, transparent);
+  display: inline-block;
+  margin: 5px 12px 0 0;
 }
 
 .componentDisclosure summary {
@@ -108,9 +184,8 @@
 }
 
 .recallDisclosure {
-  margin-top: 8px;
-  padding-top: 7px;
-  border-top: 1px solid color-mix(in oklch, currentColor 18%, transparent);
+  display: inline-block;
+  margin: 5px 12px 0 0;
 }
 
 .recallDisclosure summary {
@@ -124,6 +199,14 @@
 .recallDisclosure > span {
   display: block;
   margin-top: 5px;
+}
+
+.componentDisclosure[open],
+.recallDisclosure[open] {
+  display: block;
+  margin-right: 0;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in oklch, currentColor 18%, transparent);
 }
 
 .components {
@@ -197,7 +280,7 @@
 
 .notice button {
   display: inline-flex;
-  min-height: 40px;
+  min-height: 34px;
   align-items: center;
   gap: 5px;
   padding: 0 9px;
@@ -208,6 +291,18 @@
   font-size: 11px;
   font-weight: 620;
   cursor: pointer;
+}
+
+.notice[data-state="disclosure"] > button {
+  min-height: 30px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.notice[data-state="disclosure"] > button:hover {
+  border-color: var(--line-strong);
+  background: var(--surface);
 }
 
 .spinning {
@@ -222,17 +317,39 @@
 
 @media (max-width: 640px) {
   .notice {
+    position: relative;
     grid-template-columns: auto minmax(0, 1fr);
-    padding: 9px 12px;
+    padding: 7px 50px 7px 10px;
   }
 
   .notice button {
-    grid-column: 2;
-    justify-self: start;
+    position: absolute;
+    top: 7px;
+    right: 9px;
+    display: grid;
+    width: 34px;
+    min-height: 34px;
+    place-items: center;
+    padding: 0;
+    font-size: 0;
   }
 
-  .providers {
-    grid-template-columns: minmax(0, 1fr);
+  .notice[data-state="disclosure"] {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    padding: 3px 8px;
+  }
+
+  .notice[data-state="disclosure"] > button {
+    position: static;
+    display: grid;
+    width: 30px;
+    min-height: 30px;
+    place-items: center;
+    padding: 0;
+  }
+
+  .summaryLabel > span {
+    display: none;
   }
 
   .components {

@@ -17,9 +17,12 @@ from starlette.websockets import WebSocketDisconnect
 from app.api import server
 from app.schemas import (
     Candidate,
+    CurrencyConversionEvidence,
+    CustomsTaxEvidence,
     ItemSearchOutput,
     MonitorEvent,
     ProviderMetadata,
+    ShippingQuoteEvidence,
     ShoppingSummaryOutput,
     TaskRequest,
     TaskSnapshot,
@@ -39,6 +42,48 @@ class TrackingWebSocket:
 
     async def close(self, *, code: int, reason: str) -> None:
         self.closed = (code, reason)
+
+
+def _complete_live_cost_evidence() -> dict[str, object]:
+    return {
+        "price_conversion": CurrencyConversionEvidence(
+            source_currency="USD",
+            rate_to_cny=7.18,
+            rate_type="provider_quote",
+            provider="licensed-fx-feed",
+            source_reference="fx/api-test",
+            observed_at="2026-08-11T01:00:00Z",
+            expires_at="2099-01-01T00:00:00Z",
+        ),
+        "shipping_quote": ShippingQuoteEvidence(
+            quote_type="carrier_quote",
+            currency="CNY",
+            total_amount=85,
+            base_amount=85,
+            actual_weight_kg=0.5,
+            chargeable_weight_kg=0.5,
+            origin_country="US",
+            destination_country="CN",
+            service_name="Test international service",
+            eta_min_days=10,
+            eta_max_days=12,
+            provider="licensed-carrier-rate-feed",
+            source_reference="shipping/api-test",
+            observed_at="2026-08-11T01:00:00Z",
+            expires_at="2099-01-01T00:00:00Z",
+        ),
+        "customs": CustomsTaxEvidence(
+            hs_code="8518300000",
+            country_of_origin="US",
+            destination_country="CN",
+            import_regime="seller_collected",
+            rate_type="provider_quote",
+            seller_collected_tax_cny=0,
+            provider="licensed-customs-feed",
+            source_reference="checkout/api-test-tax",
+            effective_date="2026-08-11",
+        ),
+    }
 
 
 def _wait_for_terminal_snapshot(
@@ -332,6 +377,7 @@ def test_live_partial_result_keeps_successful_evidence_and_failed_provider_reaso
                 title="Live Amazon headphones",
                 price=100,
                 currency="USD",
+                **_complete_live_cost_evidence(),
                 source="live",
             )
             return ItemSearchOutput(
@@ -448,6 +494,7 @@ def test_mixed_source_requires_diagnostic_configuration_and_stays_out_of_normal_
             title=f"{platform} diagnostic item",
             price=100,
             currency="USD",
+            **_complete_live_cost_evidence(),
             source="fixture" if platform == "ebay" else "live",
         )
         return ItemSearchOutput(
@@ -548,15 +595,19 @@ def test_task_lifecycle_and_buffered_websocket_replay(client: TestClient) -> Non
     payload = snapshot.json()
     assert payload["status"] == "completed"
     assert payload["result"]["provider_mode"] == "sandbox"
-    assert "内置参考汇率表" in payload["result"]["calculation_notice"]
-    assert "effective date：2026-01-01" in payload["result"]["calculation_notice"]
-    assert payload["result"]["exchange_rate"] == {
-        "base_currency": "CNY",
-        "source": "reference-table",
-        "effective_date": "2026-01-01",
-        "calculation_basis": "original_amount * rate_to_cny",
-    }
+    assert "逐商品数据商换算报价" in payload["result"]["calculation_notice"]
+    assert "最新观测时间：2026-01-01T00:00:00Z" in payload["result"]["calculation_notice"]
+    exchange_rate = payload["result"]["exchange_rate"]
+    assert exchange_rate["base_currency"] == "CNY"
+    assert exchange_rate["source"] == "offer-level-quotes"
+    assert exchange_rate["effective_date"] == "2026-01-01T00:00:00Z"
+    assert exchange_rate["calculation_basis"] == "original_amount * rate_to_cny"
+    assert exchange_rate["providers"] == ["deterministic-sandbox-fx-fixture"]
+    assert exchange_rate["quote_count"] > 0
+    assert "最终支付" in exchange_rate["settlement_notice"]
     assert payload["result"]["calculation_exclusions"] == []
+    assert payload["result"]["shipping_exclusions"] == []
+    assert payload["result"]["tax_exclusions"] == []
     assert payload["result"]["ranking_profile"] == {
         "priority_order": [
             "landed_cost",
@@ -570,6 +621,22 @@ def test_task_lifecycle_and_buffered_websocket_replay(client: TestClient) -> Non
     for recommendation in payload["result"]["recommendations"]:
         assert recommendation["landed_cny"] >= recommendation["price_cny"]
         assert recommendation["shipping_estimate"]["estimated"] is True
+        assert recommendation["price_conversion"]["rate_type"] == "sandbox_fixture"
+        assert recommendation["shipping_quote"]["quote_type"] == "sandbox_fixture"
+        assert recommendation["customs"]["hs_code"]
+        assert recommendation["customs"]["country_of_origin"]
+        assert recommendation["customs"]["valuation"]["customs_value_cny"] > 0
+        assert recommendation["tax_breakdown"]["effective_date"]
+        assert (
+            recommendation["import_tax_cny"]
+            == recommendation["tax_breakdown"]["total_import_tax_cny"]
+        )
+        assert recommendation["landed_cny"] == pytest.approx(
+            recommendation["price_cny"]
+            + recommendation["shipping_cny"]
+            + recommendation["insurance_cny"]
+            + recommendation["import_tax_cny"]
+        )
         assert recommendation["duty_estimate"]["estimated"] is True
         assert recommendation["delivery_estimate"]["estimated"] is True
         assert (

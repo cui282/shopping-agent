@@ -174,10 +174,16 @@ Shopee Open Platform 的 Product API 以 `shop_id` 和卖家授权为边界，�
 1. 数据来自哪个平台、接口、联盟网络或授权数据 Feed？供应商能否出示授权链和转售/再许可权？
 2. 许可是否覆盖公开展示、价格比较与排序、深链接、联盟归因、图片、缓存、历史存储、派生评分和 LLM 推理？
 3. 许可覆盖哪些国家/站点、网站/移动端、商业或非商业场景？终止后多久必须删除数据？
-4. 是否提供 `source`、marketplace、seller、商品/offer ID、币种、库存、抓取时间、价格类型、运费税费口径和最终商品 URL？
-5. 数据刷新延迟、配额、429 策略、SLA、故障通知、字段变更通知、退款和退出条款是什么？
-6. 是否有 DPA、子处理者清单、数据驻留、安全事件通知和密钥轮换机制？
-7. 平台投诉、下架、纠错和审计由谁处理？供应商是否对数据权利作出保证并承担相应赔偿责任？
+4. 是否按 offer 提供 `source`、marketplace、seller、商品/offer ID、币种、库存、抓取时间、价格类型和最终商品 URL？
+5. 非人民币商品是否提供带报价类型、加价口径、provider/reference、观测时间和有效期的人民币
+   换算报价？该报价是中间价参考、卡组织估算还是包含支付加价的可成交报价？
+6. 是否提供面向中国大陆、绑定始发地/运输服务的运费报价，并返回总额、基础费、附加费、优惠、
+   实际/体积/计费重量、时效、provider/reference、观测时间和有效期？外币运费是否带独立换算报价？
+7. 是否按 HS Code、原产地和进口模式提供税率证据；一般贸易/跨境电商是否另外提供 CIF 完税价格
+   及申报月海关计税汇率，而不是复用客户支付或比价汇率？
+8. 数据刷新延迟、配额、429 策略、SLA、故障通知、字段变更通知、退款和退出条款是什么？
+9. 是否有 DPA、子处理者清单、数据驻留、安全事件通知和密钥轮换机制？
+10. 平台投诉、下架、纠错和审计由谁处理？供应商是否对数据权利作出保证并承担相应赔偿责任？
 
 以下情况应直接拒绝：不披露上游来源；把“网页公开可见”当作转售授权；要求提供消费者 cookie、绕过 CAPTCHA 或使用未公开移动端接口；无法书面授予图片/价格/链接展示权；合同禁止比较、排序或向终端用户展示；宣称“官方”但无法提供平台合作证明。
 
@@ -200,9 +206,20 @@ React -> Shopping Agent FastAPI -> 数据提供商平台通道 -> 采买/授权�
 | 第三方 | 供应商 token、套餐和数据许可版本 | 对应平台的 `*_DATA_PROVIDER`、`*_DATA_CHANNEL_ENDPOINT`、`*_DATA_CHANNEL_CREDENTIAL` |
 
 数据提供商通道向 Shopping Agent 暴露 `GET /{platform}/search?query=...&top_k=...`，使用通道凭证
-验证请求，并至少返回 `title`、`price`、`currency`。建议同时返回 `item_id`、`image_url`、
-`product_url`、`seller`、`availability`、`observed_at`、`marketplace`、运费/税费口径、数据提供商
-和上游来源，便于后续补强当前统一模型。
+验证请求，并至少返回 `title`、`price`、`currency`。要参与真实到手价计算，每个非 CNY offer
+必须返回 `price_conversion`；每个 offer 必须返回面向中国大陆的 `shipping_quote`。两类报价均
+保留 provider、source reference、观测时间和有效期，外币运费还要携带自己的
+`currency_conversion`。Shopping Agent 不使用进程级汇率表，不按平台或假定重量推算运费。
+
+每个 offer 的 `customs` 还必须返回 HS Code、原产地、目的地、进口模式、适用税率类型、税率或
+代收报价、数据来源和生效日期。一般贸易和跨境电商必须在 `customs.valuation` 中返回 CIF 组成和
+独立的申报月海关计税汇率；该汇率不能复用 `price_conversion`。建议同时返回 `item_id`、
+`image_url`、`product_url`、`seller`、`availability`、`observed_at`、`marketplace`、数据提供商和
+上游来源。Shopping Agent 不会根据 Amazon、Shopee、AliExpress 或 eBay 平台名推断汇率、运费或
+税率；缺少证据的商品保留在研究证据中，但不会参与到手价排序。个人邮递物品还必须返回个人合理
+自用资格、寄递订单总值、海关核定计税价格、当前寄递限值、当前应征税额免税门槛，以及超过限值
+时是否为不可分割单件；只返回一个综合税率不足以参与排序。完整字段与公式见
+[API 契约](API_CONTRACT.md)和[人民币换算与国际运费边界](FX_AND_SHIPPING.md)。
 
 ## Self-hosted Beta 验收清单
 

@@ -8,7 +8,17 @@ from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
-from app.schemas import Candidate, OfferProvenance, Platform, ProductIdentity
+from app.schemas import (
+    Candidate,
+    CurrencyConversionEvidence,
+    CustomsExchangeRateEvidence,
+    CustomsTaxEvidence,
+    CustomsValuationEvidence,
+    OfferProvenance,
+    Platform,
+    ProductIdentity,
+    ShippingQuoteEvidence,
+)
 
 _ITEM_WRAPPERS = ("items", "products", "results", "offers")
 
@@ -109,6 +119,18 @@ def _optional_int(value: Any) -> int | None:
 def _optional_float(value: Any) -> float | None:
     number = _number(value)
     return number
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
 
 
 def _link(raw: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -213,6 +235,216 @@ def _provenance(raw: dict[str, Any], envelope: dict[str, Any]) -> OfferProvenanc
     )
 
 
+def _customs_tax_evidence(
+    raw: dict[str, Any], envelope: dict[str, Any]
+) -> CustomsTaxEvidence | None:
+    payload = _mapping(_first(raw, "customs", "customs_tax", "import_tax"))
+    if not payload:
+        return None
+    try:
+        return CustomsTaxEvidence(
+            hs_code=_text(_first(payload, "hs_code", "tariff_code")),
+            country_of_origin=_text(
+                _first(payload, "country_of_origin", "origin_country", "origin")
+            ),
+            destination_country=_text(_first(payload, "destination_country", "destination"))
+            or "CN",
+            ship_from_country=_text(_first(payload, "ship_from_country", "dispatch_country")),
+            import_regime=_text(_first(payload, "import_regime", "tax_regime")),
+            rate_type=_text(_first(payload, "rate_type", "tariff_rate_type")),
+            tariff_rate=_optional_float(payload.get("tariff_rate")),
+            import_vat_rate=_optional_float(_first(payload, "import_vat_rate", "vat_rate")),
+            consumption_tax_rate=_optional_float(payload.get("consumption_tax_rate")) or 0,
+            personal_postal_tax_rate=_optional_float(
+                _first(payload, "personal_postal_tax_rate", "postal_tax_rate")
+            ),
+            personal_postal_assessed_value_cny=_optional_float(
+                _first(payload, "personal_postal_assessed_value_cny", "postal_assessed_value_cny")
+            ),
+            personal_postal_total_value_cny=_optional_float(
+                _first(payload, "personal_postal_total_value_cny", "postal_total_value_cny")
+            ),
+            personal_postal_value_limit_cny=_optional_float(
+                _first(payload, "personal_postal_value_limit_cny", "postal_value_limit_cny")
+            ),
+            personal_postal_tax_exemption_threshold_cny=_optional_float(
+                _first(
+                    payload,
+                    "personal_postal_tax_exemption_threshold_cny",
+                    "postal_tax_exemption_threshold_cny",
+                )
+            ),
+            personal_postal_single_indivisible_item=_optional_bool(
+                _first(
+                    payload,
+                    "personal_postal_single_indivisible_item",
+                    "postal_single_indivisible_item",
+                )
+            ),
+            personal_postal_eligible=_optional_bool(
+                _first(payload, "personal_postal_eligible", "postal_eligible")
+            ),
+            seller_collected_tax_cny=_optional_float(
+                _first(payload, "seller_collected_tax_cny", "tax_quote_cny")
+            ),
+            insurance_cny=_optional_float(payload.get("insurance_cny")) or 0,
+            valuation=_customs_valuation_evidence(payload),
+            cross_border_ecommerce_eligible=_optional_bool(
+                _first(
+                    payload,
+                    "cross_border_ecommerce_eligible",
+                    "policy_eligible",
+                )
+            ),
+            provider=_text(payload.get("provider"))
+            or _text(_first(envelope, "customs_provider", "tax_provider")),
+            source_reference=_text(
+                _first(payload, "source_reference", "rate_reference", "quote_reference")
+            ),
+            effective_date=_text(_first(payload, "effective_date", "rates_as_of")),
+        )
+    except ValidationError:
+        return None
+
+
+def _customs_valuation_evidence(payload: dict[str, Any]) -> CustomsValuationEvidence | None:
+    valuation = _mapping(
+        _first(payload, "valuation", "customs_valuation", "customs_value_evidence")
+    )
+    if not valuation:
+        return None
+    conversion_payload = _mapping(
+        _first(valuation, "customs_conversion", "customs_fx", "exchange_rate")
+    )
+    try:
+        conversion = (
+            CustomsExchangeRateEvidence(
+                source_currency=_text(
+                    _first(conversion_payload, "source_currency", "from_currency")
+                ),
+                target_currency=(
+                    _text(_first(conversion_payload, "target_currency", "to_currency")) or "CNY"
+                ).upper(),
+                rate_to_cny=_optional_float(_first(conversion_payload, "rate_to_cny", "rate")),
+                rate_basis=_text(conversion_payload.get("rate_basis"))
+                or "monthly_customs_assessment",
+                declaration_date=_text(conversion_payload.get("declaration_date")),
+                assessment_month=_text(
+                    _first(conversion_payload, "assessment_month", "effective_month")
+                ),
+                provider=_text(conversion_payload.get("provider")),
+                source_reference=_text(
+                    _first(
+                        conversion_payload,
+                        "source_reference",
+                        "rate_reference",
+                        "quote_reference",
+                    )
+                ),
+            )
+            if conversion_payload
+            else None
+        )
+        return CustomsValuationEvidence(
+            valuation_method=_text(valuation.get("valuation_method")) or "transaction_value_cif",
+            goods_value_original=_optional_float(
+                _first(valuation, "goods_value_original", "declared_goods_value")
+            ),
+            goods_currency=_text(_first(valuation, "goods_currency", "declared_currency")),
+            goods_value_cny=_optional_float(valuation.get("goods_value_cny")),
+            international_shipping_cny=_optional_float(
+                _first(valuation, "international_shipping_cny", "freight_cny")
+            ),
+            insurance_cny=_optional_float(valuation.get("insurance_cny")) or 0,
+            customs_value_cny=_optional_float(
+                _first(valuation, "customs_value_cny", "cif_value_cny")
+            ),
+            customs_conversion=conversion,
+            provider=_text(valuation.get("provider")),
+            source_reference=_text(_first(valuation, "source_reference", "valuation_reference")),
+        )
+    except ValidationError:
+        return None
+
+
+def _currency_conversion_evidence(
+    raw: dict[str, Any], envelope: dict[str, Any]
+) -> CurrencyConversionEvidence | None:
+    payload = _mapping(_first(raw, "price_conversion", "fx_quote", "currency_conversion"))
+    if not payload:
+        return None
+    try:
+        return CurrencyConversionEvidence(
+            source_currency=_text(_first(payload, "source_currency", "from_currency")),
+            target_currency=(
+                _text(_first(payload, "target_currency", "to_currency")) or "CNY"
+            ).upper(),
+            rate_to_cny=_optional_float(_first(payload, "rate_to_cny", "rate")),
+            purpose=_text(payload.get("purpose")) or "comparison_estimate",
+            rate_type=_text(_first(payload, "rate_type", "quote_type")),
+            markup_status=_text(payload.get("markup_status")) or "unknown",
+            markup_bps=_optional_float(payload.get("markup_bps")),
+            provider=_text(payload.get("provider"))
+            or _text(_first(envelope, "fx_provider", "currency_provider")),
+            source_reference=_text(
+                _first(payload, "source_reference", "quote_reference", "quote_id")
+            ),
+            observed_at=_timestamp(_first(payload, "observed_at", "quoted_at", "effective_at")),
+            expires_at=_timestamp(_first(payload, "expires_at", "valid_until")),
+        )
+    except ValidationError:
+        return None
+
+
+def _shipping_quote_evidence(
+    raw: dict[str, Any], envelope: dict[str, Any]
+) -> ShippingQuoteEvidence | None:
+    payload = _mapping(_first(raw, "shipping_quote", "delivery_quote", "freight_quote", "shipping"))
+    if not payload:
+        return None
+    try:
+        return ShippingQuoteEvidence(
+            quote_type=_text(_first(payload, "quote_type", "shipping_quote_type")),
+            currency=_text(_first(payload, "currency", "currency_code")),
+            total_amount=_optional_float(
+                _first(payload, "total_amount", "shipping_amount", "total")
+            ),
+            base_amount=_optional_float(_first(payload, "base_amount", "base_shipping")),
+            surcharge_amount=_optional_float(_first(payload, "surcharge_amount", "surcharges"))
+            or 0,
+            discount_amount=_optional_float(_first(payload, "discount_amount", "discount")) or 0,
+            actual_weight_kg=_optional_float(payload.get("actual_weight_kg")),
+            dimensional_weight_kg=_optional_float(
+                _first(payload, "dimensional_weight_kg", "volumetric_weight_kg")
+            ),
+            chargeable_weight_kg=_optional_float(
+                _first(payload, "chargeable_weight_kg", "billable_weight_kg")
+            ),
+            length_cm=_optional_float(payload.get("length_cm")),
+            width_cm=_optional_float(payload.get("width_cm")),
+            height_cm=_optional_float(payload.get("height_cm")),
+            dimensional_divisor=_optional_float(
+                _first(payload, "dimensional_divisor", "volumetric_divisor")
+            ),
+            origin_country=_text(_first(payload, "origin_country", "ship_from_country")),
+            destination_country=_text(_first(payload, "destination_country", "ship_to_country"))
+            or "CN",
+            service_name=_text(_first(payload, "service_name", "shipping_service")),
+            eta_min_days=_optional_int(_first(payload, "eta_min_days", "transit_min_days")),
+            eta_max_days=_optional_int(_first(payload, "eta_max_days", "transit_max_days")),
+            provider=_text(payload.get("provider"))
+            or _text(_first(envelope, "shipping_provider", "freight_provider")),
+            source_reference=_text(
+                _first(payload, "source_reference", "quote_reference", "quote_id")
+            ),
+            observed_at=_timestamp(_first(payload, "observed_at", "quoted_at", "effective_at")),
+            expires_at=_timestamp(_first(payload, "expires_at", "valid_until")),
+            currency_conversion=_currency_conversion_evidence(payload, envelope),
+        )
+    except ValidationError:
+        return None
+
+
 def normalize_gateway_response(payload: Any, platform: Platform) -> list[Candidate]:
     """Normalize the supported Marketplace Gateway wrappers into Product Evidence."""
 
@@ -262,6 +494,9 @@ def normalize_gateway_response(payload: Any, platform: Platform) -> list[Candida
                 ),
                 retrieved_at=retrieved_at,
                 provenance=_provenance(raw, envelope),
+                price_conversion=_currency_conversion_evidence(raw, envelope),
+                shipping_quote=_shipping_quote_evidence(raw, envelope),
+                customs=_customs_tax_evidence(raw, envelope),
                 source="live",
             )
         except ValidationError:

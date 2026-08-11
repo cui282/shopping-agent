@@ -170,13 +170,20 @@ async function assertNoReferenceImage(page, viewport) {
 }
 
 async function assertReadinessComponents(page, viewport) {
+  const environmentSummary = page.getByText("当前使用演示数据", { exact: true });
+  await environmentSummary.click();
+  const environmentOpen = await environmentSummary.evaluate((element) =>
+    element.closest("details")?.hasAttribute("open"),
+  );
+  if (!environmentOpen) throw new Error(`${viewport.name}: data-source disclosure did not open`);
+
   const summary = page.getByText("运行组件状态", { exact: true });
   await summary.click();
   await page.getByText("Storage", { exact: true }).waitFor();
   const open = await summary.evaluate((element) => element.parentElement?.hasAttribute("open"));
   if (!open) throw new Error(`${viewport.name}: readiness component disclosure did not open`);
   const componentRows = page.locator('ul[aria-label="运行组件状态"] > li');
-  const expectedComponentRows = 9 + (await page.locator('ul[aria-label="平台 readiness"] > li').count());
+  const expectedComponentRows = 9 + (await page.locator('ul[aria-label="平台数据状态"] > li').count());
   const componentRowCount = await componentRows.count();
   if (componentRowCount !== expectedComponentRows) {
     throw new Error(
@@ -197,7 +204,7 @@ async function assertReadinessComponents(page, viewport) {
   const closed = await summary.evaluate((element) => !element.parentElement?.hasAttribute("open"));
   if (!closed) throw new Error(`${viewport.name}: readiness component disclosure did not close`);
 
-  const recallSummary = page.getByText(/召回状态：/, { exact: false });
+  const recallSummary = page.getByText(/候选检索状态：/, { exact: false });
   await recallSummary.click();
   await page.getByText("OpenSearch 类目知识", { exact: true }).waitFor();
   const recallOpen = await recallSummary.evaluate((element) => element.parentElement?.hasAttribute("open"));
@@ -207,6 +214,12 @@ async function assertReadinessComponents(page, viewport) {
   await recallSummary.click();
   const recallClosed = await recallSummary.evaluate((element) => !element.parentElement?.hasAttribute("open"));
   if (!recallClosed) throw new Error(`${viewport.name}: recall disclosure did not close`);
+
+  await environmentSummary.click();
+  const environmentClosed = await environmentSummary.evaluate((element) =>
+    !element.closest("details")?.hasAttribute("open"),
+  );
+  if (!environmentClosed) throw new Error(`${viewport.name}: data-source disclosure did not close`);
 }
 
 async function scrollScenarioIntoView(page, scenario) {
@@ -264,11 +277,22 @@ async function assertClarificationVisible(page, viewport) {
   }
 }
 
+async function assertCostEvidence(page, viewport) {
+  const detailsSummary = page.getByText("价格与证据明细", { exact: true });
+  await detailsSummary.click();
+  await page.getByText(/1 USD = ¥7\.00.*controlled-fx-feed/).waitFor();
+  await page.getByText(/US → 中国大陆.*Controlled Tracked Air.*计费重量 0\.58 kg/).waitFor();
+  await page.getByText("controlled-logistics-feed", { exact: true }).waitFor();
+  await assertAccessibility(page, viewport);
+  await assertLayout(page, viewport);
+  await detailsSummary.click();
+}
+
 async function runScenario(page, scenario, viewport) {
   let scenarioScreenshotTaken = false;
   await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("textbox", { name: "购物需求" }).waitFor();
-  await page.getByText("Sandbox Result 已启用", { exact: true }).waitFor();
+  await page.getByText("当前使用演示数据", { exact: true }).waitFor();
   await assertSkipLink(page, viewport);
   await assertNoReferenceImage(page, viewport);
   await assertAccessibility(page, viewport);
@@ -321,11 +345,11 @@ async function runScenario(page, scenario, viewport) {
     const resultSection = page.locator('section[aria-labelledby="result-heading"]');
     await resultSection.waitFor();
     const expectedText = {
-      partial: "Partial Result",
-      "no-match": "No-Match Result",
-      empty: "没有可用的 Product Evidence",
-      completed: "Sandbox Result",
-      "developer-diagnostic-mixed": "Developer Diagnostic · Mixed Source",
+      partial: "部分平台结果",
+      "no-match": "研究已正常完成",
+      empty: "没有可用的商品证据",
+      completed: "演示结果",
+      "developer-diagnostic-mixed": "部分结果含演示数据",
     }[scenario];
     if (expectedText && !(await resultSection.getByText(expectedText, { exact: false }).count())) {
       throw new Error(`${viewport.name}: ${scenario} did not render ${expectedText}`);
@@ -336,8 +360,13 @@ async function runScenario(page, scenario, viewport) {
     if (scenario === "no-match" && !(await resultSection.getByRole("status", { name: "无匹配结果" }).count())) {
       throw new Error(`${viewport.name}: no-match status is missing`);
     }
-    if (scenario === "developer-diagnostic-mixed" && !(await resultSection.getByText("仅开发诊断模式允许混合来源", { exact: false }).count())) {
+    if (scenario === "developer-diagnostic-mixed" && !(await resultSection.getByText("当前结果包含多种数据来源", { exact: false }).count())) {
       throw new Error(`${viewport.name}: mixed diagnostic disclosure is missing`);
+    }
+    if (scenario === "completed") {
+      await resultSection.getByRole("region", { name: "已理解的需求" }).waitFor();
+      await resultSection.getByRole("button", { name: "以后也按“简约”推荐" }).waitFor();
+      await assertCostEvidence(page, viewport);
     }
   }
 
@@ -352,6 +381,9 @@ async function runScenario(page, scenario, viewport) {
     await page.waitForFunction(() => document.activeElement?.id === "comparison-tab");
     if (!(await page.getByRole("tab", { name: "价格对比" }).evaluate((element) => element === document.activeElement))) {
       throw new Error(`${viewport.name}: result tab keyboard navigation did not move focus`);
+    }
+    if (scenario === "completed") {
+      await page.getByRole("region", { name: "专业比价概览" }).getByText("1/1", { exact: true }).waitFor();
     }
     await scrollScenarioIntoView(page, scenario);
   }

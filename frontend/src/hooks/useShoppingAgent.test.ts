@@ -90,6 +90,62 @@ function fallbackRecallChannel(channel: RecallChannelReport["channel"]): RecallC
 }
 
 describe("agentReducer", () => {
+  it("keeps a completed history item completed when its snapshot cannot be loaded", () => {
+    const loading = agentReducer(
+      { ...initialAgentState, status: "completed", serviceStatus: "available" },
+      {
+        type: "loading_snapshot",
+        threadId: "thread-history",
+        query: "比较三款通勤双肩包",
+        knownStatus: "completed",
+      },
+    );
+
+    const failed = agentReducer(loading, {
+      type: "snapshot_load_failure",
+      message: "无法连接购物研究服务",
+      serviceUnavailable: true,
+    });
+
+    expect(failed).toMatchObject({
+      threadId: "thread-history",
+      query: "比较三款通勤双肩包",
+      status: "completed",
+      loadingSnapshot: false,
+      loadError: "无法连接购物研究服务",
+      serviceStatus: "unavailable",
+      readiness: null,
+    });
+    expect(failed.error).toBeNull();
+  });
+
+  it("clears a transient history loading error after the snapshot is restored", () => {
+    const loading = agentReducer(initialAgentState, {
+      type: "loading_snapshot",
+      threadId: "thread-history",
+      query: "比较三款通勤双肩包",
+      knownStatus: "completed",
+    });
+    const failed = agentReducer(loading, {
+      type: "snapshot_load_failure",
+      message: "暂时无法读取",
+      serviceUnavailable: false,
+    });
+
+    const restored = agentReducer(failed, {
+      type: "snapshot",
+      snapshot: taskSnapshot({
+        thread_id: "thread-history",
+        query: "比较三款通勤双肩包",
+        status: "completed",
+      }),
+    });
+
+    expect(restored.loadingSnapshot).toBe(false);
+    expect(restored.loadError).toBeNull();
+    expect(restored.status).toBe("completed");
+  });
+
   it("folds the durable report generation event without changing task status", () => {
     const initial = agentReducer(initialAgentState, {
       type: "snapshot",
@@ -147,9 +203,12 @@ describe("agentReducer", () => {
       calculation_notice: "运税为估算值",
       exchange_rate: {
         base_currency: "CNY",
-        source: "reference-table",
-        effective_date: "2026-01-01",
+        source: "offer-level-quotes",
+        effective_date: "2026-08-11T01:30:00Z",
         calculation_basis: "original_amount * rate_to_cny",
+        providers: ["licensed-fx-feed"],
+        quote_count: 1,
+        settlement_notice: "最终支付金额以平台结算页及发卡行为准。",
       },
       calculation_exclusions: [],
       ranking_profile: {
@@ -334,9 +393,12 @@ describe("agentReducer", () => {
             calculation_notice: "test",
             exchange_rate: {
               base_currency: "CNY",
-              source: "reference-table",
-              effective_date: "2026-01-01",
+              source: "offer-level-quotes",
+              effective_date: "2026-08-11T01:30:00Z",
               calculation_basis: "original_amount * rate_to_cny",
+              providers: ["licensed-fx-feed"],
+              quote_count: 1,
+              settlement_notice: "最终支付金额以平台结算页及发卡行为准。",
             },
             calculation_exclusions: [],
             ranking_profile: {

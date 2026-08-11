@@ -1052,7 +1052,10 @@ async def _execute_task(
         )
     except MissingExchangeRatesError as exc:
         currencies = "、".join(exc.currencies) or "未知币种"
-        message = f"候选商品币种缺少可用汇率（{currencies}），请配置 FX_RATES_JSON 后重试"
+        message = (
+            f"候选商品缺少数据通道返回的有效人民币汇率报价（{currencies}），"
+            "请检查商品级 price_conversion 证据后重试"
+        )
         await monitor.emit(
             thread_id,
             "error",

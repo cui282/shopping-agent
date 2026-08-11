@@ -234,7 +234,7 @@ def _single_offer_evidence(offer: LandedCost) -> IdentityEvidence:
     return _alternative(
         matched_fields=sorted(facts),
         missing_fields=missing,
-        explanation="没有另一平台的独立 Product Evidence 可用于证明同款。",
+        explanation="没有另一平台的独立商品证据可用于证明同款。",
     )
 
 
@@ -243,7 +243,7 @@ def _alternative_candidate(offer: LandedCost, evidence: IdentityEvidence) -> Alt
     values["identity_evidence"] = evidence
     return AlternativeCandidate(
         **values,
-        reason=f"Alternative Candidate：{evidence.explanation}",
+        reason=f"相似商品候选：{evidence.explanation}",
     )
 
 

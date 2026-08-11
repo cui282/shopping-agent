@@ -29,7 +29,11 @@ FULL_TOOL_SET: tuple[ToolSpec, ...] = (
     ToolSpec("item_search", "Search one licensed data-provider marketplace channel.", "act"),
     ToolSpec("recall", "Order only the supplied Product Evidence.", "act"),
     ToolSpec("price_compare", "Normalize supported currencies and rank prices.", "observe"),
-    ToolSpec("shipping_calc", "Estimate shipping, duty and landed cost.", "observe"),
+    ToolSpec(
+        "shipping_calc",
+        "Estimate logistics and calculate import tax from typed customs evidence.",
+        "observe",
+    ),
     ToolSpec("item_picker", "Apply deterministic eligibility and ranking rules.", "reflect"),
     ToolSpec("shopping_summary", "Render the evidence-backed terminal result.", "reflect"),
     ToolSpec("web_search", "Optional external web evidence adapter.", "optional"),

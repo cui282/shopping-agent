@@ -46,7 +46,7 @@ export default function QueryComposer({
     const area = textareaRef.current;
     if (!area) return;
     area.style.height = "0px";
-    area.style.height = `${Math.min(Math.max(area.scrollHeight, 52), 120)}px`;
+    area.style.height = `${Math.min(Math.max(area.scrollHeight, 44), 104)}px`;
   }, [value]);
 
   useEffect(

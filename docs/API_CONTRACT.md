@@ -306,6 +306,12 @@ Supported events:
 | `clarification_resolved` | Non-terminal answer recorded for the same task; `data` contains the field, submitted response, and canonical `resolved_value` |
 | `error` | Terminal failure; `data.code` is stable for client handling |
 
+`intent_resolved.data.resolved_intent` is the authoritative structured plan for the active run.
+Clients may render it as a customer-facing requirement summary before the terminal result arrives;
+they must replace that summary when a newer snapshot for the same `run_id` is received. Rendering
+the plan never implies that any extracted style, material, or soft preference was saved for future
+tasks.
+
 `tool_end.data.outcome` is `success`, `degraded`, or `failure`. A failed tool emits `tool_end`
 before the task-level `error`. `fork.data` has this shape:
 
@@ -478,6 +484,11 @@ authentication or authorization; a hosted deployment must enforce ownership at a
 `GET /api/task/{thread_id}` is the equivalent task-scoped read. Legacy snapshots missing the
 newer additive fields are normalized only in the response; the stored bytes are not rewritten.
 
+A transport failure while opening either endpoint is not a task-level `error` and must not change
+the last known snapshot status in client history. Clients should present it as a retryable report
+loading failure; only a snapshot or ordered `error` monitor event can mark the research itself as
+failed.
+
 ### Snapshot reports
 
 Completed snapshots expose one typed `ResearchReportSnapshot` projection. Markdown, JSON, and PDF
@@ -486,11 +497,16 @@ Gateway, preference recall, an LLM, or an exchange-rate source. The projection k
 `snapshot_effective_at` and `lineage`, so reopening an older report does not describe it as current
 market state.
 
-The JSON download is a structured serialization of that projection (not a hand-built string). Its
+The JSON artifact is a structured serialization of that projection (not a hand-built string). Its
 root fields retain the terminal `ShoppingSummaryOutput` contract plus `report_schema_version`,
 `snapshot_id`, `snapshot_effective_at`, `snapshot_created_at`, `snapshot_status`, `user_id`,
-`query`, `lineage`, and typed `notices`. Markdown and PDF surface the same notices and result
-evidence in human-readable sections.
+`query`, `lineage`, and typed `notices`. It remains available through the report API for system
+integration, diagnostics, and durable audit, but the customer download UI intentionally hides it.
+Markdown is the detailed Chinese customer report; PDF is the concise Chinese customer view. Both
+surface the purchase conclusion, ranked products, landed-cost and delivery comparison,
+customer-readable filtering outcomes, provider coverage, exchange-rate provenance, and estimation
+boundaries. Neither customer report exposes raw JSON, internal IDs, reason codes, or recall
+implementation details; those remain available only in the JSON artifact and typed task APIs.
 
 `GET /api/task/{thread_id}/reports` and its alias `GET /api/reports/{thread_id}` list the files:
 
@@ -621,11 +637,12 @@ Stable task error codes include `providers_unavailable`, `fx_rates_unavailable`,
 `unsupported_capability`, `task_timeout`, `task_failed`, and `task_interrupted`.
 `unsupported_capability` is emitted before marketplace search when the requested destination is
 not China mainland; China mainland is currently the only supported landed-cost destination.
-`fx_rates_unavailable` means every candidate uses a currency absent from `FX_RATES_JSON` and the
-built-in reference table. If at least one candidate can be converted, candidates with missing
-rates are excluded and `calculation_notice` discloses that partial exclusion.
-When `FX_RATES_JSON` is configured, `FX_RATES_AS_OF` is required so the response can preserve the
-effective date of the configured rates; the calculation basis is always exposed alongside it.
+`fx_rates_unavailable` means no candidate can be normalized to CNY because every non-CNY offer is
+missing a valid, unexpired offer-level `price_conversion` quote. If at least one candidate can be
+converted, candidates with missing or invalid quote evidence are excluded and `calculation_notice`
+discloses that partial exclusion. The production calculation has no process-wide FX table or
+built-in live reference rate; quote provider, reference, observation time, expiry, rate type, and
+markup status remain attached to each offer.
 
 `POST /api/task/{thread_id}/cancel` is idempotent for known terminal tasks and accepts both
 `running` and `awaiting_clarification` tasks. An awaiting task records `task_cancelled` without
@@ -745,11 +762,16 @@ shopper tasks are not task-owned and are not deleted.
   "relaxation_suggestions": [],
   "exchange_rate": {
     "base_currency": "CNY",
-    "source": "reference-table",
-    "effective_date": "2026-01-01",
-    "calculation_basis": "original_amount * rate_to_cny"
+    "source": "offer-level-quotes",
+    "effective_date": "2026-08-11T01:31:00Z",
+    "calculation_basis": "original_amount * rate_to_cny",
+    "providers": ["licensed-fx-feed"],
+    "quote_count": 4,
+    "settlement_notice": "人民币金额用于研究比较；最终支付汇率和支付机构费用以平台结算页及发卡行为准。"
   },
   "calculation_exclusions": [],
+  "shipping_exclusions": [],
+  "tax_exclusions": [],
   "ranking_profile": {
     "priority_order": ["landed_cost", "preference_match", "evidence_quality", "delivery_time"],
     "explicit": false
@@ -786,7 +808,7 @@ shopper tasks are not task-owned and are not deleted.
       "failure_reason": "request_failed"
     }
   },
-  "calculation_notice": "比较货币：CNY；汇率来源：内置参考汇率表；effective date：2026-01-01；calculation basis：original_amount * rate_to_cny；运费、税费与时效均为估算；这不是 checkout guarantee。"
+  "calculation_notice": "比较货币：CNY；汇率依据：商品级时点报价；数据商：licensed-fx-feed；运费依据：面向中国大陆的线路/服务报价；人民币金额仅用于研究比较，最终支付、运输与税费以平台结算页、发卡行、承运商及海关核定为准。"
 }
 ```
 
@@ -923,7 +945,7 @@ empty, unavailable, times out, or fails, the stable fallback preserves the origi
 Evidence order and discloses the reason.
 
 Every recommendation and comparison row carries the same normalized offer evidence before adding
-calculated price, shipping, duty, and ranking fields:
+calculated price, shipping, import-tax, and ranking fields:
 
 ```json
 {
@@ -957,15 +979,145 @@ calculated price, shipping, duty, and ranking fields:
     "provider": "licensed-ebay-feed",
     "upstream_source": "ebay-buy-browse"
   },
+  "price_conversion": {
+    "source_currency": "USD",
+    "target_currency": "CNY",
+    "rate_to_cny": 7.18,
+    "purpose": "comparison_estimate",
+    "rate_type": "provider_quote",
+    "markup_status": "excluded",
+    "markup_bps": null,
+    "provider": "licensed-fx-feed",
+    "source_reference": "fx-quote-20260811-001",
+    "observed_at": "2026-08-11T01:30:00Z",
+    "expires_at": "2026-08-11T02:00:00Z"
+  },
+  "shipping_quote": {
+    "quote_type": "carrier_quote",
+    "currency": "USD",
+    "total_amount": 14.5,
+    "base_amount": 12.0,
+    "surcharge_amount": 3.0,
+    "discount_amount": 0.5,
+    "actual_weight_kg": 1.2,
+    "dimensional_weight_kg": 2.4,
+    "chargeable_weight_kg": 2.4,
+    "length_cm": 40.0,
+    "width_cm": 30.0,
+    "height_cm": 10.0,
+    "dimensional_divisor": 5000.0,
+    "origin_country": "US",
+    "destination_country": "CN",
+    "service_name": "International Priority",
+    "eta_min_days": 6,
+    "eta_max_days": 9,
+    "provider": "licensed-carrier-rate-feed",
+    "source_reference": "shipping-quote-20260811-001",
+    "observed_at": "2026-08-11T01:31:00Z",
+    "expires_at": "2026-08-11T02:00:00Z",
+    "currency_conversion": {
+      "source_currency": "USD",
+      "target_currency": "CNY",
+      "rate_to_cny": 7.18,
+      "purpose": "comparison_estimate",
+      "rate_type": "provider_quote",
+      "markup_status": "excluded",
+      "markup_bps": null,
+      "provider": "licensed-fx-feed",
+      "source_reference": "fx-quote-20260811-002",
+      "observed_at": "2026-08-11T01:30:00Z",
+      "expires_at": "2026-08-11T02:00:00Z"
+    }
+  },
+  "customs": {
+    "hs_code": "8518300000",
+    "country_of_origin": "CN",
+    "destination_country": "CN",
+    "ship_from_country": "US",
+    "import_regime": "general_trade",
+    "rate_type": "mfn",
+    "tariff_rate": 0.0,
+    "import_vat_rate": 0.13,
+    "consumption_tax_rate": 0.0,
+    "personal_postal_tax_rate": null,
+    "personal_postal_assessed_value_cny": null,
+    "personal_postal_total_value_cny": null,
+    "personal_postal_value_limit_cny": null,
+    "personal_postal_tax_exemption_threshold_cny": null,
+    "personal_postal_single_indivisible_item": null,
+    "personal_postal_eligible": null,
+    "seller_collected_tax_cny": null,
+    "insurance_cny": 0.0,
+    "valuation": {
+      "valuation_method": "transaction_value_cif",
+      "goods_value_original": 129.99,
+      "goods_currency": "USD",
+      "goods_value_cny": 922.93,
+      "international_shipping_cny": 104.11,
+      "insurance_cny": 0.0,
+      "customs_value_cny": 1027.04,
+      "customs_conversion": {
+        "source_currency": "USD",
+        "target_currency": "CNY",
+        "rate_to_cny": 7.1,
+        "rate_basis": "monthly_customs_assessment",
+        "declaration_date": "2026-08-11",
+        "assessment_month": "2026-08",
+        "provider": "licensed-customs-feed",
+        "source_reference": "China Customs assessment FX 2026-08"
+      },
+      "provider": "licensed-customs-feed",
+      "source_reference": "valuation-20260811-001"
+    },
+    "cross_border_ecommerce_eligible": null,
+    "provider": "licensed-customs-feed",
+    "source_reference": "CN tariff snapshot 2026",
+    "effective_date": "2026-01-01"
+  },
   "source": "live"
 }
 ```
 
 `price` and `currency` are the original gateway or fixture amount and currency. `price_cny` is a
-separate calculated field. `item_id` remains the stable internal candidate key for additive
+separate calculated field. Every non-CNY live offer must carry `price_conversion`, a time-bound
+provider quote whose `source_currency` matches the offer, `target_currency=CNY`, and which records
+rate type, markup status, provider/reference, observation time, and expiry. CNY offers require no
+conversion object. Live quotes without a validity window, quotes expired at calculation time, and
+currency-mismatched quotes never participate in CNY comparison. `price_cny` is calculated with
+decimal `ROUND_HALF_UP` to CNY cents; the aggregate `exchange_rate` reports the providers and latest
+observation without erasing per-offer evidence. This comparison quote is not a payment guarantee
+or a China Customs assessment rate.
+
+`shipping_quote` is the data-channel's route- and service-specific carrier or marketplace quote to
+China mainland. It preserves original currency/total, optional base charge, surcharge and discount,
+actual/dimensional/chargeable weights, package dimensions/divisor, service, ETA range,
+provider/reference, observation time, and expiry. When itemized, `total_amount` must reconcile with
+`base_amount + surcharge_amount - discount_amount`; chargeable weight cannot be lower than a known
+actual or dimensional weight. Non-CNY shipping requires its own matching `currency_conversion`.
+Production does not infer weight or apply platform shipping brackets. Missing, malformed, or expired
+quotes are recorded in `shipping_exclusions` and do not enter landed-cost ranking. Ranking uses the
+conservative `eta_max_days` and decimal CNY-cent rounding.
+
+`item_id` remains the stable internal candidate key for additive
 compatibility; `offer_id` is the marketplace's actual offer identifier and remains `null` when the
 gateway does not supply one. A generated `item_id` is never represented as offer Identity Evidence.
 `marketplace` is the normalized contract name for the existing `platform` field and must equal it.
+
+`customs` is nullable Product Evidence supplied by the data-provider channel; it is never inferred
+from `platform`, title, price, or the LLM. A row may remain useful Product Evidence when `customs`
+is absent or invalid, but it cannot enter landed-cost calculation or ranking. The provider must
+classify the goods and preserve the applicable destination, HS/tariff code, country of origin,
+import regime, rate type, rates or seller quote, source reference, and effective date. `ship_from_country`
+is logistics evidence and never substitutes for `country_of_origin`.
+
+Supported `import_regime` values are `general_trade`, `cross_border_ecommerce`, `personal_postal`,
+and `seller_collected`. Cross-border e-commerce is used only when the provider explicitly returns
+`cross_border_ecommerce_eligible=true`; the service never infers positive-list or personal-quota
+eligibility. `seller_collected` requires a provider tax quote and does not invent a tax-component
+split. `personal_postal` requires `personal_postal_eligible=true` plus the provider-returned customs
+assessed value, parcel total value, current value limit, current tax-amount exemption threshold, and
+whether an over-limit parcel is one indivisible item. Invalid or missing evidence becomes
+`customs=null`, not a guessed default.
 
 `identity` holds cross-platform identity evidence. Missing `gtin`, `mpn`, `brand`, and `model`
 values are `null`. `variant_attributes` contains only supplied scalar attributes that distinguish
@@ -1041,14 +1193,44 @@ offer identifiers. Sandbox Results use only `marketplace_search`. A live result 
 search link, and clients label links from `link_kind`, never by guessing from `source`.
 
 Recommendation-only fields are `reason` and `rank`. Both recommendations and comparison rows also
-include normalized `price_cny`, `shipping_cny`, `duty_cny`, `landed_cny`, `eta_days`, `duty_tier`,
-and nullable estimation `note`. `price` and `currency` preserve the original amount; all
-comparison and ranking calculations use CNY. Every landed-cost row carries
-`shipping_estimate`, `duty_estimate`, and `delivery_estimate`, each with `estimated`, `source`,
-and `calculation_basis`. These are estimates, not checkout guarantees. Non-finite or negative
-amounts are excluded with `calculation_exclusions[].reason_code=invalid_amount`; a currency with
-no available CNY rate is excluded with `reason_code=unsupported_currency`. Excluded candidates
-never enter eligibility or ranking.
+include normalized `price_cny`, `shipping_cny`, `insurance_cny`, `duty_cny`, `import_vat_cny`,
+`consumption_tax_cny`, `import_tax_cny`, `landed_cny`, `eta_days`, `duty_tier`, and nullable
+estimation `note`. `duty_cny` is only the customs-duty component; `import_tax_cny` is the total
+import tax used in landed cost. `tax_breakdown` preserves HS Code, origin, regime, customs value,
+individual components when known, rate type, provider, reference, effective date, and formula. For
+personal postal imports it also preserves `tax_before_exemption_cny`, `tax_exemption_cny`, and
+`tax_exemption_reason` so a zero tax is distinguishable from missing data.
+`price` and `currency` preserve the original amount; all comparison and ranking calculations use
+CNY. Every landed-cost row carries `shipping_estimate`, `duty_estimate`, `tax_estimate`, and
+`delivery_estimate`, each with `estimated`, `source`, and `calculation_basis`. These are estimates,
+not checkout guarantees.
+
+For `general_trade`, customs value is product price plus international shipping plus insurance;
+duty is customs value times the provider-supplied applicable rate; consumption tax is grossed up
+where its rate is nonzero; import VAT is applied to customs value plus duty plus consumption tax.
+For eligible `cross_border_ecommerce`, duty is zero and statutory import VAT/consumption tax is
+multiplied by the policy factor `0.70`. `personal_postal` uses the provider-returned customs-assessed
+value and comprehensive rate, validates the provider-confirmed personal-use/value-limit eligibility,
+and applies the provider-returned tax-amount exemption threshold inclusively. The current policy
+snapshot is a CNY 2,000 parcel value limit (except a qualifying indivisible single item) and exemption
+when assessed tax is no more than CNY 50; these values remain explicit provider evidence rather than
+hidden platform constants. `seller_collected` uses the provider quote as an indivisible total. No
+marketplace name maps to a tax rate.
+
+General-trade and cross-border-e-commerce rows additionally require `customs.valuation`. Its
+`transaction_value_cif` components must reconcile to the cent. A non-CNY declared goods value uses
+`customs_conversion`, which identifies the declaration date, matching assessment month, Customs
+rate basis, provider, and source reference. The service intentionally does not reuse
+`price_conversion` or shipping comparison FX for Customs valuation.
+
+Non-finite or negative amounts are excluded with
+`calculation_exclusions[].reason_code=invalid_amount`. Missing or invalid non-CNY offer quotes use
+`missing_fx_evidence` or `invalid_fx_evidence`. Missing, invalid, or expired route quotes use
+`shipping_exclusions` reason codes `missing_shipping_quote`, `invalid_shipping_quote`, or
+`expired_shipping_quote`. Missing customs evidence or CIF/monthly Customs FX evidence uses
+`tax_exclusions` reason codes `missing_customs_evidence` or `missing_customs_valuation`. Excluded
+candidates never enter landed-cost eligibility or ranking, but remain in `product_evidence` for
+traceability.
 
 Each Recommendation contains `constraint_evaluations`. Every evaluation has the normalized
 `constraint`, a three-valued `status` (`satisfied`, `violated`, or `unknown`), a stable
@@ -1161,6 +1343,10 @@ tasks, not the task that issued the command; explicit `forget` takes effect imme
 result's `preference_decisions` reports `applied`, `ignored`, and `overridden` values with their
 source and reason. Remembered Preference can influence only the transparent `preference_match`
 ranking dimension after Hard Constraint eligibility; it never creates or relaxes a Hard Constraint.
+
+A client may offer to remember a preference found in `resolved_intent`, but the suggestion is
+non-mutating. It becomes durable only after the customer explicitly confirms it and the client sends
+the `MemoryCommand` above. The current task continues to use its immutable resolved intent.
 
 `DELETE /api/preferences/{user_id}` removes the whole record. `memory` storage is process-local and
 marked `local_evaluation`, never durable. `redis` is the durable backend and uses

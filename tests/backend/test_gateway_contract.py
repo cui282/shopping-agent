@@ -314,6 +314,289 @@ def test_gateway_preserves_metadata_from_a_nested_data_wrapper() -> None:
     assert offer.provenance.upstream_source == "licensed-provider-catalog"
 
 
+def test_gateway_maps_provider_customs_classification_and_rate_snapshot() -> None:
+    candidates = normalize_gateway_response(
+        {
+            "provider": "licensed-shopping-data-provider",
+            "items": [
+                {
+                    "offer_id": "taxed-offer",
+                    "title": "Imported fragrance",
+                    "price": 1000,
+                    "currency": "CNY",
+                    "customs": {
+                        "hs_code": "3303000010",
+                        "origin_country": "fr",
+                        "destination_country": "cn",
+                        "ship_from_country": "sg",
+                        "import_regime": "general_trade",
+                        "rate_type": "mfn",
+                        "tariff_rate": "0.10",
+                        "vat_rate": "0.13",
+                        "consumption_tax_rate": "0.20",
+                        "insurance_cny": "15",
+                        "provider": "licensed-customs-feed",
+                        "source_reference": "CN tariff snapshot 2026",
+                        "effective_date": "2026-01-01",
+                    },
+                }
+            ],
+        },
+        "amazon",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].customs is not None
+    assert candidates[0].customs.model_dump() == {
+        "hs_code": "3303000010",
+        "country_of_origin": "FR",
+        "destination_country": "CN",
+        "ship_from_country": "SG",
+        "import_regime": "general_trade",
+        "rate_type": "mfn",
+        "tariff_rate": 0.10,
+        "import_vat_rate": 0.13,
+        "consumption_tax_rate": 0.20,
+        "personal_postal_tax_rate": None,
+        "personal_postal_assessed_value_cny": None,
+        "personal_postal_total_value_cny": None,
+        "personal_postal_value_limit_cny": None,
+        "personal_postal_tax_exemption_threshold_cny": None,
+        "personal_postal_single_indivisible_item": None,
+        "personal_postal_eligible": None,
+        "seller_collected_tax_cny": None,
+        "insurance_cny": 15,
+        "valuation": None,
+        "cross_border_ecommerce_eligible": None,
+        "provider": "licensed-customs-feed",
+        "source_reference": "CN tariff snapshot 2026",
+        "effective_date": "2026-01-01",
+    }
+
+
+def test_gateway_maps_provider_currency_conversion_quote() -> None:
+    candidates = normalize_gateway_response(
+        {
+            "provider": "licensed-shopping-data-provider",
+            "items": [
+                {
+                    "offer_id": "fx-offer",
+                    "title": "Imported item",
+                    "price": 99,
+                    "currency": "usd",
+                    "fx_quote": {
+                        "source_currency": "usd",
+                        "target_currency": "CNY",
+                        "rate_to_cny": "7.2345",
+                        "rate_type": "provider_quote",
+                        "markup_status": "included",
+                        "markup_bps": "35",
+                        "provider": "licensed-fx-feed",
+                        "source_reference": "quote/fx-123",
+                        "observed_at": "2026-08-11T09:30:00+08:00",
+                        "expires_at": "2026-08-11T10:00:00+08:00",
+                    },
+                }
+            ],
+        },
+        "amazon",
+    )
+
+    assert len(candidates) == 1
+    quote = candidates[0].price_conversion
+    assert quote is not None
+    assert quote.model_dump() == {
+        "source_currency": "USD",
+        "target_currency": "CNY",
+        "rate_to_cny": 7.2345,
+        "purpose": "comparison_estimate",
+        "rate_type": "provider_quote",
+        "markup_status": "included",
+        "markup_bps": 35,
+        "provider": "licensed-fx-feed",
+        "source_reference": "quote/fx-123",
+        "observed_at": "2026-08-11T01:30:00Z",
+        "expires_at": "2026-08-11T02:00:00Z",
+    }
+
+
+def test_gateway_maps_route_specific_shipping_quote() -> None:
+    candidates = normalize_gateway_response(
+        {
+            "provider": "licensed-shopping-data-provider",
+            "items": [
+                {
+                    "offer_id": "shipping-offer",
+                    "title": "Imported item",
+                    "price": 99,
+                    "currency": "USD",
+                    "shipping_quote": {
+                        "quote_type": "carrier_quote",
+                        "currency": "USD",
+                        "total_amount": "12.50",
+                        "base_amount": "10",
+                        "surcharge_amount": "3",
+                        "discount_amount": "0.50",
+                        "actual_weight_kg": "1.2",
+                        "dimensional_weight_kg": "2.4",
+                        "chargeable_weight_kg": "2.4",
+                        "length_cm": "40",
+                        "width_cm": "30",
+                        "height_cm": "10",
+                        "dimensional_divisor": "5000",
+                        "origin_country": "us",
+                        "destination_country": "cn",
+                        "service_name": "International Priority",
+                        "eta_min_days": "6",
+                        "eta_max_days": "9",
+                        "provider": "licensed-carrier-rate-feed",
+                        "quote_id": "shipping/quote-123",
+                        "quoted_at": "2026-08-11T09:00:00+08:00",
+                        "valid_until": "2026-08-11T10:00:00+08:00",
+                        "currency_conversion": {
+                            "source_currency": "USD",
+                            "rate_to_cny": "7.20",
+                            "rate_type": "provider_quote",
+                            "provider": "licensed-fx-feed",
+                            "quote_id": "fx/shipping-123",
+                            "observed_at": "2026-08-11T09:00:00+08:00",
+                            "expires_at": "2026-08-11T10:00:00+08:00",
+                        },
+                    },
+                }
+            ],
+        },
+        "amazon",
+    )
+
+    quote = candidates[0].shipping_quote
+    assert quote is not None
+    assert quote.total_amount == 12.5
+    assert quote.chargeable_weight_kg == 2.4
+    assert quote.origin_country == "US"
+    assert quote.destination_country == "CN"
+    assert quote.eta_min_days == 6
+    assert quote.eta_max_days == 9
+    assert quote.observed_at == "2026-08-11T01:00:00Z"
+    assert quote.expires_at == "2026-08-11T02:00:00Z"
+    assert quote.currency_conversion is not None
+    assert quote.currency_conversion.rate_to_cny == 7.2
+
+
+def test_gateway_maps_customs_monthly_fx_and_cif_valuation() -> None:
+    candidates = normalize_gateway_response(
+        [
+            {
+                "offer_id": "customs-value-offer",
+                "title": "Imported item",
+                "price": 100,
+                "currency": "USD",
+                "customs": {
+                    "hs_code": "8518300000",
+                    "origin_country": "US",
+                    "destination_country": "CN",
+                    "import_regime": "general_trade",
+                    "rate_type": "mfn",
+                    "tariff_rate": 0.10,
+                    "vat_rate": 0.13,
+                    "insurance_cny": 10,
+                    "provider": "licensed-customs-feed",
+                    "source_reference": "CN tariff snapshot 2026",
+                    "effective_date": "2026-08-01",
+                    "valuation": {
+                        "valuation_method": "transaction_value_cif",
+                        "goods_value_original": 100,
+                        "goods_currency": "USD",
+                        "goods_value_cny": 710,
+                        "international_shipping_cny": 80,
+                        "insurance_cny": 10,
+                        "customs_value_cny": 800,
+                        "customs_conversion": {
+                            "source_currency": "USD",
+                            "rate_to_cny": 7.10,
+                            "declaration_date": "2026-08-11",
+                            "assessment_month": "2026-08",
+                            "provider": "licensed-customs-fx-feed",
+                            "source_reference": "customs/monthly-rate/2026-08",
+                        },
+                        "provider": "licensed-customs-valuation-feed",
+                        "source_reference": "valuation/cif-123",
+                    },
+                },
+            }
+        ],
+        "amazon",
+    )
+
+    valuation = candidates[0].customs.valuation
+    assert valuation is not None
+    assert valuation.customs_value_cny == 800
+    assert valuation.customs_conversion is not None
+    assert valuation.customs_conversion.rate_to_cny == 7.1
+    assert valuation.customs_conversion.assessment_month == "2026-08"
+    assert valuation.provider == "licensed-customs-valuation-feed"
+
+
+def test_gateway_maps_personal_postal_eligibility_and_exemption_policy() -> None:
+    candidates = normalize_gateway_response(
+        [
+            {
+                "title": "Personal parcel",
+                "price": 250,
+                "currency": "CNY",
+                "customs": {
+                    "hs_code": "8518300000",
+                    "origin_country": "my",
+                    "import_regime": "personal_postal",
+                    "rate_type": "personal_postal",
+                    "postal_tax_rate": "0.20",
+                    "postal_assessed_value_cny": "250",
+                    "postal_total_value_cny": "250",
+                    "postal_value_limit_cny": "2000",
+                    "postal_tax_exemption_threshold_cny": "50",
+                    "postal_single_indivisible_item": "false",
+                    "postal_eligible": "true",
+                    "provider": "licensed-customs-feed",
+                    "source_reference": "personal postal snapshot",
+                    "effective_date": "2026-08-11",
+                },
+            }
+        ],
+        "shopee",
+    )
+
+    customs = candidates[0].customs
+    assert customs is not None
+    assert customs.personal_postal_assessed_value_cny == 250
+    assert customs.personal_postal_total_value_cny == 250
+    assert customs.personal_postal_value_limit_cny == 2000
+    assert customs.personal_postal_tax_exemption_threshold_cny == 50
+    assert customs.personal_postal_single_indivisible_item is False
+    assert customs.personal_postal_eligible is True
+
+
+def test_gateway_keeps_offer_but_drops_invalid_customs_evidence() -> None:
+    candidates = normalize_gateway_response(
+        [
+            {
+                "offer_id": "invalid-tax-evidence",
+                "title": "Still useful product evidence",
+                "price": 100,
+                "currency": "CNY",
+                "customs": {
+                    "hs_code": "not-an-hs-code",
+                    "origin_country": "FR",
+                    "import_regime": "general_trade",
+                },
+            }
+        ],
+        "ebay",
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].customs is None
+
+
 async def test_sandbox_uses_the_offer_contract_without_claiming_a_detail_link(
     monkeypatch,
 ) -> None:
@@ -343,6 +626,24 @@ async def test_sandbox_uses_the_offer_contract_without_claiming_a_detail_link(
         "provider": "amazon-sandbox",
         "upstream_source": "deterministic-fixture-catalog",
     }
+    assert offer.customs is not None
+    assert offer.customs.import_regime == "cross_border_ecommerce"
+    assert offer.customs.cross_border_ecommerce_eligible is True
+    assert offer.customs.provider == "deterministic-sandbox-tax-fixture"
+    assert offer.customs.valuation is not None
+    assert offer.customs.valuation.customs_conversion is not None
+    assert offer.customs.valuation.customs_conversion.rate_basis == "monthly_customs_assessment"
+    assert offer.customs.valuation.provider == "deterministic-sandbox-customs-valuation-fixture"
+    assert offer.price_conversion is not None
+    assert offer.price_conversion.source_currency == "USD"
+    assert offer.price_conversion.rate_to_cny == 7.18
+    assert offer.price_conversion.rate_type == "sandbox_fixture"
+    assert offer.price_conversion.provider == "deterministic-sandbox-fx-fixture"
+    assert offer.shipping_quote is not None
+    assert offer.shipping_quote.quote_type == "sandbox_fixture"
+    assert offer.shipping_quote.destination_country == "CN"
+    assert offer.shipping_quote.chargeable_weight_kg == 0.34
+    assert offer.shipping_quote.provider == "deterministic-sandbox-shipping-fixture"
     assert offer.product_url.startswith("https://www.amazon.com/s?")
     assert offer.link_kind == "marketplace_search"
 

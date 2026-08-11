@@ -32,7 +32,7 @@ def test_exact_offer_result_exposes_mode_matching_offers_and_alternatives(client
         item["identity_evidence"]["decision"] == "alternative_candidate"
         for item in result["alternative_candidates"]
     )
-    assert "Alternative Candidate" in result["final_answer"]
+    assert "相似商品候选" in result["final_answer"]
 
 
 def test_product_research_result_keeps_different_fixture_products_comparable(client) -> None:

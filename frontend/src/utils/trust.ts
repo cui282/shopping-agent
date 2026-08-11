@@ -14,18 +14,18 @@ import type { ServiceStatus } from "../hooks/useShoppingAgent";
 
 export function providerModeLabel(mode: ProviderMode | string): string {
   const labels: Record<ProviderMode, string> = {
-    live: "Live Result",
-    mixed: "Developer Diagnostic · Mixed Source",
-    sandbox: "Sandbox Result",
-    unverified: "Result source pending",
+    live: "实时数据",
+    mixed: "部分结果含演示数据",
+    sandbox: "演示数据",
+    unverified: "数据来源待确认",
   };
-  return labels[mode as ProviderMode] ?? "Result source pending";
+  return labels[mode as ProviderMode] ?? "数据来源待确认";
 }
 
 export function resultBadgeLabel(dataMode: DataMode | string, resultKind: ResultKind | string): string {
-  if (dataMode === "mixed") return "Developer Diagnostic · Mixed Source";
-  if (resultKind === "partial") return "Partial Result";
-  return dataMode === "sandbox" ? "Sandbox Result" : "Live Result";
+  if (dataMode === "mixed") return "部分结果含演示数据";
+  if (resultKind === "partial") return "部分平台结果";
+  return dataMode === "sandbox" ? "演示结果" : "实时结果";
 }
 
 export function providerSourceLabel(source: ProviderSource): string {
@@ -136,11 +136,24 @@ export function recallChannelLabel(channel: RecallChannelName | string): string 
 
 export function recallModeLabel(mode: RecallMode | string): string {
   const labels: Record<string, string> = {
-    hybrid: "Hybrid recall",
-    partial_hybrid: "Partial hybrid recall",
-    deterministic_fallback: "Deterministic fallback",
+    hybrid: "增强检索",
+    partial_hybrid: "部分增强检索",
+    deterministic_fallback: "基础检索",
   };
   return labels[mode] ?? mode;
+}
+
+export function recallFallbackReasonLabel(reason: string): string {
+  const labels: Record<string, string> = {
+    optional_recall_unavailable: "部分增强召回服务未启用，已自动使用稳定的基础召回完成候选筛选。",
+    partial_channel_failure: "部分增强召回服务暂不可用，已使用其余可用通道继续完成候选筛选。",
+    faiss_empty_response: "向量召回暂未找到候选，已使用其他可用召回结果继续筛选。",
+  };
+  if (reason in labels) return labels[reason];
+  if (reason.startsWith("faiss_")) {
+    return "向量召回暂不可用，已自动使用其他可用召回路径继续筛选。";
+  }
+  return "部分增强召回服务未参与，本次结果已通过可用召回路径完成。";
 }
 
 export function recallStateLabel(state: RecallChannelState | string): string {
@@ -181,10 +194,10 @@ export function readinessComponentLabel(name: string): string {
 }
 
 export function personalizationInputSourceLabel(source: string): string {
-  if (source === "remembered_preference") return "显式 Remembered Preference";
-  return "无保存偏好输入";
+  if (source === "remembered_preference") return "已保存的偏好";
+  return "未使用已保存偏好";
 }
 
 export function personalizationSignalLabel(signal: string): string {
-  return signal === "user_tower" ? "User tower preference-match signal（旧部署兼容）" : "未使用 User tower signal";
+  return signal === "user_tower" ? "已使用旧版个性化匹配信号" : "未使用旧版个性化匹配信号";
 }

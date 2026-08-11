@@ -846,6 +846,8 @@ async def _run_agent_impl(
             exchange_rate=prices.exchange_rate,
             excluded_currencies=prices.excluded_currencies,
             calculation_exclusions=prices.calculation_exclusions,
+            shipping_exclusions=shipping.shipping_exclusions,
+            tax_exclusions=shipping.tax_exclusions,
             shipping_basis=shipping.calculation_basis,
             unavailable_marketplaces=[
                 name

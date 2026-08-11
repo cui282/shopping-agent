@@ -260,16 +260,19 @@ Shopping Agent 向数据提供商通道 endpoint 发送 `GET` 请求，查询参
 - `RELEASE_CHANNEL=canary` 与 `RELEASE_TRAFFIC_PERCENT` 提供确定性灰度 gate，`RELEASE_ROLLBACK=true` 停止接收新任务；收到 SIGTERM 后会等待 `SHUTDOWN_GRACE_SECONDS` 再取消剩余长任务。
 - `LLM_TOKEN_BUDGET` 可启用 main/lite/minimal 路由；LangFuse 配置后主 trace、Fork 子 span 和工具 span 使用 thread/parent thread 形成嵌套链路，仍需额外安装 SDK。
 
-跨币种排序应配置可维护的汇率快照：
+线上到手价不使用进程级静态汇率表，也不按平台和假定重量套运费档位。数据提供商必须随每个
+非人民币 offer 返回带观测时间、有效期、报价类型、加价口径、来源和引用的
+`price_conversion`；并返回面向中国大陆、绑定线路和运输服务的 `shipping_quote`。运费报价保留
+原币总额、基础运费、附加费、优惠、实际/体积/计费重量、时效、来源和有效期；外币运费还要携带
+独立的人民币换算证据。缺失、无效或过期证据的候选保留在 Product Evidence 中，但不会参与到手价
+排序；全部商品无法换算时任务以 `fx_rates_unavailable` 明确失败。
 
-```dotenv
-FX_RATES_JSON={"CNY":1,"USD":7.21,"EUR":7.84,"SGD":5.34}
-FX_RATE_SOURCE=treasury-daily-feed
-FX_RATES_AS_OF=2026-07-30
-```
-
-未提供时，系统会使用内置参考表，并在结果中明确标记来源与日期未指定。运费和税费始终是估算值，购买前应以平台结算页为准。
-部分候选缺少汇率时会被排除并在结果中披露；如果全部候选都无法换算，任务会以 `fx_rates_unavailable` 明确失败，不会伪装成“没有合适商品”。
+用于客户横向比较的报价汇率、支付结算汇率和海关计税汇率是三个不同口径。一般贸易和跨境电商
+的 `customs.valuation` 必须另外返回申报月海关汇率及 CIF 完税价格明细，不能复用客户比价汇率。
+进口税率仍按 HS Code、原产地、进口模式和生效日期提供，不按平台名套固定比例。个人邮递物品
+另行校验个人自用资格、政策限值、不可分割单件例外和免税门槛。最终支付金额、承运费用和税费以
+平台结算页、发卡行、承运商与海关核定为准。完整规则见
+[汇率与运费实现边界](docs/FX_AND_SHIPPING.md)和[进口税费实现边界](docs/IMPORT_TAX.md)。
 
 ## API 与事件
 

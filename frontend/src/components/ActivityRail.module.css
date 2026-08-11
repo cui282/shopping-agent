@@ -3,21 +3,22 @@
   height: 100%;
   min-height: 0;
   grid-template-rows: auto auto minmax(180px, 1fr) auto;
-  background: var(--canvas);
+  background: #f8faf8;
 }
 
 .topbar {
   display: flex;
-  min-height: 72px;
+  min-height: 60px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 9px 14px;
   border-bottom: 1px solid var(--line);
 }
 
 .eyebrow {
   color: var(--ink-muted);
+  font-family: var(--font-data);
   font-size: 9px;
   font-weight: 650;
   line-height: 1.4;
@@ -25,8 +26,9 @@
 
 .topbar h2 {
   margin: 2px 0 0;
-  font-size: 16px;
-  font-weight: 670;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
   line-height: 1.35;
 }
 
@@ -47,20 +49,21 @@
 
 .pipeline {
   display: grid;
-  gap: 5px;
+  gap: 2px;
   margin: 0;
-  padding: 14px 16px;
+  padding: 11px 14px;
   border-bottom: 1px solid var(--line);
   list-style: none;
 }
 
 .pipeline li {
+  position: relative;
   display: flex;
-  min-height: 28px;
+  min-height: 25px;
   align-items: center;
   gap: 9px;
   color: var(--ink-muted);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 560;
 }
 
@@ -80,12 +83,24 @@
 
 .stageIcon {
   display: grid;
-  width: 20px;
-  height: 20px;
-  flex: 0 0 20px;
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
   place-items: center;
-  border-radius: var(--r-pill);
+  border-radius: var(--r-sm);
   background: color-mix(in oklch, currentColor 11%, transparent);
+}
+
+.pipeline li:not(:last-child)::after {
+  position: absolute;
+  z-index: 0;
+  top: 20px;
+  bottom: -4px;
+  left: 8px;
+  width: 1px;
+  background: color-mix(in oklch, currentColor 24%, var(--line));
+  content: "";
 }
 
 .spinning {
@@ -102,7 +117,7 @@
   display: flex;
   min-height: 0;
   flex-direction: column;
-  padding: 12px 10px 8px 16px;
+  padding: 10px 8px 7px 14px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -117,7 +132,7 @@
 
 .sectionHeading h3 {
   margin: 0;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 670;
   line-height: 1.45;
 }
@@ -131,7 +146,8 @@
   border-radius: var(--r-sm);
   color: var(--ink-muted);
   background: var(--surface-muted);
-  font-size: 9px;
+  font-family: var(--font-data);
+  font-size: 8px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -220,6 +236,7 @@
 .eventList time {
   padding-top: 2px;
   color: var(--ink-muted);
+  font-family: var(--font-data);
   font-size: 8px;
   font-variant-numeric: tabular-nums;
 }
@@ -248,8 +265,8 @@
 }
 
 .preferences {
-  padding: 12px 16px calc(14px + env(safe-area-inset-bottom));
-  background: var(--surface-muted);
+  padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
+  background: #eef2ef;
 }
 
 .backendStatus {

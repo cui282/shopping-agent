@@ -59,6 +59,7 @@ interface ActivityRailProps {
   userId: string;
   preferenceStore?: "memory" | "redis";
   preferenceBackend?: PreferenceBackendStatus;
+  preferenceRevision?: number;
   onClose: () => void;
 }
 
@@ -81,6 +82,7 @@ export default function ActivityRail({
   userId,
   preferenceStore,
   preferenceBackend,
+  preferenceRevision = 0,
   onClose,
 }: ActivityRailProps) {
   const [preferences, setPreferences] = useState<string[]>([]);
@@ -122,7 +124,7 @@ export default function ActivityRail({
   useEffect(() => {
     void loadPreferences();
     return () => preferenceRequestRef.current?.abort();
-  }, [userId, refreshKey]);
+  }, [userId, refreshKey, preferenceRevision]);
 
   useEffect(() => {
     if (preferenceBackend) setBackendStatus(preferenceBackend);

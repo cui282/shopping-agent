@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -8,6 +9,24 @@ from typing_extensions import TypeAliasType
 
 Platform = Literal["amazon", "shopee", "aliexpress", "ebay"]
 ProviderSource = Literal["live", "curated", "fixture", "computed"]
+CurrencyConversionPurpose = Literal["comparison_estimate"]
+CurrencyConversionRateType = Literal[
+    "provider_quote",
+    "card_network_estimate",
+    "mid_market_reference",
+    "sandbox_fixture",
+]
+CurrencyMarkupStatus = Literal["included", "excluded", "unknown"]
+ShippingQuoteType = Literal[
+    "carrier_quote",
+    "marketplace_checkout",
+    "shipping_included",
+    "sandbox_fixture",
+]
+CustomsFxRateBasis = Literal[
+    "monthly_customs_assessment",
+    "customs_prescribed_adjustment",
+]
 DataMode = Literal["live", "sandbox", "mixed"]
 ResearchMode = Literal["product_research", "exact_offer_comparison"]
 ContextMessageRole = Literal["system", "user", "assistant", "tool"]
@@ -34,6 +53,28 @@ ProviderFailureReason = Literal[
     "circuit_open",
 ]
 OfferLinkKind = Literal["product_detail", "marketplace_search"]
+ImportRegime = Literal[
+    "general_trade",
+    "cross_border_ecommerce",
+    "personal_postal",
+    "seller_collected",
+]
+TaxRateType = Literal[
+    "mfn",
+    "agreement",
+    "preferential",
+    "temporary",
+    "ordinary",
+    "cross_border_policy",
+    "personal_postal",
+    "provider_quote",
+]
+TaxCalculationMethod = Literal[
+    "statutory_formula",
+    "cross_border_policy",
+    "personal_postal_rate",
+    "provider_quote",
+]
 ConstraintStatus = Literal["satisfied", "violated", "unknown"]
 ConstraintKind = Literal["budget", "material", "attribute", "specification"]
 ConstraintOperator = Literal[
@@ -61,7 +102,12 @@ MemoryAction = Literal["remember", "forget"]
 PreferenceDecisionStatus = Literal["applied", "ignored", "overridden"]
 PreferenceDecisionSource = Literal["current_request", "remembered_preference"]
 PreferenceDurability = Literal["local_evaluation", "durable"]
-CalculationExclusionReason = Literal["unsupported_currency", "invalid_amount"]
+CalculationExclusionReason = Literal[
+    "unsupported_currency",
+    "missing_fx_evidence",
+    "invalid_fx_evidence",
+    "invalid_amount",
+]
 ClarificationField = Literal["mode", "product_variant", "destination"]
 ClarificationReasonCode = Literal[
     "mode_ambiguous",
@@ -205,13 +251,345 @@ class IdentityEvidence(StrictModel):
     matched_fields: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     conflicting_fields: list[str] = Field(default_factory=list)
-    explanation: str = "Product Research 不要求跨平台同款证明。"
+    explanation: str = "不同商品推荐不要求跨平台同款证明。"
 
 
 class OfferProvenance(StrictModel):
     kind: Literal["marketplace_gateway", "sandbox_fixture"]
     provider: str | None = None
     upstream_source: str | None = None
+
+
+class CurrencyConversionEvidence(StrictModel):
+    """A time-bound provider quote used only to normalize an offer for comparison."""
+
+    source_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    target_currency: Literal["CNY"] = "CNY"
+    rate_to_cny: float = Field(gt=0)
+    purpose: CurrencyConversionPurpose = "comparison_estimate"
+    rate_type: CurrencyConversionRateType
+    markup_status: CurrencyMarkupStatus = "unknown"
+    markup_bps: float | None = Field(default=None, ge=0, le=10_000)
+    provider: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=500)
+    observed_at: str = Field(min_length=1)
+    expires_at: str | None = Field(default=None, min_length=1)
+
+    @field_validator("source_currency", mode="before")
+    @classmethod
+    def normalize_source_currency(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("observed_at", "expires_at")
+    @classmethod
+    def validate_timestamp(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise ValueError("currency conversion timestamps must be valid ISO datetimes") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("currency conversion timestamps must include a timezone")
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @model_validator(mode="after")
+    def validate_quote(self) -> CurrencyConversionEvidence:
+        if self.source_currency == self.target_currency:
+            raise ValueError("currency conversion evidence is only valid across currencies")
+        if self.markup_bps is not None and self.markup_status != "included":
+            raise ValueError("markup_bps requires markup_status=included")
+        if self.expires_at is not None:
+            observed = datetime.fromisoformat(self.observed_at.replace("Z", "+00:00"))
+            expires = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+            if expires <= observed:
+                raise ValueError("currency conversion expires_at must be after observed_at")
+        return self
+
+
+class ShippingQuoteEvidence(StrictModel):
+    """A route- and service-specific shipping quote supplied by the data channel."""
+
+    quote_type: ShippingQuoteType
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    total_amount: float = Field(ge=0)
+    base_amount: float | None = Field(default=None, ge=0)
+    surcharge_amount: float = Field(default=0, ge=0)
+    discount_amount: float = Field(default=0, ge=0)
+    actual_weight_kg: float | None = Field(default=None, gt=0)
+    dimensional_weight_kg: float | None = Field(default=None, gt=0)
+    chargeable_weight_kg: float | None = Field(default=None, gt=0)
+    length_cm: float | None = Field(default=None, gt=0)
+    width_cm: float | None = Field(default=None, gt=0)
+    height_cm: float | None = Field(default=None, gt=0)
+    dimensional_divisor: float | None = Field(default=None, gt=0)
+    origin_country: str = Field(min_length=2, max_length=80)
+    destination_country: str = Field(default="CN", min_length=2, max_length=80)
+    service_name: str = Field(min_length=1, max_length=200)
+    eta_min_days: int = Field(ge=0)
+    eta_max_days: int = Field(ge=0)
+    provider: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=500)
+    observed_at: str = Field(min_length=1)
+    expires_at: str | None = Field(default=None, min_length=1)
+    currency_conversion: CurrencyConversionEvidence | None = None
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def normalize_currency(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @field_validator("origin_country", "destination_country", mode="before")
+    @classmethod
+    def normalize_shipping_country(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized.upper() if len(normalized) == 2 else normalized
+        return value
+
+    @field_validator("observed_at", "expires_at")
+    @classmethod
+    def validate_shipping_timestamp(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        raw = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError as exc:
+            raise ValueError("shipping quote timestamps must be valid ISO datetimes") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("shipping quote timestamps must include a timezone")
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    @model_validator(mode="after")
+    def validate_shipping_quote(self) -> ShippingQuoteEvidence:
+        if self.destination_country != "CN":
+            raise ValueError("shipping quote must target destination_country=CN")
+        if self.eta_max_days < self.eta_min_days:
+            raise ValueError("eta_max_days must be greater than or equal to eta_min_days")
+        if (
+            self.base_amount is not None
+            and abs(
+                self.total_amount
+                - (self.base_amount + self.surcharge_amount - self.discount_amount)
+            )
+            > 0.01
+        ):
+            raise ValueError("shipping total must reconcile with base, surcharge, and discount")
+        known_weights = [
+            value
+            for value in (self.actual_weight_kg, self.dimensional_weight_kg)
+            if value is not None
+        ]
+        if (
+            self.chargeable_weight_kg is not None
+            and known_weights
+            and self.chargeable_weight_kg < max(known_weights)
+        ):
+            raise ValueError("chargeable weight cannot be lower than known package weights")
+        dimensions = (self.length_cm, self.width_cm, self.height_cm)
+        if any(value is not None for value in dimensions) and not all(
+            value is not None for value in dimensions
+        ):
+            raise ValueError("package dimensions must include length, width, and height")
+        if self.dimensional_divisor is not None and not all(
+            value is not None for value in dimensions
+        ):
+            raise ValueError("dimensional divisor requires complete package dimensions")
+        if self.currency == "CNY" and self.currency_conversion is not None:
+            raise ValueError("CNY shipping quotes do not require currency conversion")
+        if self.currency != "CNY":
+            if self.currency_conversion is None:
+                raise ValueError("non-CNY shipping quote requires currency conversion evidence")
+            if self.currency_conversion.source_currency != self.currency:
+                raise ValueError("shipping currency conversion must match quote currency")
+        if self.expires_at is not None:
+            observed = datetime.fromisoformat(self.observed_at.replace("Z", "+00:00"))
+            expires = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+            if expires <= observed:
+                raise ValueError("shipping quote expires_at must be after observed_at")
+        return self
+
+
+class CustomsExchangeRateEvidence(StrictModel):
+    """China Customs assessment rate for the declaration month, separate from payment FX."""
+
+    source_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    target_currency: Literal["CNY"] = "CNY"
+    rate_to_cny: float = Field(gt=0)
+    rate_basis: CustomsFxRateBasis = "monthly_customs_assessment"
+    declaration_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    assessment_month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    provider: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=500)
+
+    @field_validator("source_currency", mode="before")
+    @classmethod
+    def normalize_customs_source_currency(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def validate_customs_rate_period(self) -> CustomsExchangeRateEvidence:
+        try:
+            declaration = date.fromisoformat(self.declaration_date)
+            date.fromisoformat(f"{self.assessment_month}-01")
+        except ValueError as exc:
+            raise ValueError("customs exchange-rate dates must be valid calendar dates") from exc
+        if declaration.strftime("%Y-%m") != self.assessment_month:
+            raise ValueError("customs assessment_month must match the declaration month")
+        if self.source_currency == self.target_currency:
+            raise ValueError("customs exchange evidence is only valid across currencies")
+        return self
+
+
+class CustomsValuationEvidence(StrictModel):
+    """Provider-supplied CIF customs value and its independently auditable components."""
+
+    valuation_method: Literal["transaction_value_cif"] = "transaction_value_cif"
+    goods_value_original: float = Field(ge=0)
+    goods_currency: str = Field(pattern=r"^[A-Z]{3}$")
+    goods_value_cny: float = Field(ge=0)
+    international_shipping_cny: float = Field(ge=0)
+    insurance_cny: float = Field(default=0, ge=0)
+    customs_value_cny: float = Field(ge=0)
+    customs_conversion: CustomsExchangeRateEvidence | None = None
+    provider: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=500)
+
+    @field_validator("goods_currency", mode="before")
+    @classmethod
+    def normalize_goods_currency(cls, value: Any) -> Any:
+        return value.strip().upper() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def reconcile_customs_value(self) -> CustomsValuationEvidence:
+        cent = Decimal("0.01")
+        if self.goods_currency == "CNY":
+            if self.customs_conversion is not None:
+                raise ValueError("CNY customs goods value does not require exchange evidence")
+            expected_goods = Decimal(str(self.goods_value_original)).quantize(
+                cent, rounding=ROUND_HALF_UP
+            )
+        else:
+            if self.customs_conversion is None:
+                raise ValueError("non-CNY customs value requires customs exchange evidence")
+            if self.customs_conversion.source_currency != self.goods_currency:
+                raise ValueError("customs exchange currency must match goods_currency")
+            expected_goods = (
+                Decimal(str(self.goods_value_original))
+                * Decimal(str(self.customs_conversion.rate_to_cny))
+            ).quantize(cent, rounding=ROUND_HALF_UP)
+        if abs(expected_goods - Decimal(str(self.goods_value_cny))) > cent:
+            raise ValueError("goods_value_cny must reconcile with the customs exchange rate")
+        expected_customs = (
+            Decimal(str(self.goods_value_cny))
+            + Decimal(str(self.international_shipping_cny))
+            + Decimal(str(self.insurance_cny))
+        ).quantize(cent, rounding=ROUND_HALF_UP)
+        if abs(expected_customs - Decimal(str(self.customs_value_cny))) > cent:
+            raise ValueError("customs_value_cny must reconcile with CIF components")
+        return self
+
+
+class CustomsTaxEvidence(StrictModel):
+    """Provider-supplied classification and rate snapshot for imports into China."""
+
+    hs_code: str = Field(pattern=r"^\d{6,10}$")
+    country_of_origin: str = Field(min_length=2, max_length=80)
+    destination_country: str = Field(default="CN", min_length=2, max_length=80)
+    ship_from_country: str | None = Field(default=None, min_length=2, max_length=80)
+    import_regime: ImportRegime
+    rate_type: TaxRateType
+    tariff_rate: float | None = Field(default=None, ge=0, le=5)
+    import_vat_rate: float | None = Field(default=None, ge=0, le=1)
+    consumption_tax_rate: float = Field(default=0, ge=0, lt=1)
+    personal_postal_tax_rate: float | None = Field(default=None, ge=0, le=5)
+    personal_postal_assessed_value_cny: float | None = Field(default=None, ge=0)
+    personal_postal_total_value_cny: float | None = Field(default=None, ge=0)
+    personal_postal_value_limit_cny: float | None = Field(default=None, gt=0)
+    personal_postal_tax_exemption_threshold_cny: float | None = Field(default=None, ge=0)
+    personal_postal_single_indivisible_item: bool | None = None
+    personal_postal_eligible: bool | None = None
+    seller_collected_tax_cny: float | None = Field(default=None, ge=0)
+    insurance_cny: float = Field(default=0, ge=0)
+    valuation: CustomsValuationEvidence | None = None
+    cross_border_ecommerce_eligible: bool | None = None
+    provider: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=500)
+    effective_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+    @field_validator("country_of_origin", "destination_country", "ship_from_country", mode="before")
+    @classmethod
+    def normalize_country(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            normalized = value.strip()
+            return normalized.upper() if len(normalized) == 2 else normalized
+        return value
+
+    @field_validator("effective_date")
+    @classmethod
+    def validate_effective_date(cls, value: str) -> str:
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("effective_date must be a valid ISO calendar date") from exc
+        return value
+
+    @model_validator(mode="after")
+    def validate_regime_evidence(self) -> CustomsTaxEvidence:
+        if self.destination_country != "CN":
+            raise ValueError("customs tax evidence must target destination_country=CN")
+        if (
+            self.valuation is not None
+            and abs(self.insurance_cny - self.valuation.insurance_cny) > 0.01
+        ):
+            raise ValueError("customs insurance_cny must match valuation insurance_cny")
+        if self.import_regime == "general_trade":
+            if self.rate_type in {
+                "cross_border_policy",
+                "personal_postal",
+                "provider_quote",
+            }:
+                raise ValueError("general_trade requires a statutory tariff rate type")
+            if self.tariff_rate is None or self.import_vat_rate is None:
+                raise ValueError("general_trade requires tariff_rate and import_vat_rate")
+        elif self.import_regime == "cross_border_ecommerce":
+            if self.rate_type != "cross_border_policy":
+                raise ValueError("cross_border_ecommerce requires cross_border_policy rate type")
+            if self.cross_border_ecommerce_eligible is not True:
+                raise ValueError("cross_border_ecommerce requires explicit policy eligibility")
+            if self.import_vat_rate is None:
+                raise ValueError("cross_border_ecommerce requires import_vat_rate")
+            if self.tariff_rate not in {None, 0}:
+                raise ValueError("eligible cross_border_ecommerce tariff_rate must be zero")
+        elif self.import_regime == "personal_postal":
+            if self.rate_type != "personal_postal" or self.personal_postal_tax_rate is None:
+                raise ValueError("personal_postal requires its comprehensive tax rate")
+            if self.personal_postal_eligible is not True:
+                raise ValueError("personal_postal requires explicit personal-use eligibility")
+            if (
+                self.personal_postal_assessed_value_cny is None
+                or self.personal_postal_total_value_cny is None
+                or self.personal_postal_value_limit_cny is None
+                or self.personal_postal_tax_exemption_threshold_cny is None
+                or self.personal_postal_single_indivisible_item is None
+            ):
+                raise ValueError(
+                    "personal_postal requires assessed value, total value, policy limits, "
+                    "and parcel divisibility evidence"
+                )
+            if (
+                self.personal_postal_total_value_cny > self.personal_postal_value_limit_cny
+                and self.personal_postal_single_indivisible_item is not True
+            ):
+                raise ValueError(
+                    "personal_postal above the value limit requires a single indivisible item"
+                )
+        elif self.import_regime == "seller_collected":
+            if self.rate_type != "provider_quote" or self.seller_collected_tax_cny is None:
+                raise ValueError("seller_collected requires a provider tax quote")
+        return self
 
 
 class MarketplaceDemand(StrictModel):
@@ -477,6 +855,15 @@ class ExchangeRateProvenance(StrictModel):
     source: str = Field(default="unspecified", min_length=1)
     effective_date: str = Field(default="unspecified", min_length=1)
     calculation_basis: str = Field(default="original_amount * rate_to_cny", min_length=1)
+    providers: list[str] = Field(default_factory=list)
+    quote_count: int = Field(default=0, ge=0)
+    settlement_notice: str = Field(
+        default=(
+            "人民币金额仅用于研究时点比价；最终支付金额以结算页、发卡行或支付机构的"
+            "实际汇率、费用和动态货币转换选择为准。"
+        ),
+        min_length=1,
+    )
 
 
 class CalculationExclusion(StrictModel):
@@ -713,6 +1100,9 @@ class Candidate(StrictModel):
     provenance: OfferProvenance | None = None
     link_kind: OfferLinkKind | None = None
     identity_evidence: IdentityEvidence | None = None
+    price_conversion: CurrencyConversionEvidence | None = None
+    shipping_quote: ShippingQuoteEvidence | None = None
+    customs: CustomsTaxEvidence | None = None
 
     @model_validator(mode="after")
     def normalize_marketplace(self) -> Candidate:
@@ -762,6 +1152,9 @@ class PricePoint(StrictModel):
     provenance: OfferProvenance | None = None
     link_kind: OfferLinkKind | None = None
     identity_evidence: IdentityEvidence | None = None
+    price_conversion: CurrencyConversionEvidence | None = None
+    shipping_quote: ShippingQuoteEvidence | None = None
+    customs: CustomsTaxEvidence | None = None
 
     @model_validator(mode="after")
     def normalize_marketplace(self) -> PricePoint:
@@ -783,15 +1176,78 @@ class PriceCompareOutput(StrictModel):
     calculation_exclusions: list[CalculationExclusion] = Field(default_factory=list)
 
 
+class ImportTaxBreakdown(StrictModel):
+    import_regime: ImportRegime
+    calculation_method: TaxCalculationMethod
+    hs_code: str
+    country_of_origin: str
+    destination_country: str
+    customs_value_cny: float = Field(ge=0)
+    customs_valuation: CustomsValuationEvidence | None = None
+    rate_type: TaxRateType
+    tariff_rate: float | None = Field(default=None, ge=0, le=5)
+    import_vat_rate: float | None = Field(default=None, ge=0, le=1)
+    consumption_tax_rate: float | None = Field(default=None, ge=0, lt=1)
+    personal_postal_tax_rate: float | None = Field(default=None, ge=0, le=5)
+    personal_postal_assessed_value_cny: float | None = Field(default=None, ge=0)
+    personal_postal_total_value_cny: float | None = Field(default=None, ge=0)
+    personal_postal_value_limit_cny: float | None = Field(default=None, gt=0)
+    personal_postal_tax_exemption_threshold_cny: float | None = Field(default=None, ge=0)
+    personal_postal_single_indivisible_item: bool | None = None
+    policy_factor: float = Field(default=1, ge=0, le=1)
+    tariff_cny: float | None = Field(default=None, ge=0)
+    import_vat_cny: float | None = Field(default=None, ge=0)
+    consumption_tax_cny: float | None = Field(default=None, ge=0)
+    tax_before_exemption_cny: float | None = Field(default=None, ge=0)
+    tax_exemption_cny: float = Field(default=0, ge=0)
+    tax_exemption_reason: str | None = None
+    total_import_tax_cny: float = Field(ge=0)
+    provider: str
+    source_reference: str
+    effective_date: str
+    calculation_basis: str
+
+
+class TaxCalculationExclusion(StrictModel):
+    item_id: str
+    platform: Platform
+    title: str
+    reason_code: Literal[
+        "missing_customs_evidence",
+        "missing_customs_valuation",
+        "invalid_customs_evidence",
+        "unsupported_tax_destination",
+    ]
+    reason: str
+
+
+class ShippingCalculationExclusion(StrictModel):
+    item_id: str
+    platform: Platform
+    title: str
+    reason_code: Literal[
+        "missing_shipping_quote",
+        "invalid_shipping_quote",
+        "expired_shipping_quote",
+    ]
+    reason: str
+
+
 class LandedCost(PricePoint):
     shipping_cny: float
-    duty_cny: float
+    insurance_cny: float = 0
+    duty_cny: float | None
+    import_vat_cny: float | None = None
+    consumption_tax_cny: float | None = None
+    import_tax_cny: float | None = None
     landed_cny: float
     eta_days: int
     duty_tier: Literal["免征", "标准", "高税"]
     shipping_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
     duty_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
+    tax_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
     delivery_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
+    tax_breakdown: ImportTaxBreakdown | None = None
 
 
 class ReportEvidence(StrictModel):
@@ -806,7 +1262,11 @@ class ReportEvidence(StrictModel):
     original_currency: str
     price_cny: float | None = None
     shipping_cny: float | None = None
+    insurance_cny: float | None = None
     duty_cny: float | None = None
+    import_vat_cny: float | None = None
+    consumption_tax_cny: float | None = None
+    import_tax_cny: float | None = None
     landed_cny: float | None = None
     eta_days: int | None = None
     rating: float | None = None
@@ -822,6 +1282,10 @@ class ReportEvidence(StrictModel):
     retrieved_at: str | None = None
     link_kind: OfferLinkKind | None = None
     product_url: str | None = None
+    price_conversion: CurrencyConversionEvidence | None = None
+    shipping_quote: ShippingQuoteEvidence | None = None
+    customs: CustomsTaxEvidence | None = None
+    tax_breakdown: ImportTaxBreakdown | None = None
 
 
 class ConstraintEvidence(StrictModel):
@@ -873,6 +1337,8 @@ class ShippingCalcOutput(StrictModel):
     items: list[LandedCost]
     calculation_basis: str
     estimated: bool = True
+    shipping_exclusions: list[ShippingCalculationExclusion] = Field(default_factory=list)
+    tax_exclusions: list[TaxCalculationExclusion] = Field(default_factory=list)
 
 
 class Recommendation(LandedCost):
@@ -958,6 +1424,8 @@ class ShoppingSummaryOutput(StrictModel):
     calculation_notice: str
     exchange_rate: ExchangeRateProvenance = Field(default_factory=ExchangeRateProvenance)
     calculation_exclusions: list[CalculationExclusion] = Field(default_factory=list)
+    shipping_exclusions: list[ShippingCalculationExclusion] = Field(default_factory=list)
+    tax_exclusions: list[TaxCalculationExclusion] = Field(default_factory=list)
     ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
     data_mode: DataMode = "live"
     result_kind: ResultKind = "live"

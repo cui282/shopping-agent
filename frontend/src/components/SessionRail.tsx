@@ -72,7 +72,7 @@ export default function SessionRail({
                   {session.lineage && (
                     <span className={styles.lineage}>
                       <GitBranch size={12} aria-hidden="true" />
-                      {session.lineage.relation === "constraint_relaxation" ? "放宽约束" : "Research Rerun"}
+                      {session.lineage.relation === "constraint_relaxation" ? "放宽条件" : "重新研究"}
                       {` · 第 ${session.lineage.depth} 代`}
                     </span>
                   )}

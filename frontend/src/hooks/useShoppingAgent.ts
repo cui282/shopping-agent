@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
-import { api, buildWebSocketUrl } from "../api/client";
+import { ApiError, api, buildWebSocketUrl } from "../api/client";
 import type {
   ConnectionStatus,
   ClarificationPrompt,
@@ -38,6 +38,9 @@ export interface AgentState {
   readiness: ReadinessResponse | null;
   serviceStatus: ServiceStatus;
   serviceError: string | null;
+  loadingSnapshot: boolean;
+  loadError: string | null;
+  snapshotFallbackStatus: TaskStatus | null;
 }
 
 export const initialAgentState: AgentState = {
@@ -56,6 +59,9 @@ export const initialAgentState: AgentState = {
   readiness: null,
   serviceStatus: "checking",
   serviceError: null,
+  loadingSnapshot: false,
+  loadError: null,
+  snapshotFallbackStatus: null,
 };
 
 function mergeEvents(...timelines: MonitorEvent[][]): MonitorEvent[] {
@@ -220,6 +226,8 @@ type Action =
   | { type: "service_loaded"; health: HealthResponse; readiness: ReadinessResponse }
   | { type: "service_failure"; message: string }
   | { type: "starting"; query: string }
+  | { type: "loading_snapshot"; threadId: string; query: string; knownStatus?: TaskStatus }
+  | { type: "snapshot_load_failure"; message: string; serviceUnavailable: boolean }
   | { type: "started"; threadId: string }
   | { type: "connection"; connection: ConnectionStatus }
   | { type: "event"; event: MonitorEvent }
@@ -262,6 +270,44 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         clarification: null,
         error: null,
         providerMode: "unverified",
+        loadingSnapshot: false,
+        loadError: null,
+        snapshotFallbackStatus: null,
+      };
+    case "loading_snapshot":
+      return {
+        ...state,
+        threadId: action.threadId,
+        runId: null,
+        query: action.query,
+        status: action.knownStatus ?? "idle",
+        connection: "idle",
+        events: [],
+        result: null,
+        snapshot: null,
+        clarification: null,
+        error: null,
+        providerMode: "unverified",
+        loadingSnapshot: true,
+        loadError: null,
+        snapshotFallbackStatus: action.knownStatus ?? null,
+      };
+    case "snapshot_load_failure":
+      return {
+        ...state,
+        status: state.snapshotFallbackStatus ?? state.status,
+        connection: "disconnected",
+        error: null,
+        loadingSnapshot: false,
+        loadError: action.message,
+        ...(action.serviceUnavailable
+          ? {
+              health: null,
+              readiness: null,
+              serviceStatus: "unavailable" as const,
+              serviceError: action.message,
+            }
+          : {}),
       };
     case "started":
       return { ...state, threadId: action.threadId, status: "connecting", connection: "connecting" };
@@ -303,7 +349,15 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
     case "cancelled":
       return { ...state, status: "cancelled", connection: "idle", clarification: null, error: null };
     case "failure":
-      return { ...state, status: "error", connection: "disconnected", error: action.message };
+      return {
+        ...state,
+        status: "error",
+        connection: "disconnected",
+        error: action.message,
+        loadingSnapshot: false,
+        loadError: null,
+        snapshotFallbackStatus: null,
+      };
     case "snapshot": {
       const snapshot = action.snapshot;
       const preserveCurrentEvents =
@@ -332,6 +386,9 @@ export function agentReducer(state: AgentState, action: Action): AgentState {
         clarification: snapshot.clarification ?? timelineClarification(events),
         providerMode: normalizeProviderMode(result?.provider_mode),
         error: snapshot.error ?? timelineError(events),
+        loadingSnapshot: false,
+        loadError: null,
+        snapshotFallbackStatus: null,
       };
     }
     case "reset":
@@ -736,7 +793,7 @@ export function useShoppingAgent() {
   );
 
   const loadThread = useCallback(
-    async (threadId: string, fallbackQuery: string) => {
+    async (threadId: string, fallbackQuery: string, knownStatus?: TaskStatus) => {
       startRequestRef.current?.abort();
       loadRequestRef.current?.abort();
       cancelRequestRef.current?.abort();
@@ -744,7 +801,7 @@ export function useShoppingAgent() {
       replaceTaskIntent(threadId);
       closeSocket();
       terminalRef.current = false;
-      dispatch({ type: "starting", query: fallbackQuery });
+      dispatch({ type: "loading_snapshot", threadId, query: fallbackQuery, knownStatus });
       const controller = new AbortController();
       loadRequestRef.current = controller;
       const intentGeneration = taskIntentRef.current.generation;
@@ -765,7 +822,18 @@ export function useShoppingAgent() {
         }
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        dispatch({ type: "failure", message: error instanceof Error ? error.message : "无法读取这次研究" });
+        if (
+          loadRequestRef.current !== controller ||
+          disposedRef.current ||
+          taskIntentRef.current.generation !== intentGeneration ||
+          taskIntentRef.current.threadId !== threadId
+        ) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "无法读取这次研究";
+        const serviceUnavailable =
+          error instanceof ApiError && (error.status === 0 || error.status === 408 || error.status >= 500);
+        dispatch({ type: "snapshot_load_failure", message, serviceUnavailable });
       } finally {
         if (loadRequestRef.current === controller) loadRequestRef.current = null;
       }

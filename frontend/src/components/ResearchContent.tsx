@@ -2,9 +2,11 @@ import { useState } from "react";
 import {
   AlertTriangle,
   ArrowUpRight,
+  BadgeDollarSign,
   Calculator,
   Download,
   ImageOff,
+  Info,
   ListOrdered,
   RefreshCw,
   RotateCcw,
@@ -24,6 +26,9 @@ import type {
   RankingDimension,
   RankingProfile,
   Recommendation,
+  ShoppingPlan,
+  ShippingCalculationExclusion,
+  TaxCalculationExclusion,
   UnverifiedCandidate,
   WorkingAssumption,
 } from "../types/api";
@@ -35,21 +40,24 @@ import {
   providerSourceLabel,
   providerStatusLabel,
   recallChannelLabel,
+  recallFallbackReasonLabel,
   recallModeLabel,
   recallStateLabel,
   personalizationInputSourceLabel,
   personalizationSignalLabel,
   resultBadgeLabel,
 } from "../utils/trust";
+import PreferenceConfirmation from "./PreferenceConfirmation";
+import RequirementSummary from "./RequirementSummary";
 import styles from "./ResearchContent.module.css";
 
 export type ResultView = "recommendations" | "comparison";
 
 const reportFormatLabels: Record<string, string> = {
-  markdown: "Markdown",
-  json: "JSON",
-  pdf: "PDF",
+  markdown: "详细版 Markdown",
+  pdf: "精简版 PDF",
 };
+const customerReportFormats = new Set(["markdown", "pdf"]);
 
 function reportFormat(file: GeneratedFile): string {
   if (file.format) return file.format;
@@ -58,8 +66,9 @@ function reportFormat(file: GeneratedFile): string {
 }
 
 function ReportDownloads({ files }: { files: GeneratedFile[] }) {
+  const customerFiles = files.filter((file) => customerReportFormats.has(reportFormat(file)));
   const [status, setStatus] = useState(
-    files.length ? `${files.length} 种格式已准备` : "暂无报告可下载",
+    customerFiles.length ? `${customerFiles.length} 份客户报告已准备` : "暂无报告可下载",
   );
   return (
     <div className={styles.downloads} aria-label="研究报告">
@@ -67,7 +76,7 @@ function ReportDownloads({ files }: { files: GeneratedFile[] }) {
       <span className={styles.downloadStatus} role="status" aria-label="研究报告下载" aria-live="polite">
         {status}
       </span>
-      {files.map((file) => {
+      {customerFiles.map((file) => {
         const format = reportFormat(file);
         const label = reportFormatLabels[format] ?? file.name;
         const url = resolveApiUrl(file.url);
@@ -98,8 +107,10 @@ interface ResearchContentProps {
   onViewChange: (view: ResultView) => void;
   onUseStarter: (query: string) => void;
   onReset: () => void;
+  onRetryLoad?: () => void;
   onRerun?: () => void;
   onRelax?: (constraintId: string) => void;
+  onRememberPreference?: (value: string) => Promise<boolean>;
 }
 
 function ProductImage({ product }: { product: Recommendation }) {
@@ -151,12 +162,12 @@ const defaultRankingProfile: RankingProfile = {
 };
 
 function researchModeLabel(mode: string | undefined): string {
-  return mode === "exact_offer_comparison" ? "Exact Offer Comparison" : "Product Research";
+  return mode === "exact_offer_comparison" ? "同款商品比价" : "不同商品推荐";
 }
 
 function identityEvidenceLabel(evidence: IdentityEvidence | null | undefined): string {
   if (!evidence || evidence.decision === "not_required") {
-    return "Product Research：无需同款证明";
+    return "不同商品推荐：无需证明为同款";
   }
   if (evidence.decision === "matching_offer") {
     if (evidence.basis === "identifier") {
@@ -164,12 +175,12 @@ function identityEvidenceLabel(evidence: IdentityEvidence | null | undefined): s
         ? "GTIN"
         : evidence.matched_fields.some((field) => field === "identity.mpn")
           ? "MPN"
-          : "跨平台 identifier";
+          : "跨平台商品标识";
       return `${identifier} 已验证同款`;
     }
     return "关键属性已验证同款";
   }
-  return "Identity Evidence 不足，列为替代候选";
+  return "同款证据不足，列为替代候选";
 }
 
 function availabilityLabel(value: string | null): string {
@@ -205,6 +216,59 @@ function estimateSource(source: string | undefined): string {
   return source ? `来源：${source}` : "来源未提供";
 }
 
+const importRegimeLabels: Record<string, string> = {
+  general_trade: "一般贸易",
+  cross_border_ecommerce: "跨境电商零售进口",
+  personal_postal: "个人邮递物品",
+  seller_collected: "卖家已代收",
+};
+
+function importTaxAmount(item: { import_tax_cny?: number | null; duty_cny?: number | null }) {
+  return item.import_tax_cny ?? item.duty_cny ?? null;
+}
+
+function taxComponentSummary(product: Recommendation): string {
+  if (product.tax_breakdown?.tax_exemption_reason) {
+    return product.tax_breakdown.tax_exemption_reason;
+  }
+  const components = [
+    product.duty_cny == null ? null : `关税 ${currencyCny.format(product.duty_cny)}`,
+    product.import_vat_cny == null
+      ? null
+      : `进口增值税 ${currencyCny.format(product.import_vat_cny)}`,
+    product.consumption_tax_cny == null
+      ? null
+      : `消费税 ${currencyCny.format(product.consumption_tax_cny)}`,
+  ].filter((value): value is string => Boolean(value));
+  return components.length ? components.join(" · ") : "数据通道提供合计税费，未拆分税种";
+}
+
+function priceConversionSummary(product: Recommendation): string {
+  const quote = product.price_conversion;
+  if (!quote) return product.currency === "CNY" ? "人民币标价，无需换算" : "换算证据未提供";
+  const observedAt = retrievedAtLabel(quote.observed_at) ?? quote.observed_at;
+  const markup = {
+    included: quote.markup_bps == null ? "已含换汇加价" : `已含 ${quote.markup_bps}bp 换汇加价`,
+    excluded: "不含支付机构加价",
+    unknown: "支付机构加价待结算确认",
+  }[quote.markup_status];
+  return `1 ${quote.source_currency} = ${currencyCny.format(quote.rate_to_cny)} · ${quote.provider} · ${observedAt} · ${markup}`;
+}
+
+function shippingQuoteSummary(product: Recommendation): string {
+  const quote = product.shipping_quote;
+  if (!quote) return "运费报价未提供";
+  const parts = [
+    `${quote.origin_country} → 中国大陆`,
+    quote.service_name,
+    `${quote.eta_min_days}-${quote.eta_max_days} 天`,
+  ];
+  if (quote.chargeable_weight_kg != null) parts.push(`计费重量 ${quote.chargeable_weight_kg} kg`);
+  if (quote.surcharge_amount > 0) parts.push(`附加费 ${quote.currency} ${quote.surcharge_amount.toFixed(2)}`);
+  if (quote.discount_amount > 0) parts.push(`优惠 ${quote.currency} ${quote.discount_amount.toFixed(2)}`);
+  return parts.join(" · ");
+}
+
 function ProductCard({ product }: { product: Recommendation }) {
   const variantAttributes = Object.entries(product.variant_attributes ?? {})
     .filter(([, value]) => value != null)
@@ -220,9 +284,11 @@ function ProductCard({ product }: { product: Recommendation }) {
   const searchLink = product.link_kind === "marketplace_search";
   const marketplace = providerNameLabel(product.marketplace ?? product.platform);
   const provider = product.provenance?.provider;
+  const tax = importTaxAmount(product);
+  const taxBreakdown = product.tax_breakdown;
 
   return (
-    <article className={styles.productCard}>
+    <article className={styles.productCard} data-rank={product.rank}>
       <div className={styles.imageWrap}>
         <ProductImage product={product} />
         <span className={styles.rank} aria-label={`推荐第 ${product.rank} 名`}>
@@ -237,103 +303,6 @@ function ProductCard({ product }: { product: Recommendation }) {
         </div>
         <h3 title={product.title}>{product.title}</h3>
         <p className={styles.reason}>{product.reason}</p>
-        <dl className={styles.costBreakdown} aria-label={`${product.title} 中国大陆到手成本`}>
-          <div>
-            <dt>商品价（原币）</dt>
-            <dd>
-              {product.currency} {product.price.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-            </dd>
-          </div>
-          <div>
-            <dt>商品价（CNY）</dt>
-            <dd>{currencyCny.format(product.price_cny)}</dd>
-          </div>
-          <div>
-            <dt>运费 {estimateLabel(product.shipping_estimate?.estimated)}</dt>
-            <dd>
-              {currencyCny.format(product.shipping_cny)}
-              <small>{estimateSource(product.shipping_estimate?.source)}</small>
-            </dd>
-          </div>
-          <div>
-            <dt>关税 {estimateLabel(product.duty_estimate?.estimated)}</dt>
-            <dd>
-              {currencyCny.format(product.duty_cny)}
-              <small>{estimateSource(product.duty_estimate?.source)}</small>
-            </dd>
-          </div>
-        </dl>
-        <dl className={styles.scoreBreakdown} aria-label={`${product.title} 排序分解`}>
-          <div>
-            <dt>到手价分</dt>
-            <dd>{product.score_breakdown.landed_cost_score.toFixed(2)}</dd>
-          </div>
-          <div>
-            <dt>偏好匹配分</dt>
-            <dd>{product.score_breakdown.preference_match_score.toFixed(2)}</dd>
-          </div>
-          <div>
-            <dt>证据质量分</dt>
-            <dd>{product.score_breakdown.evidence_quality_score.toFixed(2)}</dd>
-          </div>
-          <div>
-            <dt>时效分</dt>
-            <dd>{product.score_breakdown.delivery_time_score.toFixed(2)}</dd>
-          </div>
-        </dl>
-        <dl className={styles.evidence} aria-label={`${product.title} 商品证据`}>
-          <div className={styles.evidenceWide}>
-            <dt>Identity Evidence</dt>
-            <dd>
-              <strong>{identityEvidenceLabel(product.identity_evidence)}</strong>
-              {product.identity_evidence?.explanation && (
-                <small>{product.identity_evidence.explanation}</small>
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>抓取时间</dt>
-            <dd>
-              {retrievedAt ? (
-                <time dateTime={product.retrieved_at ?? undefined}>{retrievedAt}</time>
-              ) : (
-                "未提供"
-              )}
-            </dd>
-          </div>
-          <div>
-            <dt>库存</dt>
-            <dd>{availabilityLabel(product.availability)}</dd>
-          </div>
-          <div className={styles.evidenceWide}>
-            <dt>上游来源</dt>
-            <dd>{product.provenance?.upstream_source ?? "未提供"}</dd>
-          </div>
-          <div className={styles.evidenceWide}>
-            <dt>Offer ID</dt>
-            <dd>{product.offer_id ?? "未提供"}</dd>
-          </div>
-          {identityEntries.length ? (
-            identityEntries.map(([label, value]) => (
-              <div key={label}>
-                <dt>{label}</dt>
-                <dd>{value}</dd>
-              </div>
-            ))
-          ) : (
-            <div className={styles.evidenceWide}>
-              <dt>跨平台标识</dt>
-              <dd>未提供</dd>
-            </div>
-          )}
-          {variantAttributes.map(([key, value]) => (
-            <div key={key}>
-              <dt>{evidenceLabels[key] ?? key}</dt>
-              <dd>{key === "weight_kg" ? `${String(value)} kg` : String(value)}</dd>
-            </div>
-          ))}
-        </dl>
-        {product.note && <p className={styles.sourceNote}>来源说明：{product.note}</p>}
         <div className={styles.cardFooter}>
           <div>
             <span className={styles.price}>{currencyCny.format(product.landed_cny)}</span>
@@ -370,6 +339,181 @@ function ProductCard({ product }: { product: Recommendation }) {
             <Truck size={13} aria-hidden="true" /> {product.eta_days} 天
           </span>
         </div>
+        <details className={styles.productDetails}>
+          <summary>价格与证据明细</summary>
+          <dl className={styles.costBreakdown} aria-label={`${product.title} 中国大陆到手成本`}>
+            <div>
+              <dt>商品价（原币）</dt>
+              <dd>
+                {product.currency} {product.price.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </dd>
+            </div>
+            <div>
+              <dt>商品价（CNY）</dt>
+              <dd>{currencyCny.format(product.price_cny)}</dd>
+            </div>
+            <div>
+              <dt>运费 {estimateLabel(product.shipping_estimate?.estimated)}</dt>
+              <dd>
+                {currencyCny.format(product.shipping_cny)}
+                <small>{estimateSource(product.shipping_estimate?.source)}</small>
+              </dd>
+            </div>
+            <div>
+              <dt>进口税费 {estimateLabel(product.tax_estimate?.estimated)}</dt>
+              <dd>
+                {tax == null ? "待核税" : currencyCny.format(tax)}
+                <small>{taxComponentSummary(product)}</small>
+                <small>{estimateSource(product.tax_estimate?.source)}</small>
+              </dd>
+            </div>
+            {product.insurance_cny > 0 && (
+              <div>
+                <dt>保险费</dt>
+                <dd>{currencyCny.format(product.insurance_cny)}</dd>
+              </div>
+            )}
+          </dl>
+          <dl className={styles.scoreBreakdown} aria-label={`${product.title} 排序分解`}>
+            <div>
+              <dt>到手价分</dt>
+              <dd>{product.score_breakdown.landed_cost_score.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>偏好匹配分</dt>
+              <dd>{product.score_breakdown.preference_match_score.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>证据质量分</dt>
+              <dd>{product.score_breakdown.evidence_quality_score.toFixed(2)}</dd>
+            </div>
+            <div>
+              <dt>时效分</dt>
+              <dd>{product.score_breakdown.delivery_time_score.toFixed(2)}</dd>
+            </div>
+          </dl>
+          <dl className={styles.evidence} aria-label={`${product.title} 商品证据`}>
+            <div className={styles.evidenceWide}>
+              <dt>同款识别依据</dt>
+              <dd>
+                <strong>{identityEvidenceLabel(product.identity_evidence)}</strong>
+                {product.identity_evidence?.explanation && (
+                  <small>{product.identity_evidence.explanation}</small>
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>抓取时间</dt>
+              <dd>
+                {retrievedAt ? (
+                  <time dateTime={product.retrieved_at ?? undefined}>{retrievedAt}</time>
+                ) : (
+                  "未提供"
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>库存</dt>
+              <dd>{availabilityLabel(product.availability)}</dd>
+            </div>
+            <div className={styles.evidenceWide}>
+              <dt>上游来源</dt>
+              <dd>{product.provenance?.upstream_source ?? "未提供"}</dd>
+            </div>
+            <div className={styles.evidenceWide}>
+              <dt>价格换算</dt>
+              <dd>
+                <span>{priceConversionSummary(product)}</span>
+                {product.price_conversion?.expires_at && (
+                  <small>报价有效至 {retrievedAtLabel(product.price_conversion.expires_at)}</small>
+                )}
+              </dd>
+            </div>
+            <div className={styles.evidenceWide}>
+              <dt>运费报价</dt>
+              <dd>
+                <span>{shippingQuoteSummary(product)}</span>
+                <small>{product.shipping_quote?.provider ?? "数据商未提供承运报价"}</small>
+              </dd>
+            </div>
+            <div className={styles.evidenceWide}>
+              <dt>平台商品编号</dt>
+              <dd>{product.offer_id ?? "未提供"}</dd>
+            </div>
+            {taxBreakdown && (
+              <>
+                <div className={styles.evidenceWide}>
+                  <dt>税务归类</dt>
+                  <dd>
+                    <span>HS Code {taxBreakdown.hs_code}</span>
+                    {" · "}
+                    <span>原产地 {taxBreakdown.country_of_origin}</span>
+                  </dd>
+                </div>
+                <div className={styles.evidenceWide}>
+                  <dt>进口方式</dt>
+                  <dd>{importRegimeLabels[taxBreakdown.import_regime] ?? taxBreakdown.import_regime}</dd>
+                </div>
+                <div className={styles.evidenceWide}>
+                  <dt>税率证据</dt>
+                  <dd>
+                    <span>税率生效日 {taxBreakdown.effective_date}</span>
+                    <small>{taxBreakdown.source_reference}</small>
+                  </dd>
+                </div>
+                {taxBreakdown.customs_valuation && (
+                  <div className={styles.evidenceWide}>
+                    <dt>海关完税价格</dt>
+                    <dd>
+                      <span>{currencyCny.format(taxBreakdown.customs_valuation.customs_value_cny)}</span>
+                      {taxBreakdown.customs_valuation.customs_conversion && (
+                        <small>
+                          {taxBreakdown.customs_valuation.customs_conversion.assessment_month} 月计税汇率 ·
+                          1 {taxBreakdown.customs_valuation.customs_conversion.source_currency} =
+                          {currencyCny.format(taxBreakdown.customs_valuation.customs_conversion.rate_to_cny)}
+                        </small>
+                      )}
+                    </dd>
+                  </div>
+                )}
+                {taxBreakdown.tax_exemption_reason && (
+                  <div className={styles.evidenceWide}>
+                    <dt>税费减免</dt>
+                    <dd>
+                      <span>{taxBreakdown.tax_exemption_reason}</span>
+                      {taxBreakdown.tax_before_exemption_cny != null && (
+                        <small>
+                          减免前应征 {currencyCny.format(taxBreakdown.tax_before_exemption_cny)} ·
+                          本次减免 {currencyCny.format(taxBreakdown.tax_exemption_cny)}
+                        </small>
+                      )}
+                    </dd>
+                  </div>
+                )}
+              </>
+            )}
+            {identityEntries.length ? (
+              identityEntries.map(([label, value]) => (
+                <div key={label}>
+                  <dt>{label}</dt>
+                  <dd>{value}</dd>
+                </div>
+              ))
+            ) : (
+              <div className={styles.evidenceWide}>
+                <dt>跨平台标识</dt>
+                <dd>未提供</dd>
+              </div>
+            )}
+            {variantAttributes.map(([key, value]) => (
+              <div key={key}>
+                <dt>{evidenceLabels[key] ?? key}</dt>
+                <dd>{key === "weight_kg" ? `${String(value)} kg` : String(value)}</dd>
+              </div>
+            ))}
+          </dl>
+          {product.note && <p className={styles.sourceNote}>来源说明：{product.note}</p>}
+        </details>
       </div>
     </article>
   );
@@ -398,9 +542,16 @@ function StarterState({ onUseStarter }: { onUseStarter: (query: string) => void 
   );
 }
 
-function WaitingState({ eventCount }: { eventCount: number }) {
+function WaitingState({
+  eventCount,
+  plan,
+}: {
+  eventCount: number;
+  plan: ShoppingPlan | null;
+}) {
   return (
     <section className={styles.waiting} aria-label="研究进行中" aria-busy="true">
+      {plan && <RequirementSummary plan={plan} />}
       <div className={styles.pulseMark} aria-hidden="true">
         <span />
         <span />
@@ -423,11 +574,75 @@ function WaitingState({ eventCount }: { eventCount: number }) {
 
 function Comparison({ state }: { state: AgentState }) {
   const rows = state.result?.comparison ?? [];
+  const [sort, setSort] = useState<"ranking" | "price" | "delivery">("ranking");
   if (rows.length === 0) {
     return <p className={styles.noComparison}>本次结果没有可用的横向价格数据。</p>;
   }
+  const originalOrder = new Map(rows.map((row, index) => [`${row.platform}:${row.item_id}`, index]));
+  const landedCost = (row: (typeof rows)[number]) => row.landed_cny ?? row.price_cny;
+  const sortedRows = [...rows].sort((left, right) => {
+    if (sort === "price") return landedCost(left) - landedCost(right);
+    if (sort === "delivery") {
+      return (left.eta_days ?? Number.POSITIVE_INFINITY) - (right.eta_days ?? Number.POSITIVE_INFINITY);
+    }
+    return (
+      (originalOrder.get(`${left.platform}:${left.item_id}`) ?? 0) -
+      (originalOrder.get(`${right.platform}:${right.item_id}`) ?? 0)
+    );
+  });
+  const lead = state.result?.recommendations[0];
+  const lowestCost = Math.min(...rows.map(landedCost));
+  const deliveryDays = rows.flatMap((row) => (row.eta_days == null ? [] : [row.eta_days]));
+  const fastestDelivery = deliveryDays.length ? Math.min(...deliveryDays) : null;
+  const evidencedRows = rows.filter((row) =>
+    Boolean(
+      (row.currency === "CNY" || row.price_conversion) &&
+      row.shipping_quote &&
+      row.customs &&
+      row.tax_breakdown,
+    ),
+  ).length;
+  const isLead = (row: (typeof rows)[number]) =>
+    Boolean(lead && row.item_id === lead.item_id && row.platform === lead.platform);
+  const isLowest = (row: (typeof rows)[number]) => landedCost(row) === lowestCost;
+
   return (
     <>
+      <section className={styles.comparisonOverview} aria-label="专业比价概览">
+        <div>
+          <span>综合首选</span>
+          <strong title={lead?.title ?? rows[0].title}>{lead?.title ?? rows[0].title}</strong>
+        </div>
+        <div>
+          <span>最低到手价</span>
+          <strong>{currencyCny.format(lowestCost)}</strong>
+        </div>
+        <div>
+          <span>最快送达</span>
+          <strong>{fastestDelivery == null ? "待确认" : `${fastestDelivery} 天`}</strong>
+        </div>
+        <div>
+          <span>成本证据完整</span>
+          <strong>{evidencedRows}/{rows.length}</strong>
+        </div>
+      </section>
+      <div className={styles.comparisonToolbar}>
+        <div>
+          <strong>候选对比矩阵</strong>
+          <span>{rows.length} 个候选，价格统一为人民币到手成本</span>
+        </div>
+        <div className={styles.comparisonSort} role="group" aria-label="比较排序">
+          <button type="button" aria-pressed={sort === "ranking"} onClick={() => setSort("ranking")}>
+            <ListOrdered size={14} aria-hidden="true" /> 综合排序
+          </button>
+          <button type="button" aria-pressed={sort === "price"} onClick={() => setSort("price")}>
+            <BadgeDollarSign size={14} aria-hidden="true" /> 最低价格
+          </button>
+          <button type="button" aria-pressed={sort === "delivery"} onClick={() => setSort("delivery")}>
+            <Truck size={14} aria-hidden="true" /> 最快送达
+          </button>
+        </div>
+      </div>
       <div className={styles.tableWrap}>
         <table className={styles.comparisonTable}>
           <thead>
@@ -437,24 +652,36 @@ function Comparison({ state }: { state: AgentState }) {
               <th scope="col">来源</th>
               <th scope="col">商品价（原币）</th>
               <th scope="col">商品价（CNY）</th>
-              <th scope="col">运费估算</th>
-              <th scope="col">关税估算</th>
+              <th scope="col">运费报价</th>
+              <th scope="col">进口税费</th>
               <th scope="col">到手价（CNY）</th>
-              <th scope="col">时效估算</th>
+              <th scope="col">预计到达</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr key={`${row.platform}-${row.item_id}`}>
-                <th scope="row">{row.title}</th>
+            {sortedRows.map((row) => (
+              <tr
+                key={`${row.platform}-${row.item_id}`}
+                data-recommended={isLead(row)}
+                data-lowest-price={isLowest(row)}
+              >
+                <th scope="row">
+                  <span>{row.title}</span>
+                  {isLead(row) && <small>综合首选</small>}
+                  {!isLead(row) && isLowest(row) && <small>最低价格</small>}
+                </th>
                 <td>{row.platform.toUpperCase()}</td>
                 <td>{providerSourceLabel(row.source)}</td>
                 <td>{row.currency} {row.price.toFixed(2)}</td>
                 <td>{currencyCny.format(row.price_cny)}</td>
                 <td>
-                  {row.shipping_cny == null ? "待确认" : `${currencyCny.format(row.shipping_cny)}（估算）`}
+                  {row.shipping_cny == null ? "待确认" : `${currencyCny.format(row.shipping_cny)}（报价）`}
                 </td>
-                <td>{row.duty_cny == null ? "待确认" : `${currencyCny.format(row.duty_cny)}（估算）`}</td>
+                <td>
+                  {importTaxAmount(row) == null
+                    ? "待核税"
+                    : `${currencyCny.format(importTaxAmount(row) ?? 0)}（估算）`}
+                </td>
                 <td className={styles.tablePrice}>{currencyCny.format(row.landed_cny ?? row.price_cny)}</td>
                 <td>{row.eta_days == null ? "待确认" : `${row.eta_days} 天（估算）`}</td>
               </tr>
@@ -463,10 +690,18 @@ function Comparison({ state }: { state: AgentState }) {
         </table>
       </div>
       <div className={styles.mobileComparison} aria-hidden="true">
-        {rows.map((row) => (
-          <article key={`${row.platform}-${row.item_id}`}>
+        {sortedRows.map((row) => (
+          <article
+            key={`${row.platform}-${row.item_id}`}
+            data-recommended={isLead(row)}
+            data-lowest-price={isLowest(row)}
+          >
             <header>
-              <strong>{row.title}</strong>
+              <strong>
+                {row.title}
+                {isLead(row) && <small>综合首选</small>}
+                {!isLead(row) && isLowest(row) && <small>最低价格</small>}
+              </strong>
               <span>
                 {row.platform.toUpperCase()} · {providerSourceLabel(row.source)}
               </span>
@@ -481,19 +716,23 @@ function Comparison({ state }: { state: AgentState }) {
                 <dd>{currencyCny.format(row.price_cny)}</dd>
               </div>
               <div>
-                <dt>运费估算</dt>
+                <dt>运费报价</dt>
                 <dd>{row.shipping_cny == null ? "待确认" : currencyCny.format(row.shipping_cny)}</dd>
               </div>
               <div>
-                <dt>关税估算</dt>
-                <dd>{row.duty_cny == null ? "待确认" : currencyCny.format(row.duty_cny)}</dd>
+                <dt>进口税费</dt>
+                <dd>
+                  {importTaxAmount(row) == null
+                    ? "待核税"
+                    : currencyCny.format(importTaxAmount(row) ?? 0)}
+                </dd>
               </div>
               <div>
                 <dt>到手价（CNY）</dt>
                 <dd>{currencyCny.format(row.landed_cny ?? row.price_cny)}</dd>
               </div>
               <div>
-                <dt>时效估算</dt>
+                <dt>预计到达</dt>
                 <dd>{row.eta_days == null ? "待确认" : `${row.eta_days} 天`}</dd>
               </div>
             </dl>
@@ -542,10 +781,10 @@ function RecallDisclosure({ state }: { state: AgentState }) {
   return (
     <section className={styles.providerDisclosure} aria-labelledby="recall-heading">
       <div>
-        <h3 id="recall-heading">候选召回</h3>
+        <h3 id="recall-heading">候选检索</h3>
         <span>
           {recallModeLabel(provenance.mode)} · {provenance.selected_candidate_count}/
-          {provenance.input_candidate_count} 个 Product Evidence 候选进入成本与排序路径
+          {provenance.input_candidate_count} 个商品候选进入成本与排序
         </span>
       </div>
       <ul>
@@ -557,7 +796,10 @@ function RecallDisclosure({ state }: { state: AgentState }) {
               {channel.participated ? " · 已参与" : " · 未参与"}
             </span>
             {(channel.state !== "ready" || channel.reason_code !== "ready") && (
-              <small>{channel.reason_code}：{channel.reason}</small>
+              <details className={styles.inlineTechnical}>
+                <summary>技术信息</summary>
+                <small>{channel.reason_code}：{channel.reason}</small>
+              </details>
             )}
           </li>
         ))}
@@ -579,16 +821,31 @@ function RecallDisclosure({ state }: { state: AgentState }) {
             <span>
               输入来源：{personalizationInputSourceLabel(provenance.personalization.input_source)} · {personalizationSignalLabel(provenance.personalization.signal)}
             </span>
-            <small>
-              {provenance.personalization.reason_code}：{provenance.personalization.reason}
-              {provenance.personalization.preference_values.length > 0
-                ? `；字段值：${provenance.personalization.preference_values.join("、")}`
-                : ""}
-            </small>
+            <details className={styles.inlineTechnical}>
+              <summary>技术信息</summary>
+              <small>
+                {provenance.personalization.reason_code}：{provenance.personalization.reason}
+                {provenance.personalization.preference_values.length > 0
+                  ? `；字段值：${provenance.personalization.preference_values.join("、")}`
+                  : ""}
+              </small>
+            </details>
           </li>
         )}
       </ul>
-      {provenance.fallback_reason && <p>{`降级原因：${provenance.fallback_reason}`}</p>}
+      {provenance.fallback_reason && (
+        <div className={styles.recallFallbackNote} role="note" aria-label="召回调整说明">
+          <Info size={14} aria-hidden="true" />
+          <div>
+            <strong>召回已自动调整</strong>
+            <span>{recallFallbackReasonLabel(provenance.fallback_reason)}</span>
+            <details>
+              <summary>技术详情</summary>
+              <code>{provenance.fallback_reason}</code>
+            </details>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -622,7 +879,7 @@ function MatchingOffers({ state }: { state: AgentState }) {
   return (
     <section className={styles.decisionSection} aria-labelledby="matching-heading">
       <div className={styles.decisionSectionHeader}>
-        <h3 id="matching-heading">Matching Offer</h3>
+        <h3 id="matching-heading">已确认同款报价</h3>
         <span>{offers.length ? `${offers.length} 个已证明同款` : "暂无已证明同款"}</span>
       </div>
       {offers.length ? (
@@ -639,7 +896,7 @@ function MatchingOffers({ state }: { state: AgentState }) {
         </ul>
       ) : (
         <p className={styles.identityEmpty}>
-          没有可由跨平台 identifier 或全部关键属性证明为同一 Product Variant 的 offer。
+          没有可由跨平台商品标识或全部关键属性证明为同一商品版本的报价。
         </p>
       )}
     </section>
@@ -651,8 +908,8 @@ function AlternativeCandidates({ candidates }: { candidates: AlternativeCandidat
   return (
     <section className={styles.decisionSection} aria-labelledby="alternative-heading">
       <div className={styles.decisionSectionHeader}>
-        <h3 id="alternative-heading">Alternative Candidate</h3>
-        <span>Identity Evidence 不足，不参与正式排名</span>
+        <h3 id="alternative-heading">相似商品候选</h3>
+        <span>同款证据不足，不参与正式排名</span>
       </div>
       <ul className={styles.identityList}>
         {candidates.map((candidate) => (
@@ -791,6 +1048,60 @@ function CalculationExclusions({ exclusions }: { exclusions: CalculationExclusio
   );
 }
 
+function TaxExclusions({ exclusions }: { exclusions: TaxCalculationExclusion[] }) {
+  if (!exclusions.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="tax-exclusion-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="tax-exclusion-heading">税务证据待补充</h3>
+        <span>{exclusions.length} 个候选未参与到手价排名</span>
+      </div>
+      <ul className={styles.decisionList}>
+        {exclusions.map((exclusion) => (
+          <li key={`${exclusion.platform}-${exclusion.item_id}`}>
+            <div className={styles.decisionItemHeader}>
+              <strong>{exclusion.title}</strong>
+              <span>{exclusion.platform.toUpperCase()}</span>
+            </div>
+            <p>{exclusion.reason}</p>
+            <details className={styles.inlineTechnical}>
+              <summary>技术信息</summary>
+              <code>{exclusion.reason_code}</code>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ShippingExclusions({ exclusions }: { exclusions: ShippingCalculationExclusion[] }) {
+  if (!exclusions.length) return null;
+  return (
+    <section className={styles.decisionSection} aria-labelledby="shipping-exclusion-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="shipping-exclusion-heading">运费报价待补充</h3>
+        <span>{exclusions.length} 个候选未参与到手价排名</span>
+      </div>
+      <ul className={styles.decisionList}>
+        {exclusions.map((exclusion) => (
+          <li key={`${exclusion.platform}-${exclusion.item_id}`}>
+            <div className={styles.decisionItemHeader}>
+              <strong>{exclusion.title}</strong>
+              <span>{exclusion.platform.toUpperCase()}</span>
+            </div>
+            <p>{exclusion.reason}</p>
+            <details className={styles.inlineTechnical}>
+              <summary>技术信息</summary>
+              <code>{exclusion.reason_code}</code>
+            </details>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 function resultHasEvidence(result: NonNullable<AgentState["result"]>): boolean {
   return (
     result.product_evidence.length > 0 ||
@@ -799,7 +1110,32 @@ function resultHasEvidence(result: NonNullable<AgentState["result"]>): boolean {
     result.matching_offers.length > 0 ||
     result.alternative_candidates.length > 0 ||
     (result.unverified_candidates?.length ?? 0) > 0 ||
-    (result.exclusions?.length ?? 0) > 0
+    (result.exclusions?.length ?? 0) > 0 ||
+    result.calculation_exclusions.length > 0 ||
+    (result.shipping_exclusions?.length ?? 0) > 0 ||
+    (result.tax_exclusions?.length ?? 0) > 0
+  );
+}
+
+function taxEvidenceBlocksLandedCost(result: NonNullable<AgentState["result"]>): boolean {
+  return (
+    (result.tax_exclusions?.length ?? 0) > 0 &&
+    result.recommendations.length === 0 &&
+    result.comparison.length === 0 &&
+    result.matching_offers.length === 0 &&
+    (result.unverified_candidates?.length ?? 0) === 0 &&
+    (result.exclusions?.length ?? 0) === 0
+  );
+}
+
+function shippingEvidenceBlocksLandedCost(result: NonNullable<AgentState["result"]>): boolean {
+  return (
+    (result.shipping_exclusions?.length ?? 0) > 0 &&
+    result.recommendations.length === 0 &&
+    result.comparison.length === 0 &&
+    result.matching_offers.length === 0 &&
+    (result.unverified_candidates?.length ?? 0) === 0 &&
+    (result.exclusions?.length ?? 0) === 0
   );
 }
 
@@ -811,7 +1147,7 @@ const preferenceStatusLabels: Record<PreferenceDecision["status"], string> = {
 
 const preferenceSourceLabels: Record<PreferenceDecision["source"], string> = {
   current_request: "当前请求",
-  remembered_preference: "Remembered Preference",
+  remembered_preference: "已保存的偏好",
 };
 
 function PreferenceRationale({ decisions }: { decisions: PreferenceDecision[] }) {
@@ -819,7 +1155,7 @@ function PreferenceRationale({ decisions }: { decisions: PreferenceDecision[] })
     <section className={styles.decisionSection} aria-labelledby="preference-heading">
       <div className={styles.decisionSectionHeader}>
         <h3 id="preference-heading">偏好处理</h3>
-        <span>仅作为 eligible candidate 的透明 ranking 输入</span>
+        <span>仅用于满足必要条件的候选排序</span>
       </div>
       {decisions.length ? (
         <ul className={styles.preferenceDecisionList}>
@@ -832,7 +1168,7 @@ function PreferenceRationale({ decisions }: { decisions: PreferenceDecision[] })
           ))}
         </ul>
       ) : (
-        <p className={styles.identityEmpty}>本任务没有可应用的 Remembered Preference 或显式软偏好。</p>
+        <p className={styles.identityEmpty}>本次研究没有使用已保存的偏好或其他偏好条件。</p>
       )}
     </section>
   );
@@ -845,36 +1181,50 @@ function DecisionTransparency({ state, onRelax }: { state: AgentState; onRelax?:
   const unverified = result.unverified_candidates ?? [];
   const exclusions = result.exclusions ?? [];
   const calculationExclusions = result.calculation_exclusions ?? [];
+  const shippingExclusions = result.shipping_exclusions ?? [];
+  const taxExclusions = result.tax_exclusions ?? [];
   const suggestions = result.relaxation_suggestions ?? [];
   const isEmpty = !resultHasEvidence(result);
   const isNoMatch = !isEmpty && (result.match_status === "no_match" || result.recommendations.length === 0);
   const hasExactIdentityMatch = result.matching_offers.length > 0;
   const exactIdentityNoMatch = result.mode === "exact_offer_comparison" && !hasExactIdentityMatch;
+  const taxEvidenceNoMatch = taxEvidenceBlocksLandedCost(result);
+  const shippingEvidenceNoMatch = shippingEvidenceBlocksLandedCost(result);
 
   return (
     <div className={styles.decisionTransparency}>
       {isEmpty && (
         <section className={styles.emptyResult} role="status" aria-label="空结果">
-          <strong>没有可用的 Product Evidence</strong>
+          <strong>没有可用的商品证据</strong>
           <span>本次平台查询没有返回可用于筛选、成本核算或排序的候选。</span>
         </section>
       )}
       {isNoMatch && (
         <section className={styles.noMatch} role="status" aria-label="无匹配结果">
           <strong>
-            {exactIdentityNoMatch
-              ? "没有 Identity Evidence 充分的 Matching Offer"
+            {shippingEvidenceNoMatch
+              ? "运费报价不足，暂不能计算到手价"
+              : taxEvidenceNoMatch
+              ? "税务证据不足，暂不能计算到手价"
+              : exactIdentityNoMatch
+              ? "没有证据充分的同款报价"
               : "没有满足全部硬性条件的候选"}
           </strong>
           <span>
-            {exactIdentityNoMatch
-              ? "这是成功的 No-Match Result；相似商品已列为 Alternative Candidate，不参与正式排名。"
-              : "这是成功的 No-Match Result；平台数据可用，但没有证据充分且满足约束的推荐。"}
+            {shippingEvidenceNoMatch
+              ? "商品数据已返回，但缺少面向中国大陆的有效线路与服务报价，不能给出虚假的精确到手价。"
+              : taxEvidenceNoMatch
+              ? "商品数据已返回，但缺少 HS Code、原产地、进口模式或有效税率，不能给出虚假的精确到手价。"
+              : exactIdentityNoMatch
+              ? "研究已正常完成；相似商品已单独列出，不参与同款价格排名。"
+              : "研究已正常完成；平台数据可用，但没有证据充分且满足全部条件的推荐。"}
           </span>
         </section>
       )}
       <PreferenceRationale decisions={result.preference_decisions ?? []} />
       <CalculationExclusions exclusions={calculationExclusions} />
+      <ShippingExclusions exclusions={shippingExclusions} />
+      <TaxExclusions exclusions={taxExclusions} />
       <MatchingOffers state={state} />
       <AlternativeCandidates candidates={result.alternative_candidates ?? []} />
       <WorkingAssumptions assumptions={assumptions} />
@@ -911,7 +1261,7 @@ function ResultDisclosure({ state }: { state: AgentState }) {
   if (result.data_mode === "mixed") {
     return (
       <p className={styles.resultDisclosure} role="note">
-        仅开发诊断模式允许混合来源；此结果不是普通用户可发起的 Live Result 或 Sandbox Result。
+        当前结果包含多种数据来源；每件商品均会单独标明实际来源。
       </p>
     );
   }
@@ -919,15 +1269,15 @@ function ResultDisclosure({ state }: { state: AgentState }) {
     const unavailable = result.unavailable_marketplaces.map(providerNameLabel).join("、");
     return (
       <p className={styles.resultDisclosure} role="note">
-        已返回可用平台的 Product Evidence；{unavailable || "部分平台"}不可用，稳定失败原因见平台覆盖。
+        已返回可用平台的商品证据；{unavailable || "部分平台"}不可用，具体原因见平台覆盖。
       </p>
     );
   }
   return (
     <p className={styles.resultDisclosure} role="note">
       {result.data_mode === "sandbox"
-        ? "本次结果仅来自显式启用的 Sandbox Result fixture。"
-        : "本次结果仅来自已配置数据提供商通道网关的 Live Result。"}
+        ? "本次结果来自显式启用的演示数据，不代表实时价格或库存。"
+        : "本次结果来自已配置的数据提供商平台通道。"}
     </p>
   );
 }
@@ -952,12 +1302,48 @@ export default function ResearchContent({
   onViewChange,
   onUseStarter,
   onReset,
+  onRetryLoad,
   onRerun,
   onRelax,
+  onRememberPreference,
 }: ResearchContentProps) {
+  const plan = state.result?.resolved_intent ?? state.snapshot?.resolved_intent ?? null;
+  if (state.loadingSnapshot) {
+    return (
+      <section className={styles.waiting} aria-label="正在打开研究报告" aria-busy="true">
+        <div className={styles.pulseMark} aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <h2>正在打开研究报告</h2>
+        <p>正在读取已保存的结论与商品证据</p>
+      </section>
+    );
+  }
+  if (state.loadError) {
+    return (
+      <section className={styles.terminalState} role="alert">
+        <AlertTriangle size={26} aria-hidden="true" />
+        <h2>暂时无法打开这份研究</h2>
+        <p>服务当前不可连接，历史任务状态没有改变。恢复服务后可重新读取。</p>
+        <small className={styles.terminalDetail}>{state.loadError}</small>
+        <div className={styles.terminalActions}>
+          {onRetryLoad && (
+            <button type="button" onClick={onRetryLoad}>
+              <RefreshCw size={16} aria-hidden="true" /> 重新读取
+            </button>
+          )}
+          <button type="button" onClick={onReset}>
+            <RotateCcw size={16} aria-hidden="true" /> 新建研究
+          </button>
+        </div>
+      </section>
+    );
+  }
   if (state.status === "idle") return <StarterState onUseStarter={onUseStarter} />;
   if (["starting", "connecting", "running", "awaiting_clarification"].includes(state.status)) {
-    return <WaitingState eventCount={state.events.length} />;
+    return <WaitingState eventCount={state.events.length} plan={plan} />;
   }
   if (state.status === "error") {
     return (
@@ -984,6 +1370,10 @@ export default function ResearchContent({
   }
 
   const result = state.result;
+  const suggestedStyle = plan?.style_preferences.find(
+    (value) => !result?.applied_preferences.style_preferences.includes(value),
+  );
+  const leadRecommendation = result?.recommendations[0];
   const moveResultTab = (next: ResultView) => {
     onViewChange(next);
     window.setTimeout(() => document.getElementById(`${next}-tab`)?.focus(), 0);
@@ -1005,7 +1395,7 @@ export default function ResearchContent({
           {onRerun && (
             <button className={styles.rerunButton} type="button" onClick={onRerun}>
               <RefreshCw size={15} aria-hidden="true" />
-              Research Rerun
+              重新研究
             </button>
           )}
           <div className={styles.segmented} role="tablist" aria-label="结果视图">
@@ -1052,28 +1442,30 @@ export default function ResearchContent({
       {state.snapshot?.lineage && (
         <p className={styles.lineageNotice} role="status">
           {state.snapshot.lineage.relation === "constraint_relaxation"
-            ? "本次研究来自已确认的 Constraint Relaxation"
-            : "本次研究是 Research Rerun"}
-          {` · parent snapshot ${state.snapshot.lineage.parent_snapshot_id}`}
+            ? "本次研究来自已确认的条件放宽"
+            : "本次为重新研究生成的新报告"}
+          {` · 第 ${state.snapshot.lineage.depth} 代`}
         </p>
       )}
 
-      {result?.final_answer && <p className={styles.summary}>{result.final_answer}</p>}
-      <ResultDisclosure state={state} />
-      {result?.calculation_notice && (
-        <p className={styles.calculationNotice}>
-          <Calculator size={16} aria-hidden="true" />
-          <span>{result.calculation_notice}</span>
-        </p>
+      {plan && <RequirementSummary plan={plan} />}
+      {suggestedStyle && onRememberPreference && (
+        <PreferenceConfirmation value={suggestedStyle} onRemember={onRememberPreference} />
       )}
-      <p className={styles.calculationDisclaimer} role="note">
-        运费、关税和配送时效均为估算；这不是 checkout guarantee。
-      </p>
-      <RankingDisclosure profile={result?.ranking_profile} />
-      <ProviderDisclosure state={state} />
-      <RecallDisclosure state={state} />
-      <DecisionTransparency state={state} onRelax={onRelax} />
 
+      {leadRecommendation && (
+        <section className={styles.verdict} aria-label="购买结论">
+          <div>
+            <span>首选建议</span>
+            <strong>{leadRecommendation.title}</strong>
+            <p>{leadRecommendation.reason}</p>
+          </div>
+          <div className={styles.verdictPrice}>
+            <span>中国大陆到手价</span>
+            <strong>{currencyCny.format(leadRecommendation.landed_cny)}</strong>
+          </div>
+        </section>
+      )}
       <div
         id="result-panel"
         role="tabpanel"
@@ -1089,16 +1481,47 @@ export default function ResearchContent({
             </div>
           ) : (
             <p className={styles.noComparison}>
-              {result && !resultHasEvidence(result)
-                ? "研究已完成，但平台没有返回可用的 Product Evidence。"
+              {result && shippingEvidenceBlocksLandedCost(result)
+                ? "研究已完成，但商品缺少面向中国大陆的有效运费报价，暂不能计算真实到手价。"
+                : result && taxEvidenceBlocksLandedCost(result)
+                ? "研究已完成，但商品缺少可核验税务证据，暂不能计算真实到手价。"
+                : result && !resultHasEvidence(result)
+                ? "研究已完成，但平台没有返回可用的商品证据。"
                 : result?.mode === "exact_offer_comparison" && result.matching_offers.length === 0
-                  ? "研究已完成，但没有 Identity Evidence 充分的 Matching Offer。"
+                  ? "研究已完成，但没有证据充分的同款报价。"
                   : "研究已完成，但没有商品同时满足硬性条件。"}
             </p>
           )
         ) : (
           <Comparison state={state} />
         )}
+      </div>
+
+      {result?.final_answer && (
+        <details className={styles.summary} open={!leadRecommendation}>
+          <summary>完整购买结论</summary>
+          <p>{result.final_answer}</p>
+        </details>
+      )}
+      <div className={styles.resultNotices}>
+        <ResultDisclosure state={state} />
+        {result?.calculation_notice && (
+          <p className={styles.calculationNotice}>
+            <Calculator size={16} aria-hidden="true" />
+            <span>{result.calculation_notice}</span>
+          </p>
+        )}
+        <p className={styles.calculationDisclaimer} role="note">
+          人民币价格仅用于本次比较；最终支付汇率、换汇费用、运费、进口税费和配送时效
+          请以平台结算页、发卡行、承运商及海关核定为准。
+        </p>
+      </div>
+
+      <div className={styles.evidenceLedger}>
+        <RankingDisclosure profile={result?.ranking_profile} />
+        <ProviderDisclosure state={state} />
+        <RecallDisclosure state={state} />
+        <DecisionTransparency state={state} onRelax={onRelax} />
       </div>
 
       {result?.files.length ? <ReportDownloads files={result.files} /> : null}

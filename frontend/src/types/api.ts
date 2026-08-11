@@ -18,6 +18,20 @@ export type ProviderFailureReason =
   | "sandbox_forbidden"
   | "circuit_open";
 export type OfferLinkKind = "product_detail" | "marketplace_search";
+export type ImportRegime =
+  | "general_trade"
+  | "cross_border_ecommerce"
+  | "personal_postal"
+  | "seller_collected";
+export type TaxRateType =
+  | "mfn"
+  | "agreement"
+  | "preferential"
+  | "temporary"
+  | "ordinary"
+  | "cross_border_policy"
+  | "personal_postal"
+  | "provider_quote";
 export type ConstraintStatus = "satisfied" | "violated" | "unknown";
 export type ConstraintKind = "budget" | "material" | "attribute" | "specification";
 export type ConstraintOperator =
@@ -136,6 +150,49 @@ export interface ExchangeRateProvenance {
   source: string;
   effective_date: string;
   calculation_basis: string;
+  providers: string[];
+  quote_count: number;
+  settlement_notice: string;
+}
+
+export interface CurrencyConversionEvidence {
+  source_currency: string;
+  target_currency: "CNY";
+  rate_to_cny: number;
+  purpose: "comparison_estimate";
+  rate_type: "provider_quote" | "card_network_estimate" | "mid_market_reference" | "sandbox_fixture";
+  markup_status: "included" | "excluded" | "unknown";
+  markup_bps: number | null;
+  provider: string;
+  source_reference: string;
+  observed_at: string;
+  expires_at: string | null;
+}
+
+export interface ShippingQuoteEvidence {
+  quote_type: "carrier_quote" | "marketplace_checkout" | "shipping_included" | "sandbox_fixture";
+  currency: string;
+  total_amount: number;
+  base_amount: number | null;
+  surcharge_amount: number;
+  discount_amount: number;
+  actual_weight_kg: number | null;
+  dimensional_weight_kg: number | null;
+  chargeable_weight_kg: number | null;
+  length_cm: number | null;
+  width_cm: number | null;
+  height_cm: number | null;
+  dimensional_divisor: number | null;
+  origin_country: string;
+  destination_country: "CN";
+  service_name: string;
+  eta_min_days: number;
+  eta_max_days: number;
+  provider: string;
+  source_reference: string;
+  observed_at: string;
+  expires_at: string | null;
+  currency_conversion: CurrencyConversionEvidence | null;
 }
 
 export interface CalculationExclusion {
@@ -144,7 +201,11 @@ export interface CalculationExclusion {
   title: string;
   currency: string;
   amount: number | null;
-  reason_code: "unsupported_currency" | "invalid_amount";
+  reason_code:
+    | "unsupported_currency"
+    | "missing_fx_evidence"
+    | "invalid_fx_evidence"
+    | "invalid_amount";
   reason: string;
 }
 
@@ -152,6 +213,112 @@ export interface EstimateDisclosure {
   estimated: boolean;
   source: string;
   calculation_basis: string;
+}
+
+export interface CustomsTaxEvidence {
+  hs_code: string;
+  country_of_origin: string;
+  destination_country: string;
+  ship_from_country: string | null;
+  import_regime: ImportRegime;
+  rate_type: TaxRateType;
+  tariff_rate: number | null;
+  import_vat_rate: number | null;
+  consumption_tax_rate: number;
+  personal_postal_tax_rate: number | null;
+  personal_postal_assessed_value_cny: number | null;
+  personal_postal_total_value_cny: number | null;
+  personal_postal_value_limit_cny: number | null;
+  personal_postal_tax_exemption_threshold_cny: number | null;
+  personal_postal_single_indivisible_item: boolean | null;
+  personal_postal_eligible: boolean | null;
+  seller_collected_tax_cny: number | null;
+  insurance_cny: number;
+  valuation: CustomsValuationEvidence | null;
+  cross_border_ecommerce_eligible: boolean | null;
+  provider: string;
+  source_reference: string;
+  effective_date: string;
+}
+
+export interface CustomsExchangeRateEvidence {
+  source_currency: string;
+  target_currency: "CNY";
+  rate_to_cny: number;
+  rate_basis: "monthly_customs_assessment" | "customs_prescribed_adjustment";
+  declaration_date: string;
+  assessment_month: string;
+  provider: string;
+  source_reference: string;
+}
+
+export interface CustomsValuationEvidence {
+  valuation_method: "transaction_value_cif";
+  goods_value_original: number;
+  goods_currency: string;
+  goods_value_cny: number;
+  international_shipping_cny: number;
+  insurance_cny: number;
+  customs_value_cny: number;
+  customs_conversion: CustomsExchangeRateEvidence | null;
+  provider: string;
+  source_reference: string;
+}
+
+export interface ImportTaxBreakdown {
+  import_regime: ImportRegime;
+  calculation_method:
+    | "statutory_formula"
+    | "cross_border_policy"
+    | "personal_postal_rate"
+    | "provider_quote";
+  hs_code: string;
+  country_of_origin: string;
+  destination_country: string;
+  customs_value_cny: number;
+  customs_valuation: CustomsValuationEvidence | null;
+  rate_type: TaxRateType;
+  tariff_rate: number | null;
+  import_vat_rate: number | null;
+  consumption_tax_rate: number | null;
+  personal_postal_tax_rate: number | null;
+  personal_postal_assessed_value_cny: number | null;
+  personal_postal_total_value_cny: number | null;
+  personal_postal_value_limit_cny: number | null;
+  personal_postal_tax_exemption_threshold_cny: number | null;
+  personal_postal_single_indivisible_item: boolean | null;
+  policy_factor: number;
+  tariff_cny: number | null;
+  import_vat_cny: number | null;
+  consumption_tax_cny: number | null;
+  tax_before_exemption_cny: number | null;
+  tax_exemption_cny: number;
+  tax_exemption_reason: string | null;
+  total_import_tax_cny: number;
+  provider: string;
+  source_reference: string;
+  effective_date: string;
+  calculation_basis: string;
+}
+
+export interface TaxCalculationExclusion {
+  item_id: string;
+  platform: Marketplace;
+  title: string;
+  reason_code:
+    | "missing_customs_evidence"
+    | "missing_customs_valuation"
+    | "invalid_customs_evidence"
+    | "unsupported_tax_destination";
+  reason: string;
+}
+
+export interface ShippingCalculationExclusion {
+  item_id: string;
+  platform: Marketplace;
+  title: string;
+  reason_code: "missing_shipping_quote" | "invalid_shipping_quote" | "expired_shipping_quote";
+  reason: string;
 }
 
 export interface ConstraintEvidence {
@@ -211,6 +378,9 @@ export interface ProductEvidence {
   provenance: OfferProvenance | null;
   source: ProviderSource;
   identity_evidence: IdentityEvidence | null;
+  price_conversion?: CurrencyConversionEvidence | null;
+  shipping_quote?: ShippingQuoteEvidence | null;
+  customs: CustomsTaxEvidence | null;
 }
 
 export interface ProviderMetadata {
@@ -407,7 +577,11 @@ export interface Recommendation extends ProductEvidence {
   currency: string;
   price_cny: number;
   shipping_cny: number;
-  duty_cny: number;
+  insurance_cny: number;
+  duty_cny: number | null;
+  import_vat_cny: number | null;
+  consumption_tax_cny: number | null;
+  import_tax_cny: number | null;
   landed_cny: number;
   eta_days: number;
   rating: number | null;
@@ -417,7 +591,9 @@ export interface Recommendation extends ProductEvidence {
   duty_tier: "免征" | "标准" | "高税";
   shipping_estimate: EstimateDisclosure;
   duty_estimate: EstimateDisclosure;
+  tax_estimate: EstimateDisclosure;
   delivery_estimate: EstimateDisclosure;
+  tax_breakdown: ImportTaxBreakdown | null;
   reason: string;
   rank: number;
   constraint_evaluations: ConstraintEvaluation[];
@@ -432,7 +608,11 @@ export interface UnverifiedCandidate extends ProductEvidence {
   currency: string;
   price_cny: number;
   shipping_cny: number;
-  duty_cny: number;
+  insurance_cny: number;
+  duty_cny: number | null;
+  import_vat_cny: number | null;
+  consumption_tax_cny: number | null;
+  import_tax_cny: number | null;
   landed_cny: number;
   eta_days: number;
   rating: number | null;
@@ -442,7 +622,9 @@ export interface UnverifiedCandidate extends ProductEvidence {
   duty_tier: "免征" | "标准" | "高税";
   shipping_estimate: EstimateDisclosure;
   duty_estimate: EstimateDisclosure;
+  tax_estimate: EstimateDisclosure;
   delivery_estimate: EstimateDisclosure;
+  tax_breakdown: ImportTaxBreakdown | null;
   reason: string;
   constraint_evaluations: ConstraintEvaluation[];
 }
@@ -453,7 +635,11 @@ export interface AlternativeCandidate extends ProductEvidence {
   currency: string;
   price_cny: number;
   shipping_cny: number;
-  duty_cny: number;
+  insurance_cny: number;
+  duty_cny: number | null;
+  import_vat_cny: number | null;
+  consumption_tax_cny: number | null;
+  import_tax_cny: number | null;
   landed_cny: number;
   eta_days: number;
   rating: number | null;
@@ -463,7 +649,9 @@ export interface AlternativeCandidate extends ProductEvidence {
   duty_tier: "免征" | "标准" | "高税";
   shipping_estimate: EstimateDisclosure;
   duty_estimate: EstimateDisclosure;
+  tax_estimate: EstimateDisclosure;
   delivery_estimate: EstimateDisclosure;
+  tax_breakdown: ImportTaxBreakdown | null;
   reason: string;
   identity_evidence: IdentityEvidence;
 }
@@ -486,7 +674,11 @@ export interface ComparisonItem extends ProductEvidence {
   price: number;
   price_cny: number;
   shipping_cny?: number;
-  duty_cny?: number;
+  duty_cny?: number | null;
+  insurance_cny?: number;
+  import_vat_cny?: number | null;
+  consumption_tax_cny?: number | null;
+  import_tax_cny?: number | null;
   landed_cny?: number;
   eta_days?: number;
   rating?: number | null;
@@ -496,7 +688,9 @@ export interface ComparisonItem extends ProductEvidence {
   note?: string | null;
   shipping_estimate?: EstimateDisclosure;
   duty_estimate?: EstimateDisclosure;
+  tax_estimate?: EstimateDisclosure;
   delivery_estimate?: EstimateDisclosure;
+  tax_breakdown?: ImportTaxBreakdown | null;
 }
 
 export interface GeneratedFile {
@@ -527,6 +721,8 @@ export interface TaskResultData {
   calculation_notice: string;
   exchange_rate: ExchangeRateProvenance;
   calculation_exclusions: CalculationExclusion[];
+  shipping_exclusions?: ShippingCalculationExclusion[];
+  tax_exclusions?: TaxCalculationExclusion[];
   ranking_profile: RankingProfile;
   data_mode: DataMode;
   result_kind: ResultKind;
