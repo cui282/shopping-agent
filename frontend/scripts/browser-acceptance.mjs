@@ -437,6 +437,7 @@ async function main() {
     let checks = 0;
     for (const viewport of viewports) {
       for (const scenario of scenarios) {
+        const scenarioLabel = `${viewport.name}/${scenario}`;
         const context = await browser.newContext({
           viewport: { width: viewport.width, height: viewport.height },
           reducedMotion: "reduce",
@@ -450,7 +451,6 @@ async function main() {
         });
         page.on("pageerror", (error) => consoleErrors.push(error.message));
         try {
-          const scenarioLabel = `${viewport.name}/${scenario}`;
           console.log(`Browser acceptance starting: ${scenarioLabel}`);
           const scenarioScreenshotTaken = await withTimeout(
             runScenario(page, scenario, viewport),
@@ -472,13 +472,13 @@ async function main() {
           checks += 1;
           console.log(`Browser acceptance passed: ${scenarioLabel}`);
         } finally {
-          await context.close();
+          await withTimeout(context.close(), 10_000, `${scenarioLabel} context close`);
         }
       }
     }
     console.log(`Browser acceptance passed: ${checks} state/viewport checks (10 states x 3 viewports).`);
   } finally {
-    if (browser) await browser.close();
+    if (browser) await withTimeout(browser.close(), 10_000, "browser close");
     for (const child of [frontend, backend]) {
       if (!child.killed) child.kill("SIGTERM");
     }
