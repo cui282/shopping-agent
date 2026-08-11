@@ -55,6 +55,16 @@ function withTimeout(promise, timeoutMs, label) {
   });
 }
 
+async function stopProcess(child) {
+  if (child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  await Promise.race([
+    new Promise((resolvePromise) => child.once("exit", resolvePromise)),
+    sleep(1_000),
+  ]);
+  if (child.exitCode === null) child.kill("SIGKILL");
+}
+
 function startProcess(command, args, options) {
   const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
@@ -478,13 +488,13 @@ async function main() {
     }
     console.log(`Browser acceptance passed: ${checks} state/viewport checks (10 states x 3 viewports).`);
   } finally {
-    if (browser) await withTimeout(browser.close(), 10_000, "browser close");
-    for (const child of [frontend, backend]) {
-      if (!child.killed) child.kill("SIGTERM");
-    }
-    await sleep(150);
-    if (frontend.exitCode === null) frontend.kill("SIGKILL");
-    if (backend.exitCode === null) backend.kill("SIGKILL");
+    const cleanup = async () => {
+      if (browser) {
+        await Promise.race([browser.close(), sleep(3_000)]);
+      }
+      await Promise.all([stopProcess(frontend), stopProcess(backend)]);
+    };
+    await Promise.race([cleanup(), sleep(5_000)]);
     if (backend.exitCode && backend.exitCode !== 0) {
       console.error(backend.getOutput());
     }
@@ -494,7 +504,18 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
-  process.exitCode = 1;
-});
+const exitWatchdog = setTimeout(() => {
+  console.error("Browser acceptance exceeded 120 seconds");
+  process.exit(1);
+}, 120_000);
+
+main()
+  .then(() => {
+    clearTimeout(exitWatchdog);
+    process.exit(0);
+  })
+  .catch((error) => {
+    clearTimeout(exitWatchdog);
+    console.error(error instanceof Error ? error.stack ?? error.message : error);
+    process.exit(1);
+  });
