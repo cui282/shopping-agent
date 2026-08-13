@@ -27,7 +27,7 @@ test = [
   "httpx2>=2.7,<3",
   "pytest>=8,<9",
   "pytest-asyncio>=0.24,<1",
-  "pypdf>=5,<6",
+  "pypdf>=5,<7",
   "ruff==0.16.0",
 ]
 
