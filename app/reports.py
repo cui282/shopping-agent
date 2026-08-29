@@ -320,7 +320,7 @@ def _markdown_item_link(item: Candidate | LandedCost) -> str:
 
 def _markdown_result_table(items: list[Candidate | LandedCost]) -> list[str]:
     lines = [
-        "| 排名 | 商品 | 平台 | 估算到手价 | 预计配送 |",
+        "| 排名 | 商品 | 平台 | 参考金额 | 预计配送 |",
         "| ---: | --- | --- | ---: | ---: |",
     ]
     if not items:
@@ -328,10 +328,14 @@ def _markdown_result_table(items: list[Candidate | LandedCost]) -> list[str]:
         return lines
     for rank, item in enumerate(items, 1):
         eta_days = getattr(item, "eta_days", None)
-        eta = f"约 {eta_days} 天" if eta_days is not None else "待确认"
+        incomplete = getattr(item, "cost_status", "complete") == "product_price_only"
+        eta = "待确认" if incomplete or eta_days is None else f"约 {eta_days} 天"
+        amount = _money(getattr(item, "landed_cny", None))
+        if incomplete:
+            amount += "（商品价参考）"
         lines.append(
             f"| {rank} | {_markdown_cell(item.title)} | {_platform_label(item.platform)} | "
-            f"{_money(getattr(item, 'landed_cny', None))} | {eta} |"
+            f"{amount} | {eta} |"
         )
     return lines
 
@@ -366,13 +370,23 @@ def render_markdown(report: ResearchReportSnapshot) -> str:
     if recommendations:
         lines.extend(["## 推荐商品详情", ""])
         for rank, item in enumerate(recommendations, 1):
+            incomplete = getattr(item, "cost_status", "complete") == "product_price_only"
+            cost_label = "参考商品价（不含运费/税费）" if incomplete else "估算到手价"
+            eta_label = "待确认" if incomplete else f"约 {getattr(item, 'eta_days', '待确认')} 天"
+            shipping_amount = (
+                "待确认" if incomplete else _money(getattr(item, "shipping_cny", None))
+            )
+            tax_amount = "待核" if incomplete else _money(_import_tax_amount(item))
+            total_amount = _money(getattr(item, "landed_cny", None))
+            if incomplete:
+                total_amount += "（商品价参考）"
             lines.extend(
                 [
                     f"### {rank}. {_markdown_cell(item.title)}",
                     "",
                     f"- **平台：** {_platform_label(item.platform)}",
-                    f"- **估算到手价：** {_money(getattr(item, 'landed_cny', None))}",
-                    f"- **预计配送：** 约 {getattr(item, 'eta_days', '待确认')} 天",
+                    f"- **{cost_label}：** {total_amount}",
+                    f"- **预计配送：** {eta_label}",
                     f"- **商品信息：** {_markdown_cell(_customer_attributes(item))}",
                     f"- **推荐理由：** {_customer_selection_reason(item, rank)}",
                     f"- **购买入口：** {_markdown_item_link(item)}",
@@ -381,9 +395,9 @@ def render_markdown(report: ResearchReportSnapshot) -> str:
                     "| --- | ---: |",
                     f"| 平台标价 | {_markdown_cell(item.currency)} {item.price:,.2f} |",
                     f"| 折合商品价 | {_money(getattr(item, 'price_cny', None))} |",
-                    f"| 预估运费 | {_money(getattr(item, 'shipping_cny', None))} |",
-                    f"| 预估进口税费 | {_money(_import_tax_amount(item))} |",
-                    f"| **估算到手价** | **{_money(getattr(item, 'landed_cny', None))}** |",
+                    f"| 预估运费 | {shipping_amount} |",
+                    f"| 预估进口税费 | {tax_amount} |",
+                    f"| **{cost_label}** | **{total_amount}** |",
                     "",
                 ]
             )
@@ -656,6 +670,12 @@ def _customer_verdict(
     lead = items[0]
     landed = getattr(lead, "landed_cny", None)
     mode = "同款报价" if report.mode == "exact_offer_comparison" else "候选商品"
+    if getattr(lead, "cost_status", "complete") == "product_price_only":
+        reference_price = getattr(lead, "price_cny", landed)
+        return (
+            f"优先考虑：{lead.title}",
+            f"在符合条件的{mode}中暂列第一，参考商品价 {_money(reference_price)}；运费和税费待确认。",
+        )
     return (
         f"优先考虑：{lead.title}",
         f"在符合条件的{mode}中综合排序第一，估算到手价 {_money(landed)}。",
@@ -684,6 +704,8 @@ def _customer_selection_reason(item: Candidate | LandedCost, rank: int) -> str:
     reasons = ["已通过本次可验证的硬性条件"]
     if rank == 1:
         reasons.append("综合排序第一")
+    if getattr(item, "cost_status", "complete") == "product_price_only":
+        reasons.append("费用证据待补充，当前按商品价参考")
     if item.rating is not None:
         reasons.append(f"评分 {item.rating:g}")
     if item.sales is not None:
@@ -963,18 +985,20 @@ def render_pdf(report: ResearchReportSnapshot) -> bytes:
             ]
         ]
         for rank, item in enumerate(ranked_items, 1):
+            incomplete = getattr(item, "cost_status", "complete") == "product_price_only"
+            total_label = _money(getattr(item, "landed_cny", None))
+            if incomplete:
+                total_label += "（商品价参考）"
+            eta_label = (
+                "待确认" if incomplete else (f"约 {getattr(item, 'eta_days', '待确认')} 天送达")
+            )
             overview_rows.append(
                 [
                     _paragraph(str(rank), table_body),
                     _paragraph(item.title, table_body),
                     _paragraph(_platform_label(item.platform), table_body),
-                    _paragraph(_money(getattr(item, "landed_cny", None)), table_body_right),
-                    _paragraph(
-                        f"约 {getattr(item, 'eta_days', 0)} 天"
-                        if getattr(item, "eta_days", None) is not None
-                        else "待确认",
-                        table_body_right,
-                    ),
+                    _paragraph(total_label, table_body_right),
+                    _paragraph(eta_label, table_body_right),
                 ]
             )
         story.append(
@@ -1017,19 +1041,25 @@ def render_pdf(report: ResearchReportSnapshot) -> bytes:
         story.append(PageBreak())
         section("前三名详细对比", "推荐详情")
         for rank, item in enumerate(ranked_items, 1):
+            incomplete = getattr(item, "cost_status", "complete") == "product_price_only"
+            total_label = _money(getattr(item, "landed_cny", None))
+            if incomplete:
+                total_label += "（商品价参考）"
+            eta_label = (
+                "待确认" if incomplete else (f"预计 {getattr(item, 'eta_days', '待确认')} 天送达")
+            )
             item_header = styled_table(
                 [
                     [
                         _paragraph(f"第 {rank} 名 · {item.title}", card_title),
-                        _paragraph(_money(getattr(item, "landed_cny", None)), price),
+                        _paragraph(total_label, price),
                     ],
                     [
                         _paragraph(
-                            f"{_platform_label(item.platform)} · "
-                            f"预计 {getattr(item, 'eta_days', '待确认')} 天送达",
+                            f"{_platform_label(item.platform)} · {eta_label}",
                             small,
                         ),
-                        _paragraph("估算到手价", table_body_right),
+                        _paragraph("参考商品价" if incomplete else "估算到手价", table_body_right),
                     ],
                 ],
                 [123 * mm, 57 * mm],
@@ -1055,9 +1085,14 @@ def render_pdf(report: ResearchReportSnapshot) -> bytes:
                 [
                     _paragraph(f"{item.currency} {item.price:,.2f}", table_body),
                     _paragraph(_money(getattr(item, "price_cny", None)), table_body),
-                    _paragraph(_money(getattr(item, "shipping_cny", None)), table_body),
-                    _paragraph(_money(_import_tax_amount(item)), table_body),
-                    _paragraph(_money(getattr(item, "landed_cny", None)), table_body),
+                    _paragraph(
+                        "待确认" if incomplete else _money(getattr(item, "shipping_cny", None)),
+                        table_body,
+                    ),
+                    _paragraph(
+                        "待核" if incomplete else _money(_import_tax_amount(item)), table_body
+                    ),
+                    _paragraph(total_label, table_body),
                 ],
             ]
             story.append(

@@ -6,6 +6,13 @@ from app.config import MARKETPLACES, ConfigurationError, get_settings
 
 
 def _clear_marketplaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PRODUCT_CATALOG_BACKEND", "disabled")
+    monkeypatch.delenv("PRODUCT_SEARCH_BACKEND", raising=False)
+    monkeypatch.delenv("PRODUCT_SEARCH_MARKETPLACES", raising=False)
+    monkeypatch.delenv("PRODUCT_SEARCH_ALLOW_HISTORICAL", raising=False)
+    monkeypatch.delenv("OPENSEARCH_PRODUCT_INDEX", raising=False)
+    monkeypatch.delenv("OPENSEARCH_PRODUCT_SEARCH_PIPELINE", raising=False)
+    monkeypatch.delenv("PRODUCT_SEARCH_EMBEDDING_DIMENSION", raising=False)
     for name in MARKETPLACES:
         monkeypatch.delenv(f"{name.upper()}_DATA_PROVIDER", raising=False)
         monkeypatch.delenv(f"{name.upper()}_DATA_CHANNEL_ENDPOINT", raising=False)
@@ -136,8 +143,95 @@ def test_memory_preferences_are_not_production_ready(monkeypatch: pytest.MonkeyP
     assert not settings.task_ready
     assert settings.status == "not_ready"
     assert (
-        "Use STORE_BACKEND=redis for persistent production preferences" in settings.required_actions
+        "Use STORE_BACKEND=redis or STORE_BACKEND=postgres for persistent production preferences"
+        in settings.required_actions
     )
+
+
+def test_local_product_catalog_is_not_production_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("PRODUCT_CATALOG_BACKEND", "faiss")
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example.com/amazon")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+
+    settings = get_settings()
+
+    assert not settings.task_ready
+    assert "Disable PRODUCT_CATALOG_BACKEND=faiss in production" in settings.required_actions
+
+
+def test_postgres_preferences_are_allowed_in_production(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("STORE_BACKEND", "postgres")
+    monkeypatch.setenv("STORE_POSTGRES_URL", "postgresql://example.invalid/shopping_agent")
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example.com/amazon")
+    monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+
+    settings = get_settings()
+
+    assert settings.store_backend == "postgres"
+    assert settings.store_postgres_url == "postgresql://example.invalid/shopping_agent"
+    assert settings.task_ready
+
+
+def test_opensearch_product_search_enables_selected_marketplaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("AGENT_MODE", "rules")
+    monkeypatch.setenv("PRODUCT_SEARCH_BACKEND", "opensearch")
+    monkeypatch.setenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,ebay")
+    monkeypatch.setenv("OPENSEARCH_URL", "http://opensearch.example")
+
+    settings = get_settings()
+
+    assert settings.enabled_marketplaces == ("amazon", "ebay")
+    assert settings.task_ready
+    assert settings.product_search_backend == "opensearch"
+
+
+def test_opensearch_primary_path_does_not_require_legacy_faiss_or_all_marketplaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("AGENT_MODE", "rules")
+    monkeypatch.setenv("PRODUCT_SEARCH_BACKEND", "opensearch")
+    monkeypatch.setenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,ebay")
+    monkeypatch.setenv("PRODUCT_SEARCH_ALLOW_HISTORICAL", "true")
+    monkeypatch.setenv("OPENSEARCH_URL", "http://opensearch.example")
+    monkeypatch.setenv("TOWER_QUERY_ENDPOINT", "http://embedding.example/embed")
+    monkeypatch.delenv("LANGFUSE_PUBLIC_KEY", raising=False)
+    monkeypatch.delenv("LANGFUSE_SECRET_KEY", raising=False)
+
+    settings = get_settings()
+
+    assert settings.task_ready
+    assert settings.status == "ready"
+    assert settings.recall_configuration_complete
+    assert settings.recall_required_actions == ()
+    assert settings.data_mode == "mixed"
+
+
+def test_product_search_marketplace_validation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_marketplaces(monkeypatch)
+    monkeypatch.setenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,etsy")
+
+    with pytest.raises(ConfigurationError, match="unsupported marketplaces"):
+        get_settings()
 
 
 def test_mixed_diagnostic_mode_is_explicit_and_never_production_ready(

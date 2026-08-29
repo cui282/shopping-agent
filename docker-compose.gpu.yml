@@ -88,7 +88,7 @@ services:
       LLM_RESPONSE_STORAGE: "${LLM_RESPONSE_STORAGE:-false}"
       TOWER_QUERY_ENDPOINT: "${TOWER_QUERY_ENDPOINT:-http://embedding:8080/query}"
       TOWER_ITEM_ENDPOINT: "${TOWER_ITEM_ENDPOINT:-http://embedding:8080/item}"
-      RERANKER_ENDPOINT: "${RERANKER_ENDPOINT:-http://reranker:8080/score}"
+      RERANKER_ENDPOINT: "${COMPOSE_RERANKER_ENDPOINT:-http://reranker:8080/score}"
     depends_on:
       vllm:
         condition: service_healthy

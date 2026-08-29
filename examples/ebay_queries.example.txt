@@ -1,0 +1,6 @@
+# One keyword per line. Keep the list within the eBay API quota.
+wireless headphones
+coffee maker
+mechanical keyboard
+portable charger
+mirrorless camera

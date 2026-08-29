@@ -1,8 +1,8 @@
-"""Inference-only reranker adapter.
+"""Inference-only reranker adapter for compatibility paths.
 
-The service may point this at a pre-trained cross-encoder endpoint. No fine-tuning, user tower, or
-model checkpoint is bundled with Shopping Agent; unavailable reranking simply preserves the dual
-tower and deterministic order.
+The OpenSearch product path ranks its first-stage BM25 + ANN result directly. The BGE service is
+used by category insight and the final item picker; no fine-tuning, user tower, or model checkpoint
+update is bundled with Shopping Agent.
 """
 
 from __future__ import annotations

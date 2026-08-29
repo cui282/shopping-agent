@@ -708,8 +708,9 @@ describe("Product Evidence", () => {
   });
 
   it("distinguishes an all-tax-evidence exclusion from a hard-constraint no-match", () => {
+    const returnedEvidence = { ...evidenceRecommendation, customs: null };
     renderCompletedResult(null, {
-      product_evidence: [evidenceRecommendation],
+      product_evidence: [returnedEvidence],
       match_status: "no_match",
       tax_exclusions: [
         {
@@ -724,6 +725,11 @@ describe("Product Evidence", () => {
 
     expect(screen.getByText("税务证据不足，暂不能计算到手价")).toBeTruthy();
     expect(screen.queryByText("没有满足全部硬性条件的候选")).toBeNull();
+    expect(screen.getByRole("heading", { name: "已找到的商品" })).toBeTruthy();
+    expect(screen.getByText("税费待核，未参与到手价排名")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "查看商品" }).getAttribute("href")).toBe(
+      "https://shop.example/search?q=acme+x1",
+    );
   });
 
   it("omits unsafe links and keeps missing evidence explicit", () => {

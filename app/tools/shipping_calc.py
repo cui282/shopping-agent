@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.schemas import (
+    CostEvidenceGap,
     EstimateDisclosure,
     LandedCost,
     PricePoint,
@@ -45,6 +46,53 @@ def _shipping_basis(item: PricePoint) -> str:
         components.append(f"体积重量 {quote.dimensional_weight_kg:.2f}kg")
     components.append(f"时效 {quote.eta_min_days}-{quote.eta_max_days} 天")
     return "；".join(components)
+
+
+def product_price_only_cost(item: PricePoint, gaps: list[CostEvidenceGap]) -> LandedCost:
+    """Keep a usable product-price recommendation while route/tax evidence is pending."""
+
+    gap_labels = {
+        "shipping_quote": "运费报价",
+        "customs_evidence": "税务证据",
+        "customs_valuation": "海关估值",
+    }
+    labels = "、".join(gap_labels[gap] for gap in gaps)
+    item_data = item.model_dump()
+    item_data["note"] = f"当前仅按人民币商品价排序；{labels}待补充，不是最终到手价。"
+    return LandedCost(
+        **item_data,
+        shipping_cny=0.0,
+        insurance_cny=0.0,
+        duty_cny=None,
+        import_vat_cny=None,
+        consumption_tax_cny=None,
+        import_tax_cny=None,
+        landed_cny=item.price_cny,
+        eta_days=999,
+        duty_tier="待核",
+        shipping_estimate=EstimateDisclosure(
+            estimated=False,
+            source="待补充",
+            calculation_basis="未收到面向中国大陆的线路/服务运费报价。",
+        ),
+        duty_estimate=EstimateDisclosure(
+            estimated=False,
+            source="待补充",
+            calculation_basis="未收到可核验的 HS Code、原产地或税率估值证据。",
+        ),
+        tax_estimate=EstimateDisclosure(
+            estimated=False,
+            source="待补充",
+            calculation_basis="未收到可核验的 HS Code、原产地或税率估值证据。",
+        ),
+        delivery_estimate=EstimateDisclosure(
+            estimated=False,
+            source="待补充",
+            calculation_basis="未收到面向中国大陆的配送时效报价。",
+        ),
+        cost_status="product_price_only",
+        cost_evidence_gaps=gaps,
+    )
 
 
 async def shipping_calc(

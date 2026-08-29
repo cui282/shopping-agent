@@ -213,7 +213,7 @@ async function assertReadinessComponents(page, viewport) {
   const open = await summary.evaluate((element) => element.parentElement?.hasAttribute("open"));
   if (!open) throw new Error(`${viewport.name}: readiness component disclosure did not open`);
   const componentRows = page.locator('ul[aria-label="运行组件状态"] > li');
-  const expectedComponentRows = 9 + (await page.locator('ul[aria-label="平台数据状态"] > li').count());
+  const expectedComponentRows = 13 + (await page.locator('ul[aria-label="平台数据状态"] > li').count());
   const componentRowCount = await componentRows.count();
   if (componentRowCount !== expectedComponentRows) {
     throw new Error(
@@ -236,7 +236,7 @@ async function assertReadinessComponents(page, viewport) {
 
   const recallSummary = page.getByText(/候选检索状态：/, { exact: false });
   await recallSummary.click();
-  await page.getByText("OpenSearch 类目知识", { exact: true }).waitFor();
+  await page.getByText("OpenSearch 语义检索", { exact: true }).waitFor();
   const recallOpen = await recallSummary.evaluate((element) => element.parentElement?.hasAttribute("open"));
   if (!recallOpen) throw new Error(`${viewport.name}: recall disclosure did not open`);
   await assertAccessibility(page, viewport);

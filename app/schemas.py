@@ -20,6 +20,7 @@ CurrencyMarkupStatus = Literal["included", "excluded", "unknown"]
 ShippingQuoteType = Literal[
     "carrier_quote",
     "marketplace_checkout",
+    "marketplace_estimate",
     "shipping_included",
     "sandbox_fixture",
 ]
@@ -44,6 +45,8 @@ IdentityEvidenceBasis = Literal[
     "identifier", "material_variant_attributes", "insufficient", "not_required"
 ]
 ResultKind = Literal["live", "sandbox", "partial"]
+CostStatus = Literal["complete", "product_price_only"]
+CostEvidenceGap = Literal["shipping_quote", "customs_evidence", "customs_valuation"]
 ReportFormat = Literal["markdown", "json", "pdf"]
 ProviderFailureReason = Literal[
     "not_configured",
@@ -841,6 +844,7 @@ class RankingScoreBreakdown(StrictModel):
     evidence_quality_score: float = Field(ge=0, le=1)
     delivery_time_days: int = Field(ge=0)
     delivery_time_score: float = Field(ge=0, le=1)
+    semantic_relevance_score: float = Field(default=0, ge=0, le=1)
 
     @model_validator(mode="after")
     def require_each_dimension_once(self) -> RankingScoreBreakdown:
@@ -991,8 +995,8 @@ class ConstraintRelaxationCommand(StrictModel):
 
 
 class PreferenceBackendStatus(StrictModel):
-    requested_backend: Literal["memory", "redis"]
-    backend: Literal["memory", "redis"]
+    requested_backend: Literal["memory", "redis", "postgres"]
+    backend: Literal["memory", "redis", "postgres"]
     durability: PreferenceDurability
     fallback_reason: str | None = None
 
@@ -1070,6 +1074,10 @@ class CategoryEvidence(StrictModel):
 
 class CategoryInsightOutput(StrictModel):
     category: str
+    standard_category: str | None = None
+    query_expansions: list[str] = Field(default_factory=list)
+    subtypes: list[str] = Field(default_factory=list)
+    category_ids: list[str] = Field(default_factory=list)
     components: list[str]
     bestsellers: list[Bestseller]
     attributes: list[AttributeDist]
@@ -1119,6 +1127,10 @@ class ItemSearchOutput(StrictModel):
     total_recall: int
     truncated: bool
     provider: ProviderMetadata
+    # ProductSearch may use OpenSearch k-NN before the generic recall stage.
+    # Keep this explicit so recall provenance does not infer ANN participation
+    # from a provider name or from the legacy Faiss settings.
+    ann_used: bool = False
 
 
 class RecallResult(StrictModel):
@@ -1242,12 +1254,14 @@ class LandedCost(PricePoint):
     import_tax_cny: float | None = None
     landed_cny: float
     eta_days: int
-    duty_tier: Literal["免征", "标准", "高税"]
+    duty_tier: Literal["免征", "标准", "高税", "待核"]
     shipping_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
     duty_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
     tax_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
     delivery_estimate: EstimateDisclosure = Field(default_factory=EstimateDisclosure)
     tax_breakdown: ImportTaxBreakdown | None = None
+    cost_status: CostStatus = "complete"
+    cost_evidence_gaps: list[CostEvidenceGap] = Field(default_factory=list)
 
 
 class ReportEvidence(StrictModel):
@@ -1362,6 +1376,9 @@ class ItemPickerOutput(StrictModel):
     rejected_count: int
     ranking_profile: RankingProfile = Field(default_factory=RankingProfile)
     preference_decisions: list[PreferenceDecision] = Field(default_factory=list)
+    provider: ProviderMetadata = Field(
+        default_factory=lambda: ProviderMetadata(source="computed", provider="item-picker")
+    )
 
 
 class FileLink(StrictModel):
@@ -1653,7 +1670,11 @@ class ReadinessComponents(StrictModel):
     llm: ReadinessComponentStatus
     marketplace_gateways: dict[str, ReadinessComponentStatus] = Field(default_factory=dict)
     redis: ReadinessComponentStatus
+    postgres: ReadinessComponentStatus
     opensearch: ReadinessComponentStatus
+    product_search: ReadinessComponentStatus
+    embedding: ReadinessComponentStatus
+    langfuse: ReadinessComponentStatus
     faiss: ReadinessComponentStatus
     query_tower: ReadinessComponentStatus
     item_tower: ReadinessComponentStatus
@@ -1669,7 +1690,7 @@ class ReadinessResponse(StrictModel):
     runtime_mode: Literal["live", "sandbox"]
     agent_mode: Literal["llm", "rules", "unavailable"]
     requested_agent_mode: Literal["auto", "llm", "rules"]
-    preference_store: Literal["memory", "redis"]
+    preference_store: Literal["memory", "redis", "postgres"]
     providers: dict[str, ProviderCapability]
     capabilities: dict[str, bool]
     required_actions: list[str]

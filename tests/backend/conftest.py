@@ -15,6 +15,7 @@ from app.agent.dispatch_tool import reset_child_slots
 from app.api import server
 from app.api.connection import manager
 from app.memory.store import InMemoryPreferenceStore
+from app.observability import reset_observer
 from app.provider_resilience import reset_provider_resilience
 from app.security import rate_limiter
 
@@ -25,6 +26,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_MODE", "rules")
     monkeypatch.setenv("SANDBOX_MODE", "true")
     monkeypatch.setenv("ALLOW_FIXTURE_FALLBACK", "false")
+    monkeypatch.setenv("PRODUCT_CATALOG_BACKEND", "disabled")
     monkeypatch.setenv("ALLOW_RULES_FALLBACK", "true")
     monkeypatch.setenv("OUTPUT_ROOT", str(tmp_path / "output"))
     monkeypatch.setenv("UPLOAD_ROOT", str(tmp_path / "uploaded"))
@@ -35,17 +37,43 @@ def isolated_runtime(tmp_path, monkeypatch):
         monkeypatch.delenv(f"{prefix}_API_ENDPOINT", raising=False)
         monkeypatch.delenv(f"{prefix}_API_KEY", raising=False)
     for name in (
+        "EBAY_ENV",
+        "EBAY_CLIENT_ID",
+        "EBAY_CLIENT_SECRET",
+        "EBAY_DEV_ID",
+        "EBAY_MARKETPLACE_ID",
+        "EBAY_OAUTH_SCOPE",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name in (
         "OPENSEARCH_URL",
         "OPENSEARCH_CATEGORY_INDEX",
         "OPENSEARCH_SEARCH_PIPELINE",
+        "OPENSEARCH_PRODUCT_INDEX",
+        "OPENSEARCH_PRODUCT_SEARCH_PIPELINE",
+        "PRODUCT_SEARCH_BACKEND",
+        "PRODUCT_SEARCH_MARKETPLACES",
+        "PRODUCT_SEARCH_ALLOW_HISTORICAL",
+        "PRODUCT_SEARCH_EMBEDDING_DIMENSION",
         "ANN_BACKEND",
         "ANN_INDEX_PATH",
         "TOWER_QUERY_ENDPOINT",
         "TOWER_ITEM_ENDPOINT",
         "TOWER_USER_ENDPOINT",
+        "RERANKER_ENDPOINT",
         "RECALL_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
+    for name in (
+        "LANGFUSE_PUBLIC_KEY",
+        "LANGFUSE_SECRET_KEY",
+        "LANGFUSE_BASE_URL",
+        "LANGFUSE_HOST",
+        "LANGFUSE_TRACING_ENABLED",
+        "LANGFUSE_TRACING_ENVIRONMENT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    reset_observer()
     server.records.clear()
     server.task_locks.clear()
     manager.active.clear()
@@ -57,6 +85,7 @@ def isolated_runtime(tmp_path, monkeypatch):
     rate_limiter.clear()
     reset_provider_resilience()
     reset_child_slots()
+    reset_observer()
     yield
     for record in list(server.records.values()):
         if not record.task.done():

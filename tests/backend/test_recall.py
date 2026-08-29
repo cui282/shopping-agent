@@ -132,6 +132,44 @@ async def test_configured_hybrid_recall_calls_all_fakes_and_orders_product_evide
 
 
 @pytest.mark.asyncio
+async def test_opensearch_product_ann_is_primary_recall_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRODUCT_SEARCH_BACKEND", "opensearch")
+    monkeypatch.setenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,ebay")
+    monkeypatch.setenv("OPENSEARCH_URL", "http://opensearch.test")
+    monkeypatch.setenv("TOWER_QUERY_ENDPOINT", "http://embedding.test/embed")
+
+    class ExplodingReranker:
+        async def score(self, _query: str, _candidates: list[Candidate]) -> list[float]:
+            raise AssertionError("product-first recall must not call the BGE reranker")
+
+    candidates = [_candidate("one", "第一款耳机"), _candidate("two", "第二款耳机")]
+    result = await RecallOrchestrator(
+        adapters=RecallAdapters(reranker=ExplodingReranker()),
+    ).recall(
+        "找耳机",
+        candidates,
+        category_insight=_opensearch_insight(),
+        top_k=2,
+        product_ann_used=True,
+        product_ann_complete=True,
+    )
+
+    assert result.candidates == candidates
+    assert result.provider.status == "ok"
+    assert result.provider.fallback_reason is None
+    assert result.provenance.mode == "hybrid"
+    assert result.provenance.participating_channels == ["opensearch"]
+    assert result.provenance.channels["opensearch"].state == "ready"
+    assert result.provenance.channels["opensearch"].participated is True
+    assert all(
+        not result.provenance.channels[name].participated
+        for name in ("query_tower", "item_tower", "faiss")
+    )
+
+
+@pytest.mark.asyncio
 async def test_faiss_adapter_resolves_runtime_configured_index_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -448,6 +486,24 @@ def test_readiness_exposes_partial_recall_configuration_and_required_actions(
     assert readiness.channels["item_tower"].reason_code == "ann_backend_disabled"
     assert readiness.channels["faiss"].reason_code == "backend_disabled"
     assert any("ANN_BACKEND" in action for action in readiness.required_actions)
+
+
+def test_readiness_marks_configured_opensearch_product_ann_as_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PRODUCT_SEARCH_BACKEND", "opensearch")
+    monkeypatch.setenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,ebay")
+    monkeypatch.setenv("OPENSEARCH_URL", "http://opensearch.test")
+    monkeypatch.setenv("TOWER_QUERY_ENDPOINT", "http://embedding.test/embed")
+
+    readiness = recall_readiness()
+
+    assert readiness.mode == "hybrid"
+    assert readiness.channels["opensearch"].configured is True
+    assert "product ANN" in readiness.channels["opensearch"].reason
+    assert readiness.channels["query_tower"].reason_code == "ann_backend_disabled"
+    assert readiness.channels["item_tower"].reason_code == "ann_backend_disabled"
+    assert readiness.channels["faiss"].reason_code == "backend_disabled"
 
 
 def _wait_for_terminal(client: TestClient, thread_id: str, timeout: float = 8) -> dict:

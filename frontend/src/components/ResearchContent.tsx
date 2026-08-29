@@ -4,6 +4,9 @@ import {
   ArrowUpRight,
   BadgeDollarSign,
   Calculator,
+  FileText,
+  Search,
+  SlidersHorizontal,
   Download,
   ImageOff,
   Info,
@@ -23,6 +26,7 @@ import type {
   GeneratedFile,
   IdentityEvidence,
   PreferenceDecision,
+  ProductEvidence,
   RankingDimension,
   RankingProfile,
   Recommendation,
@@ -283,9 +287,10 @@ function ProductCard({ product }: { product: Recommendation }) {
   const productUrl = product.link_kind ? safeExternalUrl(product.product_url) : null;
   const searchLink = product.link_kind === "marketplace_search";
   const marketplace = providerNameLabel(product.marketplace ?? product.platform);
-  const provider = product.provenance?.provider;
-  const tax = importTaxAmount(product);
-  const taxBreakdown = product.tax_breakdown;
+ const provider = product.provenance?.provider;
+ const tax = importTaxAmount(product);
+ const taxBreakdown = product.tax_breakdown;
+  const productPriceOnly = product.cost_status === "product_price_only";
 
   return (
     <article className={styles.productCard} data-rank={product.rank}>
@@ -305,8 +310,10 @@ function ProductCard({ product }: { product: Recommendation }) {
         <p className={styles.reason}>{product.reason}</p>
         <div className={styles.cardFooter}>
           <div>
-            <span className={styles.price}>{currencyCny.format(product.landed_cny)}</span>
-            <span className={styles.priceNote}>中国大陆到手价（估算）</span>
+           <span className={styles.price}>{currencyCny.format(product.landed_cny)}</span>
+            <span className={styles.priceNote}>
+              {productPriceOnly ? "参考商品价（运费/税费待确认）" : "中国大陆到手价（估算）"}
+            </span>
           </div>
           {productUrl && (
             <a
@@ -336,7 +343,7 @@ function ProductCard({ product }: { product: Recommendation }) {
           )}
           <span>{product.sales == null ? "销量未提供" : `${formatCount(product.sales)} 人购买`}</span>
           <span>
-            <Truck size={13} aria-hidden="true" /> {product.eta_days} 天
+            {productPriceOnly ? "配送时效待确认" : <><Truck size={13} aria-hidden="true" /> {product.eta_days} 天</>}
           </span>
         </div>
         <details className={styles.productDetails}>
@@ -353,18 +360,18 @@ function ProductCard({ product }: { product: Recommendation }) {
               <dd>{currencyCny.format(product.price_cny)}</dd>
             </div>
             <div>
-              <dt>运费 {estimateLabel(product.shipping_estimate?.estimated)}</dt>
-              <dd>
-                {currencyCny.format(product.shipping_cny)}
-                <small>{estimateSource(product.shipping_estimate?.source)}</small>
-              </dd>
+             <dt>运费 {estimateLabel(product.shipping_estimate?.estimated)}</dt>
+             <dd>
+                {productPriceOnly ? "待确认" : currencyCny.format(product.shipping_cny)}
+               <small>{estimateSource(product.shipping_estimate?.source)}</small>
+             </dd>
             </div>
             <div>
-              <dt>进口税费 {estimateLabel(product.tax_estimate?.estimated)}</dt>
-              <dd>
-                {tax == null ? "待核税" : currencyCny.format(tax)}
-                <small>{taxComponentSummary(product)}</small>
-                <small>{estimateSource(product.tax_estimate?.source)}</small>
+             <dt>进口税费 {estimateLabel(product.tax_estimate?.estimated)}</dt>
+             <dd>
+                {productPriceOnly || tax == null ? "待核税" : currencyCny.format(tax)}
+               <small>{taxComponentSummary(product)}</small>
+               <small>{estimateSource(product.tax_estimate?.source)}</small>
               </dd>
             </div>
             {product.insurance_cny > 0 && (
@@ -519,12 +526,94 @@ function ProductCard({ product }: { product: Recommendation }) {
   );
 }
 
+function EvidenceCandidates({ candidates }: { candidates: ProductEvidence[] }) {
+  const visible = candidates.slice(0, 8);
+  if (!visible.length) return null;
+  return (
+    <section className={styles.evidenceCandidates} aria-labelledby="evidence-candidates-heading">
+      <div className={styles.decisionSectionHeader}>
+        <h3 id="evidence-candidates-heading">已找到的商品</h3>
+        <span>{candidates.length} 条商品证据，税费待核</span>
+      </div>
+      <ul className={styles.evidenceCandidateList}>
+        {visible.map((candidate) => {
+          const imageUrl = safeExternalUrl(candidate.image_url);
+          const productUrl = candidate.link_kind ? safeExternalUrl(candidate.product_url) : null;
+          const convertedPrice =
+            candidate.currency === "CNY"
+              ? candidate.price
+              : candidate.price_conversion
+                ? candidate.price * candidate.price_conversion.rate_to_cny
+                : null;
+          const shipping = candidate.shipping_quote;
+          return (
+            <li className={styles.evidenceCandidate} key={`${candidate.platform}-${candidate.item_id}`}>
+              {imageUrl ? (
+                <img className={styles.evidenceCandidateImage} src={imageUrl} alt="" loading="lazy" />
+              ) : (
+                <div className={styles.evidenceCandidateImageFallback} aria-hidden="true">
+                  <ImageOff size={18} />
+                </div>
+              )}
+              <div className={styles.evidenceCandidateBody}>
+                <div className={styles.evidenceCandidateTitle}>
+                  <strong title={candidate.title}>{candidate.title}</strong>
+                  <span>{providerNameLabel(candidate.platform)}</span>
+                </div>
+                <p>
+                  {candidate.currency} {candidate.price.toFixed(2)}
+                  {convertedPrice == null ? " · 人民币换算待补" : ` · 约 ${currencyCny.format(convertedPrice)}`}
+                  {shipping ? ` · 运费 ${shipping.currency} ${shipping.total_amount.toFixed(2)}` : " · 运费待补"}
+                </p>
+                <div className={styles.evidenceCandidateMeta}>
+                  <span>{candidate.customs ? "税费证据已提供" : "税费待核，未参与到手价排名"}</span>
+                  {productUrl && (
+                    <a href={productUrl} target="_blank" rel="noreferrer">
+                      查看商品 <ArrowUpRight size={13} aria-hidden="true" />
+                    </a>
+                  )}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {candidates.length > visible.length && (
+        <p className={styles.evidenceCandidateMore}>另有 {candidates.length - visible.length} 条商品证据未展开。</p>
+      )}
+    </section>
+  );
+}
+
 function StarterState({ onUseStarter }: { onUseStarter: (query: string) => void }) {
   return (
     <section className={styles.starter} aria-labelledby="starter-title">
-      <div className={styles.starterIntro}>
-        <span className={styles.eyebrow}>新的研究</span>
-        <h2 id="starter-title">跨平台购物研究</h2>
+      <div className={styles.starterMasthead}>
+        <div className={styles.starterKicker}>
+          <span className={styles.eyebrow}>SHOPPING RESEARCH</span>
+          <span className={styles.starterStatus}>
+            <span aria-hidden="true" /> 数据源已就绪
+          </span>
+        </div>
+        <div className={styles.starterTitleRow}>
+          <div className={styles.starterIntro}>
+            <h2 id="starter-title">跨平台购物研究</h2>
+            <p>比较商品、费用与证据，整理成一份可追溯的购买结论。</p>
+          </div>
+          <div className={styles.starterIndex} aria-hidden="true">
+            <strong>01</strong>
+            <span>NEW TASK</span>
+          </div>
+        </div>
+      </div>
+      <div className={styles.starterSignals} aria-label="研究内容">
+        <span><Search size={15} aria-hidden="true" /> 商品候选</span>
+        <span><SlidersHorizontal size={15} aria-hidden="true" /> 价格与条件</span>
+        <span><FileText size={15} aria-hidden="true" /> 详细报告</span>
+      </div>
+      <div className={styles.starterSectionHeading}>
+        <h3>快捷研究</h3>
+        <span>从一个具体商品问题开始</span>
       </div>
       <div className={styles.starterList}>
         {starterQueries.map((starter) => (
@@ -578,8 +667,9 @@ function Comparison({ state }: { state: AgentState }) {
   if (rows.length === 0) {
     return <p className={styles.noComparison}>本次结果没有可用的横向价格数据。</p>;
   }
-  const originalOrder = new Map(rows.map((row, index) => [`${row.platform}:${row.item_id}`, index]));
-  const landedCost = (row: (typeof rows)[number]) => row.landed_cny ?? row.price_cny;
+ const originalOrder = new Map(rows.map((row, index) => [`${row.platform}:${row.item_id}`, index]));
+ const landedCost = (row: (typeof rows)[number]) => row.landed_cny ?? row.price_cny;
+  const productPriceOnly = (row: (typeof rows)[number]) => row.cost_status === "product_price_only";
   const sortedRows = [...rows].sort((left, right) => {
     if (sort === "price") return landedCost(left) - landedCost(right);
     if (sort === "delivery") {
@@ -613,10 +703,10 @@ function Comparison({ state }: { state: AgentState }) {
           <span>综合首选</span>
           <strong title={lead?.title ?? rows[0].title}>{lead?.title ?? rows[0].title}</strong>
         </div>
-        <div>
-          <span>最低到手价</span>
-          <strong>{currencyCny.format(lowestCost)}</strong>
-        </div>
+       <div>
+          <span>{rows.some(productPriceOnly) ? "最低商品价（费用待确认）" : "最低到手价"}</span>
+         <strong>{currencyCny.format(lowestCost)}</strong>
+       </div>
         <div>
           <span>最快送达</span>
           <strong>{fastestDelivery == null ? "待确认" : `${fastestDelivery} 天`}</strong>
@@ -629,7 +719,7 @@ function Comparison({ state }: { state: AgentState }) {
       <div className={styles.comparisonToolbar}>
         <div>
           <strong>候选对比矩阵</strong>
-          <span>{rows.length} 个候选，价格统一为人民币到手成本</span>
+          <span>{rows.length} 个候选，价格统一为人民币；费用证据完整度不同</span>
         </div>
         <div className={styles.comparisonSort} role="group" aria-label="比较排序">
           <button type="button" aria-pressed={sort === "ranking"} onClick={() => setSort("ranking")}>
@@ -672,18 +762,20 @@ function Comparison({ state }: { state: AgentState }) {
                 </th>
                 <td>{row.platform.toUpperCase()}</td>
                 <td>{providerSourceLabel(row.source)}</td>
-                <td>{row.currency} {row.price.toFixed(2)}</td>
-                <td>{currencyCny.format(row.price_cny)}</td>
-                <td>
-                  {row.shipping_cny == null ? "待确认" : `${currencyCny.format(row.shipping_cny)}（报价）`}
+               <td>{row.currency} {row.price.toFixed(2)}</td>
+               <td>{currencyCny.format(row.price_cny)}</td>
+               <td>
+                  {productPriceOnly(row) ? "待确认" : row.shipping_cny == null ? "待确认" : `${currencyCny.format(row.shipping_cny)}（报价）`}
+               </td>
+               <td>
+                  {productPriceOnly(row) || importTaxAmount(row) == null
+                   ? "待核税"
+                   : `${currencyCny.format(importTaxAmount(row) ?? 0)}（估算）`}
+               </td>
+                <td className={styles.tablePrice}>
+                  {productPriceOnly(row) ? `${currencyCny.format(row.price_cny)}（参考）` : currencyCny.format(row.landed_cny ?? row.price_cny)}
                 </td>
-                <td>
-                  {importTaxAmount(row) == null
-                    ? "待核税"
-                    : `${currencyCny.format(importTaxAmount(row) ?? 0)}（估算）`}
-                </td>
-                <td className={styles.tablePrice}>{currencyCny.format(row.landed_cny ?? row.price_cny)}</td>
-                <td>{row.eta_days == null ? "待确认" : `${row.eta_days} 天（估算）`}</td>
+                <td>{productPriceOnly(row) || row.eta_days == null ? "待确认" : `${row.eta_days} 天（估算）`}</td>
               </tr>
             ))}
           </tbody>
@@ -716,24 +808,24 @@ function Comparison({ state }: { state: AgentState }) {
                 <dd>{currencyCny.format(row.price_cny)}</dd>
               </div>
               <div>
-                <dt>运费报价</dt>
-                <dd>{row.shipping_cny == null ? "待确认" : currencyCny.format(row.shipping_cny)}</dd>
-              </div>
-              <div>
-                <dt>进口税费</dt>
-                <dd>
-                  {importTaxAmount(row) == null
-                    ? "待核税"
-                    : currencyCny.format(importTaxAmount(row) ?? 0)}
-                </dd>
-              </div>
-              <div>
-                <dt>到手价（CNY）</dt>
-                <dd>{currencyCny.format(row.landed_cny ?? row.price_cny)}</dd>
-              </div>
-              <div>
-                <dt>预计到达</dt>
-                <dd>{row.eta_days == null ? "待确认" : `${row.eta_days} 天`}</dd>
+               <dt>运费报价</dt>
+                <dd>{productPriceOnly(row) || row.shipping_cny == null ? "待确认" : currencyCny.format(row.shipping_cny)}</dd>
+             </div>
+             <div>
+               <dt>进口税费</dt>
+               <dd>
+                  {productPriceOnly(row) || importTaxAmount(row) == null
+                   ? "待核税"
+                   : currencyCny.format(importTaxAmount(row) ?? 0)}
+               </dd>
+             </div>
+             <div>
+               <dt>到手价（CNY）</dt>
+                <dd>{productPriceOnly(row) ? `${currencyCny.format(row.price_cny)}（参考）` : currencyCny.format(row.landed_cny ?? row.price_cny)}</dd>
+             </div>
+             <div>
+               <dt>预计到达</dt>
+                <dd>{productPriceOnly(row) || row.eta_days == null ? "待确认" : `${row.eta_days} 天`}</dd>
               </div>
             </dl>
           </article>
@@ -1459,11 +1551,11 @@ export default function ResearchContent({
             <span>首选建议</span>
             <strong>{leadRecommendation.title}</strong>
             <p>{leadRecommendation.reason}</p>
-          </div>
-          <div className={styles.verdictPrice}>
-            <span>中国大陆到手价</span>
-            <strong>{currencyCny.format(leadRecommendation.landed_cny)}</strong>
-          </div>
+         </div>
+         <div className={styles.verdictPrice}>
+            <span>{leadRecommendation.cost_status === "product_price_only" ? "参考商品价（费用待确认）" : "中国大陆到手价"}</span>
+           <strong>{currencyCny.format(leadRecommendation.landed_cny)}</strong>
+         </div>
         </section>
       )}
       <div
@@ -1480,17 +1572,20 @@ export default function ResearchContent({
               ))}
             </div>
           ) : (
-            <p className={styles.noComparison}>
-              {result && shippingEvidenceBlocksLandedCost(result)
-                ? "研究已完成，但商品缺少面向中国大陆的有效运费报价，暂不能计算真实到手价。"
-                : result && taxEvidenceBlocksLandedCost(result)
-                ? "研究已完成，但商品缺少可核验税务证据，暂不能计算真实到手价。"
-                : result && !resultHasEvidence(result)
-                ? "研究已完成，但平台没有返回可用的商品证据。"
-                : result?.mode === "exact_offer_comparison" && result.matching_offers.length === 0
-                  ? "研究已完成，但没有证据充分的同款报价。"
-                  : "研究已完成，但没有商品同时满足硬性条件。"}
-            </p>
+            <>
+              <p className={styles.noComparison}>
+                {result && shippingEvidenceBlocksLandedCost(result)
+                  ? "研究已完成，但商品缺少面向中国大陆的有效运费报价，暂不能计算真实到手价。"
+                  : result && taxEvidenceBlocksLandedCost(result)
+                  ? "研究已完成，但商品缺少可核验税务证据，暂不能计算真实到手价。"
+                  : result && !resultHasEvidence(result)
+                  ? "研究已完成，但平台没有返回可用的商品证据。"
+                  : result?.mode === "exact_offer_comparison" && result.matching_offers.length === 0
+                    ? "研究已完成，但没有证据充分的同款报价。"
+                    : "研究已完成，但没有商品同时满足硬性条件。"}
+              </p>
+              {result && <EvidenceCandidates candidates={result.product_evidence} />}
+            </>
           )
         ) : (
           <Comparison state={state} />

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.agent.main_agent import _expanded_product_query
 from app.eval.recall_metrics import (
     assert_release_gate,
     evaluate_recall,
@@ -10,10 +11,11 @@ from app.eval.recall_metrics import (
     recall_at_k,
 )
 from app.recall.category_kb import CategoryCard
-from app.recall.category_norm import normalize_category
+from app.recall.category_norm import category_search_context, normalize_category
 from app.recall.orchestrator import RecallAdapters, RecallOrchestrator
 from app.recall.rag import extract_structured_card, summarize_card
 from app.schemas import Candidate, CategoryInsightOutput, ProviderMetadata
+from app.tools.category_insight import _rerank_hits
 
 
 def _candidate(item_id: str) -> Candidate:
@@ -67,8 +69,64 @@ def test_category_card_projects_structured_fields_for_opensearch() -> None:
     assert "embedding" not in source
 
 
+@pytest.mark.asyncio
+async def test_category_ranker_uses_shared_embedding_without_external_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("RERANKER_ENDPOINT", raising=False)
+    hits = [
+        {
+            "_score": 1.0,
+            "_source": {
+                "category": "咖啡机",
+                "summary": "咖啡豆研磨与萃取",
+                "confidence": 0.95,
+                "embedding": [0.0, 1.0],
+            },
+        },
+        {
+            "_score": 0.8,
+            "_source": {
+                "category": "耳机",
+                "summary": "降噪、佩戴方式与续航",
+                "confidence": 0.75,
+                "embedding": [1.0, 0.0],
+            },
+        },
+    ]
+
+    ranked, status = await _rerank_hits(
+        "耳机",
+        hits,
+        top_k=1,
+        query_vector=[1.0, 0.0],
+    )
+
+    assert status is None
+    assert ranked[0]["_source"]["category"] == "耳机"
+
+
 def test_category_aliases_and_recall_metrics_are_deterministic() -> None:
     assert normalize_category("  旅行收纳 ") == "旅行三件套"
+    context = category_search_context("旅行三件套")
+    assert context.standard_category == "旅行收纳套装"
+    assert "packing cubes" in context.query_terms
+    assert "洗漱包" in context.query_terms
+    insight = CategoryInsightOutput(
+        category="旅行三件套",
+        standard_category=context.standard_category,
+        query_expansions=list(context.query_expansions),
+        subtypes=list(context.subtypes),
+        components=[],
+        bestsellers=[],
+        attributes=[],
+        price_tiers=[],
+        confidence=0.5,
+        provider=ProviderMetadata(source="curated", provider="test"),
+    )
+    expanded = _expanded_product_query("我买旅行三件套", insight)
+    assert "packing cubes" in expanded
+    assert "旅行收纳套装" in expanded
     assert recall_at_k(["noise", "c-1"], ["c-1", "c-2"], 2) == 0.5
     assert mrr(["noise", "c-1"], ["c-1"]) == 0.5
     assert ndcg_at_k(["c-2", "c-1"], ["c-1", "c-2"], 2) < 1

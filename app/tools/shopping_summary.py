@@ -109,9 +109,11 @@ async def shopping_summary(
     if calculation_exclusions or excluded_currencies:
         exclusion_notices.append(f"价格换算排除 {len(calculation_exclusions)} 个候选")
     if shipping_exclusions:
-        exclusion_notices.append(f"运费报价证据不足排除 {len(shipping_exclusions)} 个候选")
+        exclusion_notices.append(
+            f"运费报价证据不足，{len(shipping_exclusions)} 个候选仅按商品价参考"
+        )
     if tax_exclusions:
-        exclusion_notices.append(f"税务证据不足排除 {len(tax_exclusions)} 个候选")
+        exclusion_notices.append(f"税务证据不足，{len(tax_exclusions)} 个候选仅按商品价参考")
     excluded_notice = "；".join(exclusion_notices)
     if excluded_notice:
         excluded_notice += "；"
@@ -181,12 +183,12 @@ async def shopping_summary(
         if tax_exclusions:
             lines.append(
                 f"另有 {len(tax_exclusions)} 个候选因缺少可核验税务证据，"
-                "未参与精确到手价计算和排名。"
+                "未参与精确到手价计算；相关候选仅按商品价参考排序。"
             )
         if shipping_exclusions:
             lines.append(
                 f"另有 {len(shipping_exclusions)} 个候选因缺少有效运费报价，"
-                "未参与精确到手价计算和排名。"
+                "未参与精确到手价计算；相关候选仅按商品价参考排序。"
             )
         lines.append(rationale)
         final_answer = "\n".join(lines)

@@ -13,8 +13,10 @@ from app.schemas import (
     CustomsTaxEvidence,
     CustomsValuationEvidence,
     ItemPickerOutput,
+    LandedCost,
     OfferProvenance,
     ProductIdentity,
+    ShippingCalcOutput,
     ShippingCalculationExclusion,
     ShippingQuoteEvidence,
     TaxCalculationExclusion,
@@ -25,7 +27,7 @@ from app.tools.item_search import _parse_live_item, item_search
 from app.tools.planner import planner
 from app.tools.price_compare import MissingExchangeRatesError, price_compare
 from app.tools.query_parser import extract_product_subject
-from app.tools.shipping_calc import shipping_calc
+from app.tools.shipping_calc import product_price_only_cost, shipping_calc
 from app.tools.shopping_summary import shopping_summary
 from app.utils.thread_ctx import thread_scope
 
@@ -114,6 +116,77 @@ async def test_planner_extracts_budget_category_and_constraints() -> None:
 
 
 @pytest.mark.asyncio
+async def test_planner_extracts_category_after_direct_purchase_prefix() -> None:
+    plan = await planner("我买旅行三件套")
+
+    assert plan.category == "旅行三件套"
+
+
+@pytest.mark.asyncio
+async def test_item_picker_uses_bge_reranker_after_hard_constraint_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item_picker_module = __import__("app.tools.item_picker", fromlist=["HTTPTextReranker"])
+    monkeypatch.setenv("RERANKER_ENDPOINT", "http://reranker.test/score")
+    calls: list[tuple[str, list[str]]] = []
+
+    class FakeReranker:
+        async def score(self, query: str, passages: list[str]) -> list[float]:
+            calls.append((query, passages))
+            return [0.1, 0.9]
+
+    monkeypatch.setattr(item_picker_module, "HTTPTextReranker", FakeReranker)
+    shipping = ShippingCalcOutput(
+        destination="中国大陆",
+        calculation_basis="test",
+        items=[
+            LandedCost(
+                item_id="less-relevant",
+                platform="amazon",
+                title="Generic travel item",
+                price=100,
+                currency="CNY",
+                price_cny=100,
+                shipping_cny=0,
+                duty_cny=0,
+                landed_cny=100,
+                eta_days=5,
+                duty_tier="免征",
+                source="live",
+            ),
+            LandedCost(
+                item_id="more-relevant",
+                platform="ebay",
+                title="Travel organizer set",
+                price=120,
+                currency="CNY",
+                price_cny=120,
+                shipping_cny=0,
+                duty_cny=0,
+                landed_cny=120,
+                eta_days=6,
+                duty_tier="免征",
+                source="live",
+            ),
+        ],
+    )
+
+    result = await item_picker(
+        shipping,
+        await planner("旅行三件套"),
+        query="旅行三件套",
+    )
+
+    assert calls and calls[0][0] == "旅行三件套"
+    assert [item.item_id for item in result.recommendations] == [
+        "more-relevant",
+        "less-relevant",
+    ]
+    assert result.provider.status == "ok"
+    assert result.recommendations[0].score_breakdown.semantic_relevance_score == 0.9
+
+
+@pytest.mark.asyncio
 async def test_planner_builds_explicit_ranking_profile() -> None:
     plan = await planner("找耳机，优先配送速度，其次偏好匹配，再看价格")
 
@@ -171,6 +244,9 @@ async def test_unlisted_product_subject_is_preserved_through_sandbox_search(monk
     [
         ("找一个手机壳，预算100元", "手机壳"),
         ("给手机买个充电器", "充电器"),
+        ("我买旅行三件套", "旅行三件套"),
+        ("我要旅行三件套", "旅行三件套"),
+        ("我想买旅行三件套", "旅行三件套"),
         ("找跑鞋清洁剂", "跑鞋清洁剂"),
         ("帮我找一款便携电源", "便携电源"),
         ("买个扫地机器人", "扫地机器人"),
@@ -200,6 +276,48 @@ async def test_sandbox_search_is_explicit(monkeypatch) -> None:
     assert result.provider.fallback_reason
     assert len(result.candidates) == 2
     assert all(item.source == "fixture" for item in result.candidates)
+
+
+@pytest.mark.asyncio
+async def test_faiss_catalog_search_returns_historical_amazon_products(monkeypatch) -> None:
+    import importlib
+
+    item_search_module = importlib.import_module("app.tools.item_search")
+
+    class FakeCatalog:
+        def search(self, query: str, *, top_k: int, min_score: float) -> list[dict[str, object]]:
+            assert "headphones" in query
+            assert top_k == 5
+            assert min_score == 0.35
+            return [
+                {
+                    "asin": "B000TEST01",
+                    "title": "Sony Historical Noise Cancelling Headphones",
+                    "price": 39.99,
+                    "currency": "USD",
+                    "brand": "Sony",
+                    "categories": ["Electronics", "Headphones"],
+                    "description": "Historical catalog record",
+                    "image_url": "https://images.example.com/test.jpg",
+                    "faiss_score": 0.81,
+                }
+            ]
+
+    monkeypatch.setenv("SANDBOX_MODE", "true")
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("PRODUCT_CATALOG_BACKEND", "faiss")
+    monkeypatch.setattr(item_search_module, "get_product_catalog", lambda _path: FakeCatalog())
+
+    result = await item_search("降噪耳机", "amazon", top_k=20)
+
+    assert result.provider.provider == "amazon-public-electronics-catalog"
+    assert "历史公开商品目录" in (result.provider.fallback_reason or "")
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.offer_id == "B000TEST01"
+    assert candidate.title == "Sony Historical Noise Cancelling Headphones"
+    assert candidate.attributes["historical_catalog"] is True
+    assert candidate.source == "fixture"
 
 
 @pytest.mark.asyncio
@@ -702,6 +820,27 @@ async def test_live_offer_without_shipping_quote_is_excluded_from_landed_cost_ra
     assert shipping.items == []
     assert [item.reason_code for item in shipping.shipping_exclusions] == ["missing_shipping_quote"]
     assert shipping.shipping_exclusions[0].item_id == "missing-shipping-quote"
+
+
+@pytest.mark.asyncio
+async def test_product_price_only_cost_keeps_candidate_recommendable_with_explicit_gaps() -> None:
+    candidate = Candidate(
+        item_id="product-price-only",
+        platform="ebay",
+        title="Offer without route or customs evidence",
+        price=100,
+        currency="CNY",
+        source="live",
+    )
+    price = (await price_compare([candidate])).ranked[0]
+
+    fallback = product_price_only_cost(price, ["shipping_quote", "customs_evidence"])
+
+    assert fallback.cost_status == "product_price_only"
+    assert fallback.cost_evidence_gaps == ["shipping_quote", "customs_evidence"]
+    assert fallback.landed_cny == price.price_cny
+    assert fallback.duty_tier == "待核"
+    assert "不是最终到手价" in (fallback.note or "")
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,9 @@
   position: relative;
   z-index: 4;
   flex: 0 0 auto;
-  padding: 8px clamp(12px, 2.5vw, 26px) calc(9px + env(safe-area-inset-bottom));
+  padding: 14px clamp(16px, 3vw, 32px) calc(16px + env(safe-area-inset-bottom));
   border-top: 1px solid color-mix(in oklch, var(--line) 72%, transparent);
-  background: var(--surface);
+  background: #f5f8f5;
   box-shadow: var(--shadow-composer);
 }
 
@@ -64,12 +64,12 @@
 
 .inputRow {
   display: flex;
-  width: min(100%, 860px);
-  min-height: 52px;
+  width: min(100%, 920px);
+  min-height: 68px;
   align-items: flex-end;
   gap: 8px;
   margin: 0 auto;
-  padding: 5px;
+  padding: 8px;
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
   background: var(--surface);
@@ -89,17 +89,17 @@
 
 .inputRow textarea {
   width: 100%;
-  min-height: 44px;
+  min-height: 52px;
   max-height: 104px;
   flex: 1;
   resize: none;
-  padding: 8px 7px;
+  padding: 10px 9px;
   overflow-y: auto;
   border: 0;
   outline: 0;
   color: var(--ink);
   background: transparent;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.65;
 }
 
@@ -128,8 +128,8 @@
 .cancelButton,
 .pendingButton {
   display: grid;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   border: 0;
   border-radius: var(--r-md);
@@ -161,7 +161,7 @@
 .metaRow {
   display: flex;
   width: min(100%, 860px);
-  min-height: 19px;
+  min-height: 20px;
   justify-content: space-between;
   gap: 12px;
   margin: 2px auto 0;
@@ -213,6 +213,10 @@
 
   .inputRow textarea {
     padding-right: 3px;
+  }
+
+  .composer {
+    padding-top: 10px;
   }
 
   .iconButton,

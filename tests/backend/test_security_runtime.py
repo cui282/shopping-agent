@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.agent.budget import TokenBudgetState
 from app.agent.dispatch_tool import dispatch_tool
 from app.api import server
 from app.observability import LangFuseObserver, tool_latency_alert
@@ -217,6 +218,101 @@ class _FakeClient:
 
     def flush(self) -> None:
         return None
+
+
+class _ModernFakeObservation:
+    _next_id = 0
+
+    def __init__(self, trace_id: str, name: str, as_type: str) -> None:
+        type(self)._next_id += 1
+        self.id = f"{type(self)._next_id:016x}"
+        self.trace_id = trace_id
+        self.name = name
+        self.as_type = as_type
+        self.updates: list[dict[str, Any]] = []
+        self.ended = False
+
+    def update(self, **kwargs: Any) -> None:
+        self.updates.append(kwargs)
+
+    def end(self) -> None:
+        self.ended = True
+
+
+class _ModernFakeClient:
+    def __init__(self) -> None:
+        self.observations: list[_ModernFakeObservation] = []
+        self.flushed = False
+
+    def create_trace_id(self, *, seed: str) -> str:
+        del seed
+        return "a" * 32
+
+    def start_observation(self, **kwargs: Any) -> _ModernFakeObservation:
+        context = kwargs.get("trace_context") or {}
+        observation = _ModernFakeObservation(
+            str(context.get("trace_id") or "b" * 32),
+            str(kwargs["name"]),
+            str(kwargs.get("as_type", "span")),
+        )
+        self.observations.append(observation)
+        return observation
+
+    def flush(self) -> None:
+        self.flushed = True
+
+
+def test_langfuse_modern_observations_record_real_lifecycle_and_nested_trace() -> None:
+    observer = object.__new__(LangFuseObserver)
+    observer._client = _ModernFakeClient()
+    observer._modern = True
+    observer._tracing_enabled = True
+    observer._traces = {}
+    observer._child_spans = {}
+    observer._trace_ids = {}
+    observer._trace_started_at = {}
+    observer._child_started_at = {}
+    observer._tool_observations = {}
+
+    observer.start_trace("parent", query_length=4, data_mode="live")
+    observer.tool_start(
+        "parent", name="planner", route="main", observation_type="generation", model="gpt-test"
+    )
+    observer.tool_span(
+        "parent",
+        name="planner",
+        duration_ms=12,
+        status="ok",
+        route="main",
+        observation_type="generation",
+        model="gpt-test",
+        usage_details={"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+    )
+    observer.start_child_trace(
+        "parent",
+        "sub-1",
+        platform="ebay",
+        demand_keys=["platform", "query"],
+        fork_depth=1,
+    )
+    observer.tool_start("sub-1", name="item_search", route="main")
+    observer.tool_span("sub-1", name="item_search", duration_ms=18, status="ok", route="main")
+    observer.end_child_trace("sub-1", status="ok")
+
+    observer.end_trace("parent", status="completed", budget=TokenBudgetState(100, 20))
+
+    client = observer._client
+    root, planner, fork, item_search = client.observations
+    assert root.as_type == "agent"
+    assert fork.as_type == "chain"
+    assert fork.trace_id == root.trace_id
+    assert planner.as_type == "generation"
+    assert planner.updates[-1]["model"] == "gpt-test"
+    assert planner.updates[-1]["usage_details"]["total_tokens"] == 12
+    assert planner.updates[-1]["output"]["duration_ms"] == 12
+    assert item_search.updates[-1]["output"]["duration_ms"] == 18
+    assert all(observation.ended for observation in client.observations)
+    assert client.flushed is True
 
 
 def test_langfuse_fork_tools_are_nested_under_parent_trace() -> None:

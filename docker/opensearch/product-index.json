@@ -1,0 +1,75 @@
+{
+  "settings": {
+    "index.knn": true,
+    "index.knn.algo_param.ef_search": 100,
+    "index.refresh_interval": "30s",
+    "analysis": {
+      "analyzer": {
+        "shopping_agent_product": {
+          "type": "standard"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "item_id": {"type": "keyword"},
+      "offer_id": {"type": "keyword"},
+      "platform": {"type": "keyword"},
+      "marketplace": {"type": "keyword"},
+      "marketplace_id": {"type": "keyword"},
+      "title": {"type": "text", "analyzer": "shopping_agent_product"},
+      "brand": {
+        "type": "text",
+        "analyzer": "shopping_agent_product",
+        "fields": {"keyword": {"type": "keyword", "ignore_above": 256}}
+      },
+      "categories": {"type": "keyword"},
+      "category_ids": {"type": "keyword"},
+      "category_text": {"type": "text", "analyzer": "shopping_agent_product"},
+      "description": {"type": "text", "analyzer": "shopping_agent_product"},
+      "searchable_text": {"type": "text", "analyzer": "shopping_agent_product"},
+      "price": {"type": "double"},
+      "price_cny": {"type": "double"},
+      "currency": {"type": "keyword"},
+      "rating": {"type": "float"},
+      "sales": {"type": "long"},
+      "image_url": {"type": "keyword", "index": false, "doc_values": false},
+      "product_url": {"type": "keyword", "index": false, "doc_values": false},
+      "availability": {"type": "keyword"},
+      "condition": {"type": "keyword"},
+      "is_active": {"type": "boolean"},
+      "source": {"type": "keyword"},
+      "provider": {"type": "keyword"},
+      "upstream_source": {"type": "keyword"},
+      "snapshot_at": {"type": "date"},
+      "expires_at": {"type": "date"},
+      "retrieved_at": {"type": "date"},
+      "gtin": {"type": "keyword"},
+      "hs_code": {"type": "keyword"},
+      "country_of_origin": {"type": "keyword"},
+      "ship_from_country": {"type": "keyword"},
+      "mpn": {"type": "keyword"},
+      "model": {"type": "keyword"},
+      "attributes": {"type": "object", "dynamic": true},
+      "variant_attributes": {"type": "object", "dynamic": true},
+      "price_conversion": {"type": "object", "dynamic": true},
+      "shipping_quote": {"type": "object", "dynamic": true},
+      "customs": {"type": "object", "dynamic": true},
+      "embedding": {
+        "type": "knn_vector",
+        "dimension": 384,
+        "method": {
+          "name": "hnsw",
+          "space_type": "innerproduct",
+          "engine": "faiss",
+          "parameters": {
+            "ef_construction": 128,
+            "m": 24
+          }
+        }
+      }
+    }
+  }
+}

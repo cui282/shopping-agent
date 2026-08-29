@@ -6,7 +6,13 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar, cast
 
-from app.agent.budget import budget_state, choose_route, record_usage, start_budget
+from app.agent.budget import (
+    budget_state,
+    choose_route,
+    record_usage,
+    route_model_name,
+    start_budget,
+)
 from app.agent.dispatch_tool import dispatch_tool
 from app.agent.guard import record_tool_call
 from app.agent.llm import active_agent_mode, allow_rules_fallback, get_llm, requested_mode
@@ -22,7 +28,7 @@ from app.compress import (
     build_model_context,
     safe_bounded_context,
 )
-from app.config import MARKETPLACES, get_settings
+from app.config import get_settings
 from app.harness.defaults import install_default_hooks
 from app.harness.middleware import harness
 from app.harness.phase import phase_machine
@@ -74,7 +80,10 @@ from app.tools.clarification import (
     apply_clarification_context,
     detect_blocking_ambiguity,
 )
+from app.tools.customs_provider import enrich_candidates as enrich_customs_candidates
 from app.tools.destination import SUPPORTED_DESTINATION, is_supported_destination
+from app.tools.fx_reference import enrich_price_conversions
+from app.tools.shipping_calc import product_price_only_cost
 from app.utils.thread_ctx import get_thread_id
 
 T = TypeVar("T")
@@ -113,6 +122,19 @@ async def _category_insight_with_fallback(category: str) -> CategoryInsightOutpu
             category,
             fallback_reason=f"category insight failed: {type(exc).__name__}",
         )
+
+
+def _expanded_product_query(query: str, insight: CategoryInsightOutput) -> str:
+    """Build the product-search text from the original request and typed category hints."""
+
+    values = [
+        query,
+        insight.standard_category or insight.category,
+        *insight.query_expansions,
+        *insight.subtypes,
+    ]
+    terms = tuple(dict.fromkeys(value.strip() for value in values if value.strip()))
+    return " ".join(terms)[:4000]
 
 
 def _apply_constraint_relaxations(
@@ -207,6 +229,12 @@ async def _call_tool(
         message=f"正在调用 {name} 工具",
         data={"tool_name": name, "args": args, "data_mode": event_data_mode},
     )
+    observed_thread_id = observer_thread_id or thread_id
+    get_observer().tool_start(
+        observed_thread_id,
+        name=name,
+        route=budget_state().route,
+    )
     started = time.perf_counter()
     try:
         result = await call()
@@ -227,6 +255,15 @@ async def _call_tool(
                 "tool_history": phase_machine.tool_history(),
             },
         )
+    except asyncio.CancelledError:
+        get_observer().tool_span(
+            observed_thread_id,
+            name=name,
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            status="cancelled",
+            route=budget_state().route,
+        )
+        raise
     except Exception as exc:
         metadata = failure_metadata
         if metadata is None:
@@ -339,6 +376,7 @@ async def _run_react_advisory(
     route = choose_route(model_context.estimated_tokens if model_context is not None else 0)
     if route == "fallback":
         return ""
+    model_name = route_model_name(route)
     kwargs: dict[str, Any] = {"model": get_llm(route), "tools": ADVISORY_TOOLS}
     signature = inspect.signature(create_react_agent)
     prompt = (
@@ -359,24 +397,71 @@ async def _run_react_advisory(
         if model_context is not None
         else [ContextMessage(role="user", content=query)]
     )
-    response = await graph.ainvoke(
-        {
-            "messages": [
-                {"role": message.role, "content": message.content} for message in context_messages
-            ]
-        },
-        config={"recursion_limit": 8},
+    observed_thread_id = get_thread_id()
+    observer = get_observer()
+    observer.tool_start(
+        observed_thread_id,
+        name="llm_react_advisory",
+        route=route,
+        observation_type="generation",
+        model=model_name,
     )
-    messages = response.get("messages", [])
+    started = time.perf_counter()
+    usage_details: dict[str, int] | None = None
+    try:
+        response = await graph.ainvoke(
+            {
+                "messages": [
+                    {"role": message.role, "content": message.content}
+                    for message in context_messages
+                ]
+            },
+            config={"recursion_limit": 8},
+        )
+        messages = response.get("messages", [])
+        if messages:
+            usage = getattr(messages[-1], "usage_metadata", None)
+            if isinstance(usage, dict):
+                input_tokens = int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0)
+                output_tokens = int(
+                    usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0
+                )
+                usage_details = {
+                    "input_tokens": max(0, input_tokens),
+                    "output_tokens": max(0, output_tokens),
+                    "total_tokens": max(0, input_tokens) + max(0, output_tokens),
+                }
+                input_details = usage.get("input_token_details")
+                if isinstance(input_details, dict):
+                    cache_read = input_details.get("cache_read")
+                    if isinstance(cache_read, int):
+                        usage_details["cache_read_input_tokens"] = max(0, cache_read)
+                record_usage(input_tokens, output_tokens)
+    except BaseException:
+        observer.tool_span(
+            observed_thread_id,
+            name="llm_react_advisory",
+            duration_ms=round((time.perf_counter() - started) * 1000),
+            status="error",
+            route=route,
+            observation_type="generation",
+            model=model_name,
+            usage_details=usage_details,
+        )
+        raise
+    observer.tool_span(
+        observed_thread_id,
+        name="llm_react_advisory",
+        duration_ms=round((time.perf_counter() - started) * 1000),
+        status="ok",
+        route=route,
+        observation_type="generation",
+        model=model_name,
+        usage_details=usage_details,
+    )
     if not messages:
         return ""
     content = getattr(messages[-1], "content", "")
-    usage = getattr(messages[-1], "usage_metadata", None)
-    if isinstance(usage, dict):
-        record_usage(
-            int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
-            int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
-        )
     return str(content)[:500]
 
 
@@ -428,7 +513,30 @@ async def _run_agent_impl(
         )
 
     if resolved_intent is None:
-        stored_preferences = await store.read_relevant(request.user_id, query, limit=5)
+        observed_thread_id = get_thread_id()
+        observer = get_observer()
+        observer.tool_start(
+            observed_thread_id, name="preference_store_read", route=budget_state().route
+        )
+        preference_started = time.perf_counter()
+        try:
+            stored_preferences = await store.read_relevant(request.user_id, query, limit=5)
+        except BaseException:
+            observer.tool_span(
+                observed_thread_id,
+                name="preference_store_read",
+                duration_ms=round((time.perf_counter() - preference_started) * 1000),
+                status="error",
+                route=budget_state().route,
+            )
+            raise
+        observer.tool_span(
+            observed_thread_id,
+            name="preference_store_read",
+            duration_ms=round((time.perf_counter() - preference_started) * 1000),
+            status="ok",
+            route=budget_state().route,
+        )
         remembered = RememberedPreference.model_validate(
             {
                 field: stored_preferences.get(field, [])
@@ -437,7 +545,30 @@ async def _run_agent_impl(
         )
         memory_commands = parse_memory_commands(request.query)
         if memory_commands:
-            await execute_memory_commands(store, request.user_id, memory_commands)
+            observer.tool_start(
+                observed_thread_id,
+                name="preference_store_write",
+                route=budget_state().route,
+            )
+            preference_write_started = time.perf_counter()
+            try:
+                await execute_memory_commands(store, request.user_id, memory_commands)
+            except BaseException:
+                observer.tool_span(
+                    observed_thread_id,
+                    name="preference_store_write",
+                    duration_ms=round((time.perf_counter() - preference_write_started) * 1000),
+                    status="error",
+                    route=budget_state().route,
+                )
+                raise
+            observer.tool_span(
+                observed_thread_id,
+                name="preference_store_write",
+                duration_ms=round((time.perf_counter() - preference_write_started) * 1000),
+                status="ok",
+                route=budget_state().route,
+            )
         remembered = remembered_for_task(remembered, memory_commands)
     else:
         remembered = applied_preferences or RememberedPreference()
@@ -530,6 +661,9 @@ async def _run_agent_impl(
             history_events=history_events,
             clarification_answers=answers,
         )
+        observer = get_observer()
+        observer.tool_start(thread_id, name="context_compression", route=budget_state().route)
+        compression_started = time.perf_counter()
         try:
             try:
                 model_context = build_model_context(
@@ -557,6 +691,22 @@ async def _run_agent_impl(
                     compression_settings,
                     reason_code="compression_failed",
                 )
+            except BaseException:
+                observer.tool_span(
+                    thread_id,
+                    name="context_compression",
+                    duration_ms=round((time.perf_counter() - compression_started) * 1000),
+                    status="error",
+                    route=budget_state().route,
+                )
+                raise
+            observer.tool_span(
+                thread_id,
+                name="context_compression",
+                duration_ms=round((time.perf_counter() - compression_started) * 1000),
+                status="ok",
+                route=budget_state().route,
+            )
             await monitor.emit(
                 thread_id,
                 "context_compression",
@@ -655,11 +805,18 @@ async def _run_agent_impl(
                 },
             )
 
-    selected_platforms = (
+    planned_platforms = (
         execution_plan.platforms
         if execution_plan is not None and execution_plan.platforms
-        else settings.enabled_marketplaces
+        else list(settings.enabled_marketplaces)
     )
+    if settings.product_search_backend == "opensearch":
+        enabled_platforms = set(settings.enabled_marketplaces)
+        selected_platforms = [name for name in planned_platforms if name in enabled_platforms]
+        if not selected_platforms:
+            selected_platforms = list(settings.enabled_marketplaces)
+    else:
+        selected_platforms = planned_platforms
     await monitor.emit(
         thread_id,
         "assistant_call",
@@ -673,8 +830,11 @@ async def _run_agent_impl(
     )
     platforms = [cast(Platform, name) for name in selected_platforms]
 
-    insight_task = asyncio.create_task(
-        _call_tool(
+    insight_task = None
+    if settings.product_search_backend == "opensearch":
+        # Product OpenSearch uses category-owned expansions and filters, so category
+        # insight is a dependency of the search request in the primary path.
+        insight = await _call_tool(
             monitor,
             "category_insight",
             {"category": plan.category, "depth": "quick"},
@@ -682,7 +842,21 @@ async def _run_agent_impl(
             event_thread_id=thread_id,
             data_mode=task_data_mode,
         )
-    )
+        search_query = _expanded_product_query(query, insight)
+    else:
+        # Keep the legacy compatibility path parallel: it has no category-driven
+        # query expansion or scalar category filter dependency.
+        insight_task = asyncio.create_task(
+            _call_tool(
+                monitor,
+                "category_insight",
+                {"category": plan.category, "depth": "quick"},
+                lambda: _category_insight_with_fallback(plan.category),
+                event_thread_id=thread_id,
+                data_mode=task_data_mode,
+            )
+        )
+        search_query = query
 
     async def search_branch(demand: dict[str, Any]) -> ItemSearchOutput:
         platform: Platform = demand["platform"]
@@ -699,7 +873,7 @@ async def _run_agent_impl(
                 monitor,
                 "item_search",
                 {"platform": platform, "top_k": 20},
-                lambda: item_search(query, platform, top_k=20, user_id=request.user_id),
+                lambda: item_search(demand["query"], platform, top_k=20, user_id=request.user_id),
                 event_thread_id=thread_id,
                 data_mode=task_data_mode,
                 failure_metadata=failure_metadata,
@@ -722,7 +896,7 @@ async def _run_agent_impl(
             )
 
     try:
-        demands = [{"platform": platform, "query": query} for platform in platforms]
+        demands = [{"platform": platform, "query": search_query} for platform in platforms]
         if execution_plan is not None and not execution_plan.fork:
             searches = [await search_branch(demand) for demand in demands]
         else:
@@ -733,15 +907,17 @@ async def _run_agent_impl(
                 data_mode=task_data_mode,
             )
     except BaseException:
-        if not insight_task.done():
+        if insight_task is not None and not insight_task.done():
             insight_task.cancel()
-        await asyncio.gather(insight_task, return_exceptions=True)
+        if insight_task is not None:
+            await asyncio.gather(insight_task, return_exceptions=True)
         raise
-    insight = await insight_task
+    if insight_task is not None:
+        insight = await insight_task
     candidates = [candidate for result in searches for candidate in result.candidates]
     providers = {result.platform: result.provider for result in searches}
     if task_data_mode != "sandbox":
-        for platform in MARKETPLACES:
+        for platform in platforms:
             if platform in providers:
                 continue
             channel = next(item for item in settings.marketplaces if item.name == platform)
@@ -776,17 +952,47 @@ async def _run_agent_impl(
     ):
         raise ProvidersUnavailableError("all enabled marketplace providers are unavailable")
 
-    recall = await _call_tool(
-        monitor,
-        "recall",
-        {"candidate_count": len(candidates), "top_k": 20},
-        lambda: recall_orchestrator.recall(
+    product_search_path = settings.product_search_backend == "opensearch"
+    ann_platforms = {result.platform for result in searches if result.ann_used}
+    product_ann_used = bool(ann_platforms)
+    product_ann_complete = ann_platforms == set(platforms) if product_search_path else None
+    product_ann_failure_reason = next(
+        (
+            result.provider.fallback_reason
+            for result in searches
+            if result.platform in platforms
+            and not result.ann_used
+            and result.provider.fallback_reason
+        ),
+        None,
+    )
+
+    if product_search_path:
+        recall_call = lambda: recall_orchestrator.recall(
             query,
             candidates,
             category_insight=insight,
             top_k=20,
             user_input=user_tower_input,
-        ),
+            product_ann_used=product_ann_used,
+            product_ann_complete=product_ann_complete,
+            product_ann_failure_reason=product_ann_failure_reason,
+        )
+    else:
+        # Keep the legacy adapter call shape intact for deployments that still use
+        # the Faiss Query/Item compatibility path.
+        recall_call = lambda: recall_orchestrator.recall(
+            query,
+            candidates,
+            category_insight=insight,
+            top_k=20,
+            user_input=user_tower_input,
+        )
+    recall = await _call_tool(
+        monitor,
+        "recall",
+        {"candidate_count": len(candidates), "top_k": 20},
+        recall_call,
         event_thread_id=thread_id,
         data_mode=task_data_mode,
     )
@@ -804,12 +1010,17 @@ async def _run_agent_impl(
             "data_mode": task_data_mode,
         },
     )
+    recalled_candidates = await enrich_customs_candidates(recalled_candidates)
+
+    async def compare_with_current_fx():
+        converted_candidates = await enrich_price_conversions(recalled_candidates)
+        return await price_compare(converted_candidates)
 
     prices = await _call_tool(
         monitor,
         "price_compare",
         {"candidate_count": len(recalled_candidates), "base_currency": "CNY"},
-        lambda: price_compare(recalled_candidates),
+        compare_with_current_fx,
     )
     shipping = await _call_tool(
         monitor,
@@ -817,11 +1028,34 @@ async def _run_agent_impl(
         {"item_count": len(prices.ranked), "destination": plan.destination},
         lambda: shipping_calc(prices.ranked, destination=plan.destination),
     )
+    if prices.ranked:
+        gaps_by_item: dict[str, set[str]] = {}
+        for exclusion in shipping.shipping_exclusions:
+            gaps_by_item.setdefault(exclusion.item_id, set()).add("shipping_quote")
+        for exclusion in shipping.tax_exclusions:
+            gaps_by_item.setdefault(exclusion.item_id, set()).add(
+                "customs_valuation"
+                if exclusion.reason_code == "missing_customs_valuation"
+                else "customs_evidence"
+            )
+        complete_ids = {item.item_id for item in shipping.items}
+        provisional = [
+            product_price_only_cost(item, sorted(gaps_by_item[item.item_id]))
+            for item in prices.ranked
+            if item.item_id not in complete_ids and item.item_id in gaps_by_item
+        ]
+        if provisional:
+            shipping = shipping.model_copy(update={"items": [*shipping.items, *provisional]})
     picks = await _call_tool(
         monitor,
         "item_picker",
         {"item_count": len(shipping.items), "max_items": 3},
-        lambda: item_picker(shipping, plan, remembered_preferences=remembered),
+        lambda: item_picker(
+            shipping,
+            plan,
+            remembered_preferences=remembered,
+            query=query,
+        ),
     )
     await monitor.emit(
         thread_id,

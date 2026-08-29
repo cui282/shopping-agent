@@ -3,17 +3,18 @@
   height: 100%;
   min-height: 0;
   grid-template-rows: auto auto minmax(180px, 1fr) auto;
-  background: #f8faf8;
+  background: #f4f8f5;
 }
 
 .topbar {
   display: flex;
-  min-height: 60px;
+  min-height: 70px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 14px;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--line);
+  background: var(--surface);
 }
 
 .eyebrow {
@@ -51,8 +52,9 @@
   display: grid;
   gap: 2px;
   margin: 0;
-  padding: 11px 14px;
+  padding: 15px 18px;
   border-bottom: 1px solid var(--line);
+  background: #eaf3ee;
   list-style: none;
 }
 
@@ -117,7 +119,7 @@
   display: flex;
   min-height: 0;
   flex-direction: column;
-  padding: 10px 8px 7px 14px;
+  padding: 14px 14px 10px 18px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -127,7 +129,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-right: 6px;
+  padding-right: 4px;
 }
 
 .sectionHeading h3 {
@@ -243,10 +245,10 @@
 
 .eventEmpty {
   display: flex;
-  min-height: 110px;
-  align-items: center;
+  min-height: 170px;
+  align-items: flex-start;
   gap: 9px;
-  padding: 16px 8px;
+  padding: 22px 8px;
   color: var(--ink-muted);
   font-size: 11px;
   line-height: 1.7;
@@ -265,8 +267,8 @@
 }
 
 .preferences {
-  padding: 10px 14px calc(12px + env(safe-area-inset-bottom));
-  background: #eef2ef;
+  padding: 14px 18px calc(16px + env(safe-area-inset-bottom));
+  background: #e8f0eb;
 }
 
 .backendStatus {

@@ -57,7 +57,7 @@ function EventIcon({ event }: { event: MonitorEvent }) {
 interface ActivityRailProps {
   state: AgentState;
   userId: string;
-  preferenceStore?: "memory" | "redis";
+  preferenceStore?: "memory" | "redis" | "postgres";
   preferenceBackend?: PreferenceBackendStatus;
   preferenceRevision?: number;
   onClose: () => void;
@@ -94,7 +94,9 @@ export default function ActivityRail({
     "idle" | "saving" | "saved" | "cleared" | "failed"
   >("idle");
   const [backendStatus, setBackendStatus] = useState<PreferenceBackendStatus>(
-    preferenceBackend ?? (preferenceStore === "redis" ? { ...DEFAULT_BACKEND, requested_backend: "redis", backend: "redis", durability: "durable" } : DEFAULT_BACKEND),
+    preferenceBackend ?? (preferenceStore === "redis" || preferenceStore === "postgres"
+      ? { ...DEFAULT_BACKEND, requested_backend: preferenceStore, backend: preferenceStore, durability: "durable" }
+      : DEFAULT_BACKEND),
   );
   const eventListRef = useRef<HTMLOListElement>(null);
   const followTimelineRef = useRef(true);
@@ -176,7 +178,11 @@ export default function ActivityRail({
     }
   };
 
-  const backendLabel = backendStatus.durability === "durable" ? "Redis 持久偏好" : "本地评估，非持久偏好";
+  const backendLabel = backendStatus.backend === "postgres"
+    ? "PostgreSQL 持久偏好"
+    : backendStatus.backend === "redis"
+      ? "Redis 持久偏好"
+      : "本地评估，非持久偏好";
 
   return (
     <aside className={styles.rail} aria-label="研究过程与偏好">

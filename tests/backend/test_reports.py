@@ -248,6 +248,8 @@ def test_reports_keep_partial_and_no_match_notices(client: TestClient, monkeypat
     monkeypatch.setenv("SANDBOX_MODE", "false")
     monkeypatch.setenv("AMAZON_API_ENDPOINT", "https://gateway.example/amazon")
     monkeypatch.setenv("AMAZON_API_KEY", "test-key")
+    monkeypatch.setenv("EBAY_API_ENDPOINT", "https://gateway.example/ebay")
+    monkeypatch.setenv("EBAY_API_KEY", "test-key")
 
     async def partial_search(query, platform, top_k=20, user_id=None):
         del query, top_k, user_id
@@ -315,7 +317,7 @@ def test_reports_keep_partial_and_no_match_notices(client: TestClient, monkeypat
     )
     assert partial["result"]["result_kind"] == "partial"
     assert any(notice["code"] == "partial_result" for notice in partial_report["notices"])
-    assert any("reason=not_configured" in notice["message"] for notice in partial_report["notices"])
+    assert any("reason=request_failed" in notice["message"] for notice in partial_report["notices"])
     assert "部分平台数据暂不可用" in partial_markdown
     assert "partial_result" not in partial_markdown
     assert "部分平台数据暂不可用" in "\n".join(

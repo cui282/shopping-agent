@@ -46,7 +46,7 @@ from app.api.monitor import monitor
 from app.config import get_settings
 from app.memory.commands import execute_memory_commands
 from app.memory.store import PreferenceStore, PreferenceStoreError, build_preference_store
-from app.observability import get_observer
+from app.observability import LangFuseObserver, get_observer
 from app.recall.orchestrator import recall_readiness
 from app.reports import (
     ReportGenerationError,
@@ -414,6 +414,70 @@ def _infer_legacy_snapshot_data_mode(payload: dict[str, Any]) -> DataMode:
     return "live"
 
 
+def _legacy_score_breakdown(recommendation: dict[str, Any]) -> dict[str, Any]:
+    """Provide a neutral breakdown for recommendations written before score disclosure."""
+
+    return {
+        "priority_order": [
+            "landed_cost",
+            "preference_match",
+            "evidence_quality",
+            "delivery_time",
+        ],
+        "landed_cost_cny": float(recommendation.get("landed_cny") or 0),
+        "landed_cost_score": 0.0,
+        "preference_match_score": 0.0,
+        "evidence_quality_score": 0.0,
+        "delivery_time_days": int(recommendation.get("eta_days") or 0),
+        "delivery_time_score": 0.0,
+    }
+
+
+def _migrate_legacy_result(result: dict[str, Any], data_mode: DataMode) -> dict[str, Any]:
+    """Normalize result fields that predate the typed recommendation contract."""
+
+    migrated = dict(result)
+    migrated.setdefault("data_mode", data_mode)
+    recommendations: list[dict[str, Any]] = []
+    for value in result.get("recommendations", []):
+        if not isinstance(value, dict):
+            continue
+        recommendation = dict(value)
+        recommendation.setdefault("constraint_evaluations", [])
+        recommendation.setdefault("score_breakdown", _legacy_score_breakdown(recommendation))
+        recommendation.setdefault("offer_kind", "research_candidate")
+        recommendations.append(recommendation)
+    if "recommendations" in result:
+        migrated["recommendations"] = recommendations
+    if "matching_offers" not in migrated:
+        migrated["matching_offers"] = list(migrated.get("comparison") or [])
+    return migrated
+
+
+def _migrate_legacy_snapshot_payload(
+    payload: dict[str, Any], data_mode: DataMode
+) -> dict[str, Any]:
+    """Build an in-memory compatibility view without rewriting the persisted snapshot."""
+
+    migrated = dict(payload)
+    result = payload.get("result")
+    if isinstance(result, dict):
+        migrated["result"] = _migrate_legacy_result(result, data_mode)
+    events: list[Any] = []
+    for event in payload.get("events", []):
+        if not isinstance(event, dict):
+            events.append(event)
+            continue
+        event_copy = dict(event)
+        event_data = event.get("data")
+        if event.get("event") == "task_result" and isinstance(event_data, dict):
+            event_copy["data"] = _migrate_legacy_result(event_data, data_mode)
+        events.append(event_copy)
+    migrated["events"] = events
+    migrated["data_mode"] = data_mode
+    return migrated
+
+
 def _read_persisted_snapshot(thread_id: str) -> TaskSnapshot | None:
     if not _THREAD_ID_PATTERN.fullmatch(thread_id):
         return None
@@ -444,6 +508,10 @@ def _read_persisted_snapshot(thread_id: str) -> TaskSnapshot | None:
                 else event
                 for event in payload.get("events", [])
             ]
+        data_mode = _as_data_mode(validation_payload.get("data_mode"))
+        if data_mode is None:
+            raise ValueError("snapshot data_mode is invalid")
+        validation_payload = _migrate_legacy_snapshot_payload(validation_payload, data_mode)
         snapshot = TaskSnapshot.model_validate(validation_payload)
     except (OSError, TypeError, ValueError):
         logger.exception("failed to read persisted task snapshot", extra={"thread_id": thread_id})
@@ -556,6 +624,9 @@ async def lifespan(_: FastAPI):
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
     request_queue.reset()
+    close_store = getattr(preference_store, "close", None)
+    if callable(close_store):
+        await close_store()
 
 
 app = FastAPI(title="Shopping Agent API", version=__version__, lifespan=lifespan)
@@ -728,9 +799,36 @@ def _record_task_result(
         }
     )
     try:
+        observer = get_observer()
+        observer.tool_start(thread_id, name="report_generation", route=budget_state().route)
+        report_started = monotonic()
         generate_reports(terminal_snapshot, _task_directory(thread_id, create=True))
     except ReportGenerationError as exc:
+        get_observer().tool_span(
+            thread_id,
+            name="report_generation",
+            duration_ms=round((monotonic() - report_started) * 1000),
+            status="error",
+            route=budget_state().route,
+        )
         raise RuntimeError(str(exc)) from exc
+    except asyncio.CancelledError:
+        get_observer().tool_span(
+            thread_id,
+            name="report_generation",
+            duration_ms=round((monotonic() - report_started) * 1000),
+            status="cancelled",
+            route=budget_state().route,
+        )
+        raise
+    else:
+        observer.tool_span(
+            thread_id,
+            name="report_generation",
+            duration_ms=round((monotonic() - report_started) * 1000),
+            status="ok",
+            route=budget_state().route,
+        )
 
     previous_sequence = record.snapshot.events[-1].sequence if record.snapshot.events else 0
     report_event = MonitorEvent(
@@ -761,7 +859,27 @@ def _record_task_result(
     snapshot = terminal_snapshot.model_copy(
         update={"events": [*record.snapshot.events, report_event, envelope]}
     )
-    _persist_snapshot(snapshot)
+    observer = get_observer()
+    observer.tool_start(thread_id, name="snapshot_persist", route=budget_state().route)
+    persist_started = monotonic()
+    try:
+        _persist_snapshot(snapshot)
+    except BaseException:
+        observer.tool_span(
+            thread_id,
+            name="snapshot_persist",
+            duration_ms=round((monotonic() - persist_started) * 1000),
+            status="error",
+            route=budget_state().route,
+        )
+        raise
+    observer.tool_span(
+        thread_id,
+        name="snapshot_persist",
+        duration_ms=round((monotonic() - persist_started) * 1000),
+        status="ok",
+        route=budget_state().route,
+    )
     record.snapshot = snapshot
     return report_event, envelope
 
@@ -1322,13 +1440,23 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
             )
 
     if preference_backend.fallback_reason:
-        redis = _readiness_component(
+        failed_backend = preference_backend.requested_backend
+        failed_component = _readiness_component(
             configured=True,
             ready=False,
             state="degraded",
             reason_code="fallback_active",
             reason=preference_backend.fallback_reason,
         )
+        disabled_component = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="backend_disabled",
+            reason=f"STORE_BACKEND={failed_backend} is unavailable; the other preference backend is not selected",
+        )
+        redis = failed_component if failed_backend == "redis" else disabled_component
+        postgres = failed_component if failed_backend == "postgres" else disabled_component
     elif preference_backend.backend == "redis":
         redis = _readiness_component(
             configured=True,
@@ -1336,6 +1464,28 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
             state="configured",
             reason_code="configured_not_probed",
             reason="Redis is configured; readiness does not issue a network ping",
+        )
+        postgres = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="backend_disabled",
+            reason="STORE_BACKEND=redis selects Redis preference storage",
+        )
+    elif preference_backend.backend == "postgres":
+        postgres = _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code="configured_not_probed",
+            reason="PostgreSQL is configured; readiness does not issue a network ping",
+        )
+        redis = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="backend_disabled",
+            reason="STORE_BACKEND=postgres selects PostgreSQL preference storage",
         )
     else:
         redis = _readiness_component(
@@ -1345,9 +1495,96 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
             reason_code="backend_disabled",
             reason="STORE_BACKEND=memory uses process-local preference evaluation",
         )
+        postgres = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="backend_disabled",
+            reason="STORE_BACKEND=memory selects process-local preference evaluation",
+        )
 
     recall = recall_readiness(settings)
     opensearch = _recall_component(recall.channels["opensearch"], disabled_codes=set())
+    if settings.product_search_backend != "opensearch":
+        product_search = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="backend_disabled",
+            reason="PRODUCT_SEARCH_BACKEND is not set to opensearch",
+        )
+        embedding = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="product_search_disabled",
+            reason="Product embedding is only required by the OpenSearch product search path",
+        )
+    elif not settings.opensearch_url:
+        product_search = _readiness_component(
+            configured=False,
+            ready=False,
+            state="unavailable",
+            reason_code="not_configured",
+            reason="PRODUCT_SEARCH_BACKEND=opensearch requires OPENSEARCH_URL",
+        )
+        embedding = _readiness_component(
+            configured=bool(settings.tower_query_endpoint),
+            ready=False,
+            state="configured" if settings.tower_query_endpoint else "unavailable",
+            reason_code="configured_not_probed"
+            if settings.tower_query_endpoint
+            else "not_configured",
+            reason="Embedding endpoint is configured; connection is checked during a product search"
+            if settings.tower_query_endpoint
+            else "TOWER_QUERY_ENDPOINT is not configured; product search will use BM25 only",
+        )
+    else:
+        product_search = _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code="configured_not_probed",
+            reason="OpenSearch product alias is configured; runtime query checks index and alias health",
+        )
+        embedding = _readiness_component(
+            configured=bool(settings.tower_query_endpoint),
+            ready=False,
+            state="configured" if settings.tower_query_endpoint else "unavailable",
+            reason_code="configured_not_probed"
+            if settings.tower_query_endpoint
+            else "not_configured",
+            reason="SentenceTransformer query encoder is configured; runtime health is checked during search"
+            if settings.tower_query_endpoint
+            else "TOWER_QUERY_ENDPOINT is not configured; product search will use BM25 only",
+        )
+    observer = get_observer()
+    if isinstance(observer, LangFuseObserver) and observer.enabled:
+        langfuse = _readiness_component(
+            configured=True,
+            ready=False,
+            state="configured",
+            reason_code="configured_not_probed",
+            reason="Langfuse SDK and credentials are configured; trace delivery is asynchronous",
+        )
+    elif isinstance(observer, LangFuseObserver) and observer.configured:
+        reason_code = observer.initialization_reason
+        state = "disabled" if reason_code == "disabled_by_config" else "degraded"
+        langfuse = _readiness_component(
+            configured=True,
+            ready=False,
+            state=state,
+            reason_code=reason_code,
+            reason="Langfuse credentials are present but tracing is not active; research remains available",
+        )
+    else:
+        langfuse = _readiness_component(
+            configured=False,
+            ready=False,
+            state="disabled",
+            reason_code="not_configured",
+            reason="LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY are not configured; timing stays local",
+        )
     query_tower = _recall_component(
         recall.channels["query_tower"], disabled_codes={"ann_backend_disabled"}
     )
@@ -1415,7 +1652,11 @@ def _readiness_components(settings, preference_backend) -> ReadinessComponents:
         llm=llm,
         marketplace_gateways=gateways,
         redis=redis,
+        postgres=postgres,
         opensearch=opensearch,
+        product_search=product_search,
+        embedding=embedding,
+        langfuse=langfuse,
         faiss=faiss,
         query_tower=query_tower,
         item_tower=item_tower,
@@ -1445,6 +1686,17 @@ def _readiness_response() -> ReadinessResponse:
                 available=True,
                 source="fixture",
             )
+        if (
+            settings.product_search_backend == "opensearch"
+            and marketplace.name in settings.product_search_marketplaces
+        ):
+            return ProviderCapability(
+                configured=bool(settings.opensearch_url),
+                state="configured" if settings.opensearch_url else "missing",
+                available=bool(settings.opensearch_url),
+                source="live",
+                failure_reason=None if settings.opensearch_url else "not_configured",
+            )
         if settings.sandbox_mode and settings.app_env == "production":
             return ProviderCapability(
                 configured=marketplace.configured,
@@ -1467,8 +1719,11 @@ def _readiness_response() -> ReadinessResponse:
             "Ensure OUTPUT_ROOT, UPLOAD_ROOT, and the data directory are readable and writable"
         )
     if preference_backend.fallback_reason:
+        backend_label = (
+            "PostgreSQL" if preference_backend.requested_backend == "postgres" else "Redis"
+        )
         required_actions.append(
-            "Redis preference backend unavailable; local evaluation is non-persistent"
+            f"{backend_label} preference backend unavailable; local evaluation is non-persistent"
         )
     runtime_snapshot = runtime_control.snapshot()
     if runtime_snapshot.draining:
@@ -1484,7 +1739,7 @@ def _readiness_response() -> ReadinessResponse:
     readiness_status = settings.status if task_ready else "not_ready"
     if preference_backend.fallback_reason and readiness_status == "ready":
         readiness_status = "degraded"
-    if components.redis.state == "disabled" and readiness_status == "ready":
+    if preference_backend.backend == "memory" and readiness_status == "ready":
         readiness_status = "degraded"
     return ReadinessResponse(
         status=readiness_status,
@@ -1502,6 +1757,7 @@ def _readiness_response() -> ReadinessResponse:
             "persistent_snapshots": True,
             "image_upload": True,
             "image_analysis": False,
+            "product_search": settings.product_search_backend == "opensearch",
         },
         required_actions=required_actions,
         data_mode=settings.data_mode,

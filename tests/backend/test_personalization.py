@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import time
 from typing import Any
@@ -10,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.agent import main_agent
 from app.api import server
-from app.memory.store import InMemoryPreferenceStore, RedisPreferenceStore
+from app.memory.store import InMemoryPreferenceStore, PostgresPreferenceStore, RedisPreferenceStore
 from app.recall.orchestrator import RecallAdapters, RecallOrchestrator, recall_readiness
 from app.schemas import Candidate, LandedCost, OfferProvenance, RememberedPreference, UserTowerInput
 from app.tools.decision_engine import decision_engine
@@ -504,3 +505,58 @@ def test_redis_preference_store_survives_a_new_store_instance() -> None:
         return await restarted.get("restart-user")
 
     assert asyncio.run(exercise()) == {"style_preferences": ["简约"]}
+
+
+def test_postgres_preference_store_upserts_reads_and_deletes_jsonb_records() -> None:
+    class FakePostgresPool:
+        def __init__(self) -> None:
+            self.values: dict[str, dict[str, Any]] = {}
+            self.expiry_seconds: dict[str, int] = {}
+            self.schema_created = False
+
+        async def execute(self, query: str, *args: Any) -> None:
+            if query.strip().startswith("CREATE TABLE"):
+                self.schema_created = True
+                return
+            if query.lstrip().startswith("INSERT INTO"):
+                self.values[args[0]] = json.loads(args[1])
+                self.expiry_seconds[args[0]] = int(args[2])
+                return
+            if query.lstrip().startswith("DELETE FROM"):
+                self.values.pop(args[0], None)
+                self.expiry_seconds.pop(args[0], None)
+                return
+            raise AssertionError(f"unexpected SQL: {query}")
+
+        async def fetchrow(self, _query: str, user_id: str) -> dict[str, Any] | None:
+            value = self.values.get(user_id)
+            return {"preferences": value} if value is not None else None
+
+        async def close(self) -> None:
+            return None
+
+    store = PostgresPreferenceStore("postgresql://test", 3600)
+    pool = FakePostgresPool()
+    store._pool = pool
+
+    async def exercise() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        await store.put("postgres-user", {"avoid": ["塑料"]})
+        first = await store.get("postgres-user")
+        await store.put("postgres-user", {"avoid": ["皮革"], "style_preferences": ["简约"]})
+        updated = await store.get("postgres-user")
+        await store.delete("postgres-user")
+        deleted = await store.get("postgres-user")
+        return first, updated, deleted
+
+    first, updated, deleted = asyncio.run(exercise())
+
+    assert pool.schema_created
+    assert first == {"avoid": ["塑料"]}
+    assert updated == {"avoid": ["皮革"], "style_preferences": ["简约"]}
+    assert deleted == {}
+    assert store.backend_status.model_dump(mode="json") == {
+        "requested_backend": "postgres",
+        "backend": "postgres",
+        "durability": "durable",
+        "fallback_reason": None,
+    }

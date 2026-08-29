@@ -132,7 +132,11 @@ def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient)
         "llm",
         "marketplace_gateways",
         "redis",
+        "postgres",
         "opensearch",
+        "product_search",
+        "embedding",
+        "langfuse",
         "faiss",
         "query_tower",
         "item_tower",
@@ -143,6 +147,56 @@ def test_health_and_readiness_separate_liveness_from_runtime(client: TestClient)
     assert components["storage"]["ready"] is True
     assert components["storage"]["state"] == "ready"
     assert components["redis"]["state"] == "disabled"
+    assert components["postgres"]["state"] == "disabled"
+    assert components["langfuse"]["state"] == "disabled"
+    assert components["langfuse"]["reason_code"] == "not_configured"
+    assert components["image_analysis"] == {
+        "configured": False,
+        "ready": False,
+        "state": "disabled",
+        "reason_code": "not_configured",
+        "reason": "image analysis is not configured; image upload remains a separate storage capability",
+    }
+    assert readiness.json()["preference_backend"] == {
+        "requested_backend": "memory",
+        "backend": "memory",
+        "durability": "local_evaluation",
+        "fallback_reason": None,
+    }
+    assert all(
+        capability
+        == {
+            "configured": False,
+            "state": "missing",
+            "available": True,
+            "source": "fixture",
+            "failure_reason": None,
+        }
+        for capability in readiness.json()["providers"].values()
+    )
+    components = readiness.json()["components"]
+    assert set(components) == {
+        "llm",
+        "marketplace_gateways",
+        "redis",
+        "postgres",
+        "opensearch",
+        "product_search",
+        "embedding",
+        "langfuse",
+        "faiss",
+        "query_tower",
+        "item_tower",
+        "user_tower",
+        "storage",
+        "image_analysis",
+    }
+    assert components["storage"]["ready"] is True
+    assert components["storage"]["state"] == "ready"
+    assert components["redis"]["state"] == "disabled"
+    assert components["postgres"]["state"] == "disabled"
+    assert components["langfuse"]["state"] == "disabled"
+    assert components["langfuse"]["reason_code"] == "not_configured"
     assert components["image_analysis"] == {
         "configured": False,
         "ready": False,
@@ -403,11 +457,70 @@ def test_live_partial_result_keeps_successful_evidence_and_failed_provider_reaso
     assert result["data_mode"] == "live"
     assert result["provider_mode"] == "live"
     assert result["result_kind"] == "partial"
-    assert result["unavailable_marketplaces"] == ["aliexpress", "ebay", "shopee"]
+    assert result["unavailable_marketplaces"] == ["ebay"]
     assert result["providers"]["amazon"]["status"] == "ok"
     assert result["providers"]["ebay"]["failure_reason"] == "request_failed"
-    assert result["providers"]["shopee"]["failure_reason"] == "not_configured"
+    assert "shopee" not in result["providers"]
+    assert "aliexpress" not in result["providers"]
     assert result["recommendations"]
+
+
+def test_two_configured_platforms_keep_reference_recommendations_when_cost_evidence_is_missing(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SANDBOX_MODE", "false")
+    monkeypatch.setenv("PRODUCT_SEARCH_BACKEND", "opensearch")
+    monkeypatch.setenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,ebay")
+    monkeypatch.setenv("OPENSEARCH_URL", "http://opensearch.test")
+    for platform in ("amazon", "ebay"):
+        monkeypatch.setenv(
+            f"{platform.upper()}_API_ENDPOINT", f"https://gateway.example/{platform}"
+        )
+        monkeypatch.setenv(f"{platform.upper()}_API_KEY", "test-key")
+
+    async def search_without_cost_evidence(query, platform, top_k=20, user_id=None):
+        del query, top_k, user_id
+        candidate = Candidate(
+            item_id=f"{platform}-reference",
+            platform=platform,
+            title=f"{platform} reference offer",
+            price=100,
+            currency="CNY",
+            source="live",
+        )
+        return ItemSearchOutput(
+            platform=platform,
+            candidates=[candidate],
+            total_recall=1,
+            truncated=False,
+            provider=ProviderMetadata(source="live", provider=f"{platform}-feed"),
+        )
+
+    monkeypatch.setattr("app.agent.main_agent.item_search", search_without_cost_evidence)
+    from app.tools.category_insight import curated_category_insight
+
+    async def category_for_test(category, depth="quick"):
+        del depth
+        return curated_category_insight(category)
+
+    monkeypatch.setattr("app.agent.main_agent.category_insight", category_for_test)
+    started = client.post(
+        "/api/task",
+        json={
+            "query": "找一款降噪耳机",
+            "user_id": "reference-recommendation-user",
+            "upload_ids": [],
+        },
+    )
+    assert started.status_code == 202
+    snapshot = _wait_for_terminal_snapshot(client, started.json()["thread_id"])
+
+    result = snapshot["result"]
+    assert snapshot["status"] == "completed"
+    assert len(result["recommendations"]) == 2
+    assert all(item["cost_status"] == "product_price_only" for item in result["recommendations"])
+    assert result["unavailable_marketplaces"] == []
+    assert set(result["providers"]) == {"amazon", "ebay"}
 
 
 def test_multiple_live_provider_failures_end_with_one_stable_error(
@@ -524,7 +637,9 @@ def test_mixed_source_requires_diagnostic_configuration_and_stays_out_of_normal_
     assert snapshot["result"]["data_mode"] == "mixed"
     assert snapshot["result"]["provider_mode"] == "mixed"
     assert snapshot["result"]["result_kind"] == "partial"
-    assert snapshot["result"]["unavailable_marketplaces"] == ["aliexpress", "ebay", "shopee"]
+    assert snapshot["result"]["unavailable_marketplaces"] == ["ebay"]
+    assert "shopee" not in snapshot["result"]["providers"]
+    assert "aliexpress" not in snapshot["result"]["providers"]
     assert all(event["data"].get("data_mode") == "mixed" for event in snapshot["events"])
 
 
@@ -1320,6 +1435,57 @@ def test_legacy_sandbox_snapshot_is_normalized_without_rewriting_storage(
     assert all(event["data"]["data_mode"] == "sandbox" for event in restored.json()["events"])
     assert restored.json()["result"]["data_mode"] == "sandbox"
     assert path.read_bytes() == before
+
+
+def test_legacy_result_snapshot_rehydrates_recommendation_disclosures(
+    client: TestClient,
+) -> None:
+    thread_id = "legacy-result-snapshot"
+    created_at = server._now()
+    legacy_recommendation = {
+        "item_id": "fixture-ebay-legacy-1",
+        "platform": "ebay",
+        "title": "Legacy headphones",
+        "price": 99.0,
+        "currency": "CNY",
+        "price_cny": 99.0,
+        "shipping_cny": 12.0,
+        "duty_cny": 0.0,
+        "landed_cny": 111.0,
+        "eta_days": 8,
+        "duty_tier": "免征",
+        "reason": "历史推荐",
+        "rank": 1,
+        "source": "fixture",
+    }
+    payload = {
+        "thread_id": thread_id,
+        "status": "completed",
+        "query": "找一款耳机",
+        "user_id": "legacy-result-user",
+        "created_at": created_at,
+        "updated_at": created_at,
+        "result": {
+            "thread_id": thread_id,
+            "final_answer": "历史结果",
+            "recommendations": [legacy_recommendation],
+            "comparison": [],
+            "files": [],
+            "provider_mode": "sandbox",
+            "calculation_notice": "历史快照",
+            "providers": {},
+        },
+    }
+    path = server.session_dir(thread_id) / "task.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    restored = client.get(f"/api/task/{thread_id}")
+
+    assert restored.status_code == 200
+    recommendation = restored.json()["result"]["recommendations"][0]
+    assert recommendation["score_breakdown"]["landed_cost_cny"] == 111.0
+    assert recommendation["constraint_evaluations"] == []
+    assert restored.json()["data_mode"] == "sandbox"
 
 
 def test_orphaned_running_snapshot_is_marked_interrupted(client: TestClient) -> None:

@@ -10,7 +10,7 @@ import httpx
 
 
 class HTTPTextReranker:
-    """Call a provider-owned BGE-style reranker; never fabricate scores locally."""
+    """Call the configured BGE-compatible reranker endpoint for CategoryCard text."""
 
     async def score(self, query: str, candidates: Sequence[str]) -> list[float]:
         endpoint = os.getenv("RERANKER_ENDPOINT", "").strip()

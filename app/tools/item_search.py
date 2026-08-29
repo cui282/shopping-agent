@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from urllib.parse import quote_plus
 
 import httpx
 
 from app.config import get_settings
+from app.data.product_faiss import ProductCatalogError, get_product_catalog
 from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
 from app.schemas import (
     Candidate,
@@ -20,8 +22,52 @@ from app.schemas import (
     ProviderMetadata,
     ShippingQuoteEvidence,
 )
+from app.tools import ebay_browse
 from app.tools.marketplace_gateway import normalize_gateway_response
+from app.tools.product_search import (
+    ProductSearchError,
+    ProductSearchFilters,
+    search_products,
+)
 from app.tools.query_parser import extract_budget_cny, extract_product_subject
+
+
+def _snapshot_manifest_covers_query(query: str, platform: Platform) -> bool:
+    """Avoid returning semantically unrelated rows from a narrow eBay snapshot."""
+
+    if platform != "ebay":
+        return True
+    import json
+    from pathlib import Path
+
+    path = Path(os.getenv("EBAY_SNAPSHOT_MANIFEST", "data/ebay_snapshots/browse-manifest.json"))
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parents[2] / path
+    if not path.is_file():
+        return True
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    covered = payload.get("queries") if isinstance(payload, dict) else None
+    if not isinstance(covered, list) or not covered:
+        return True
+    subject = extract_product_subject(query)
+    query_terms = {term.casefold() for term in query.split() if len(term.strip()) >= 2}
+    query_terms.update(term.casefold() for term in subject.split() if len(term.strip()) >= 2)
+    query_terms.update(
+        term.casefold()
+        for term in _LOCAL_CATALOG_QUERY_ALIASES.get(subject, "").split()
+        if len(term.strip()) >= 2
+    )
+    if not query_terms:
+        return True
+    return any(
+        query_terms.intersection(str(item).casefold().split())
+        for item in covered
+        if isinstance(item, str)
+    )
+
 
 _CHANNEL_CONFIG_NAMES = {
     "amazon": (
@@ -48,6 +94,21 @@ _CHANNEL_CONFIG_NAMES = {
         "EBAY_API_ENDPOINT",
         "EBAY_API_KEY",
     ),
+}
+
+_LOCAL_CATALOG_QUERY_ALIASES = {
+    "耳机": "headphones",
+    "降噪": "noise cancelling",
+    "充电器": "charger",
+    "笔记本": "laptop",
+    "电脑": "computer",
+    "相机": "camera",
+    "键盘": "keyboard",
+    "鼠标": "mouse",
+    "显示器": "monitor",
+    "手机": "cell phone smartphone",
+    "音箱": "speaker",
+    "路由器": "router",
 }
 
 _PLATFORM_INFO = {
@@ -338,6 +399,149 @@ def _ensure_channel_provenance(candidate: Candidate, provider: str) -> Candidate
     return candidate.model_copy(update={"provenance": provenance})
 
 
+async def _opensearch_product_search(
+    query: str, platform: Platform, top_k: int
+) -> ItemSearchOutput:
+    settings = get_settings()
+    budget_cny = extract_budget_cny(query)
+    result = await search_products(
+        query,
+        platform,
+        top_k=top_k,
+        settings=settings,
+        filters=ProductSearchFilters(
+            platform=platform,
+            marketplace_id=os.getenv("EBAY_MARKETPLACE_ID", "").strip()
+            if platform == "ebay"
+            else None,
+            # A landed cost can never be lower than the product price, so this
+            # is a safe coarse filter when the source materializes price_cny.
+            # Historical Amazon metadata may lack an offer-level quote; keep those rows visible
+            # so the main comparison stage can attach the current reference FX quote.
+            price_max_cny=(
+                None
+                if platform == "amazon" and settings.product_search_allow_historical
+                else budget_cny
+            ),
+            sources=("live", "fixture")
+            if settings.sandbox_mode
+            or (platform == "amazon" and settings.product_search_allow_historical)
+            else ("live",),
+            # Snapshot expiry is retained as provenance but is intentionally not a recall gate.
+            # The caller requested ANN retrieval over the available product corpus first.
+            require_fresh=False,
+        ),
+    )
+    if not result.candidates:
+        raise ProductSearchError("OpenSearch product search returned no valid products")
+    source = (
+        "fixture"
+        if all(candidate.source == "fixture" for candidate in result.candidates)
+        else "live"
+    )
+    status = "degraded" if result.degradation_reason else "ok"
+    return ItemSearchOutput(
+        platform=platform,
+        candidates=result.candidates,
+        total_recall=result.total_hits or len(result.candidates),
+        truncated=len(result.candidates) >= top_k,
+        ann_used=result.vector_used,
+        provider=ProviderMetadata(
+            source=source,  # type: ignore[arg-type]
+            provider="opensearch-product-index",
+            status=status,  # type: ignore[arg-type]
+            fallback_reason=result.degradation_reason
+            or ("历史快照商品数据" if source == "fixture" else None),
+        ),
+    )
+
+
+async def _official_ebay_search(
+    query: str, top_k: int, *, fallback_reason: str
+) -> ItemSearchOutput:
+    candidates = await ebay_browse.search(query, top_k=top_k)
+    if not candidates:
+        raise ebay_browse.EbayBrowseError("eBay Browse returned no valid products")
+    return ItemSearchOutput(
+        platform="ebay",
+        candidates=candidates,
+        total_recall=len(candidates),
+        truncated=len(candidates) >= top_k,
+        provider=ProviderMetadata(
+            source="live",
+            provider="ebay-buy-browse-live",
+            status="degraded",
+            fallback_reason=fallback_reason,
+        ),
+    )
+
+
+def _local_catalog_candidates(query: str, platform: Platform, top_k: int) -> list[Candidate]:
+    settings = get_settings()
+    if (
+        settings.product_catalog_backend != "faiss"
+        or platform != "amazon"
+        or settings.app_env == "production"
+    ):
+        return []
+    try:
+        expanded_query = " ".join(
+            [query]
+            + [alias for token, alias in _LOCAL_CATALOG_QUERY_ALIASES.items() if token in query]
+        )
+        records = get_product_catalog(settings.product_catalog_index_dir).search(
+            expanded_query,
+            top_k=min(top_k, 5),
+            min_score=0.35,
+        )
+    except ProductCatalogError:
+        return []
+    # Public historical catalog data has no current route/tax evidence. Reuse only the explicit
+    # Sandbox cost fixtures and disclose that boundary on every returned candidate.
+    cost_templates = _fixture_candidates(query, platform, min(top_k, 3))
+    if not cost_templates:
+        return []
+    candidates: list[Candidate] = []
+    for index, record in enumerate(records):
+        template = cost_templates[index % len(cost_templates)]
+        asin = str(record["asin"])
+        attributes = {
+            **template.attributes,
+            "brand": record.get("brand"),
+            "category_path": record.get("categories", []),
+            "description": record.get("description", ""),
+            "historical_catalog": True,
+            "catalog_snapshot": "Amazon Electronics metadata (2015)",
+            "faiss_score": record.get("faiss_score"),
+        }
+        candidates.append(
+            template.model_copy(
+                update={
+                    "item_id": f"amazon:{asin}",
+                    "offer_id": asin,
+                    "title": str(record["title"]),
+                    "price": float(record["price"]),
+                    "currency": str(record.get("currency") or "USD"),
+                    "image_url": record.get("image_url"),
+                    "product_url": f"https://www.amazon.com/dp/{asin}",
+                    "attributes": attributes,
+                    "variant_attributes": {},
+                    "retrieved_at": "2015-09-24T00:00:00Z",
+                    "source": "fixture",
+                    "provenance": OfferProvenance(
+                        kind="sandbox_fixture",
+                        provider="amazon-public-electronics-catalog",
+                        upstream_source=(
+                            "UCSD/SNAP Amazon Electronics metadata; historical catalog, not live"
+                        ),
+                    ),
+                    "link_kind": "product_detail",
+                }
+            )
+        )
+    return candidates
+
+
 async def item_search(
     query: str,
     platform: Platform,
@@ -354,6 +558,71 @@ async def item_search(
     )
     marketplace = next(item for item in settings.marketplaces if item.name == platform)
     configured = marketplace.configured
+    product_search_enabled = (
+        settings.product_search_backend == "opensearch"
+        and platform in settings.product_search_marketplaces
+    )
+    if product_search_enabled:
+        if (
+            platform == "ebay"
+            and not settings.sandbox_mode
+            and not _snapshot_manifest_covers_query(query, platform)
+            and ebay_browse.configured()
+        ):
+            try:
+                return await _official_ebay_search(
+                    query,
+                    top_k,
+                    fallback_reason="当前离线快照不覆盖该关键词，已调用 eBay Browse 实时搜索",
+                )
+            except ebay_browse.EbayBrowseError:
+                pass
+        try:
+            return await _opensearch_product_search(query, platform, top_k)
+        except ProductSearchError as exc:
+            if platform == "ebay" and not settings.sandbox_mode and ebay_browse.configured():
+                try:
+                    return await _official_ebay_search(
+                        query,
+                        top_k,
+                        fallback_reason=(
+                            f"OpenSearch product snapshot unavailable; direct Browse fallback: {exc}"
+                        ),
+                    )
+                except ebay_browse.EbayBrowseError:
+                    pass
+            if not settings.sandbox_mode:
+                return ItemSearchOutput(
+                    platform=platform,
+                    candidates=[],
+                    total_recall=0,
+                    truncated=False,
+                    provider=ProviderMetadata(
+                        source="live",
+                        provider="opensearch-product-index",
+                        status="unavailable",
+                        fallback_reason=str(exc),
+                        failure_reason=(
+                            "empty_response"
+                            if "no valid products" in str(exc)
+                            else "request_failed"
+                        ),
+                    ),
+                )
+    if (
+        platform == "ebay"
+        and not settings.sandbox_mode
+        and ebay_browse.configured()
+        and not product_search_enabled
+    ):
+        try:
+            return await _official_ebay_search(
+                query,
+                top_k,
+                fallback_reason="OpenSearch product search is disabled; direct Browse path is active",
+            )
+        except ebay_browse.EbayBrowseError:
+            pass
     if settings.sandbox_mode:
         if settings.app_env == "production":
             return ItemSearchOutput(
@@ -367,6 +636,22 @@ async def item_search(
                     status="unavailable",
                     fallback_reason="sandbox mode is forbidden in production",
                     failure_reason="sandbox_forbidden",
+                ),
+            )
+        candidates = _local_catalog_candidates(query, platform, top_k)
+        if candidates:
+            return ItemSearchOutput(
+                platform=platform,
+                candidates=candidates,
+                total_recall=len(candidates),
+                truncated=len(candidates) >= top_k,
+                provider=ProviderMetadata(
+                    source="fixture",
+                    provider="amazon-public-electronics-catalog",
+                    status="degraded",
+                    fallback_reason=(
+                        "历史公开商品目录已启用；商品信息来自目录快照，价格/运费/税费使用 Sandbox 估算"
+                    ),
                 ),
             )
         candidates = _fixture_candidates(query, platform, top_k)

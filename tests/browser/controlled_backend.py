@@ -90,6 +90,7 @@ def readiness_body() -> dict[str, Any]:
             "persistent_snapshots": True,
             "image_upload": True,
             "image_analysis": False,
+            "product_search": False,
         },
         "required_actions": [],
         "data_mode": "sandbox",
@@ -109,10 +110,30 @@ def readiness_body() -> dict[str, Any]:
                 "backend_disabled",
                 "controlled backend uses process-local preference evaluation",
             ),
+            "postgres": component(
+                "disabled",
+                "backend_disabled",
+                "controlled backend uses process-local preference evaluation",
+            ),
             "opensearch": component(
                 "unavailable",
                 "not_configured",
                 "OpenSearch is not used by the controlled backend",
+            ),
+            "product_search": component(
+                "disabled",
+                "backend_disabled",
+                "OpenSearch product search is not used by the controlled backend",
+            ),
+            "embedding": component(
+                "disabled",
+                "product_search_disabled",
+                "Product embedding is not used by the controlled backend",
+            ),
+            "langfuse": component(
+                "disabled",
+                "not_configured",
+                "Langfuse credentials are not configured in the controlled backend",
             ),
             "faiss": component(
                 "disabled",

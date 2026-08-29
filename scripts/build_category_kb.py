@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import load_dotenv
 
 from app.recall.category_kb import CategoryCard
+
+load_dotenv()
 
 
 def _args() -> argparse.Namespace:
@@ -23,6 +26,12 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--opensearch-url", default=os.getenv("OPENSEARCH_URL", ""))
     parser.add_argument(
         "--index", default=os.getenv("OPENSEARCH_CATEGORY_INDEX", "shopping_agent_category_kb")
+    )
+    parser.add_argument(
+        "--dimension",
+        type=int,
+        default=int(os.getenv("EMBEDDING_DIMENSION", "384")),
+        help="expected dimension for the configured OpenSearch knn_vector field",
     )
     return parser.parse_args()
 
@@ -47,17 +56,63 @@ def _bulk_body(cards: list[CategoryCard]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _validate_embeddings(cards: list[CategoryCard], dimension: int) -> None:
+    for card in cards:
+        if card.embedding is not None and len(card.embedding) != dimension:
+            raise ValueError(
+                f"CategoryCard {card.card_id} embedding dimension {len(card.embedding)} "
+                f"does not match expected {dimension}"
+            )
+
+
+def _index_dimension(payload: Any, index: str) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    index_payload = payload.get(index)
+    if not isinstance(index_payload, dict) and len(payload) == 1:
+        # GET /alias/_mapping returns the concrete index name rather than the alias.
+        index_payload = next(iter(payload.values()))
+    if not isinstance(index_payload, dict):
+        return None
+    mappings = index_payload.get("mappings")
+    if not isinstance(mappings, dict):
+        return None
+    properties = mappings.get("properties")
+    if not isinstance(properties, dict):
+        return None
+    embedding = properties.get("embedding")
+    if not isinstance(embedding, dict):
+        return None
+    value = embedding.get("dimension")
+    return int(value) if isinstance(value, int) else None
+
+
 def main() -> int:
     args = _args()
     if not args.opensearch_url:
         raise SystemExit("OPENSEARCH_URL or --opensearch-url is required")
+    if args.dimension < 1:
+        raise SystemExit("--dimension must be positive")
     cards = _load_cards(args.input)
     if not cards:
         raise SystemExit("input contains no CategoryCard records")
+    _validate_embeddings(cards, args.dimension)
     auth = None
     username = os.getenv("OPENSEARCH_USERNAME", "").strip()
     if username:
         auth = (username, os.getenv("OPENSEARCH_PASSWORD", ""))
+    mapping_response = httpx.get(
+        f"{args.opensearch_url.rstrip('/')}/{args.index}/_mapping",
+        auth=auth,
+        timeout=30,
+    )
+    mapping_response.raise_for_status()
+    actual_dimension = _index_dimension(mapping_response.json(), args.index)
+    if actual_dimension is not None and actual_dimension != args.dimension:
+        raise SystemExit(
+            f"OpenSearch category index dimension {actual_dimension} does not match "
+            f"--dimension {args.dimension}; recreate the index before indexing"
+        )
     response = httpx.post(
         f"{args.opensearch_url.rstrip('/')}/{args.index}/_bulk",
         content=_bulk_body(cards),

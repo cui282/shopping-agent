@@ -6,6 +6,8 @@ export type ReportFormat = "markdown" | "json" | "pdf";
 export type ProviderMode = DataMode | "unverified";
 export type ResearchMode = "product_research" | "exact_offer_comparison";
 export type ResultKind = "live" | "sandbox" | "partial";
+export type CostStatus = "complete" | "product_price_only";
+export type CostEvidenceGap = "shipping_quote" | "customs_evidence" | "customs_valuation";
 export type RecallChannelName = "opensearch" | "query_tower" | "item_tower" | "faiss";
 export type RecallChannelState = "configured" | "ready" | "degraded" | "unavailable";
 export type RecallMode = "hybrid" | "partial_hybrid" | "deterministic_fallback";
@@ -79,8 +81,8 @@ export interface TaskOverride {
 }
 
 export interface PreferenceBackendStatus {
-  requested_backend: "memory" | "redis";
-  backend: "memory" | "redis";
+  requested_backend: "memory" | "redis" | "postgres";
+  backend: "memory" | "redis" | "postgres";
   durability: PreferenceDurability;
   fallback_reason: string | null;
 }
@@ -143,6 +145,7 @@ export interface RankingScoreBreakdown {
   evidence_quality_score: number;
   delivery_time_days: number;
   delivery_time_score: number;
+  semantic_relevance_score?: number;
 }
 
 export interface ExchangeRateProvenance {
@@ -170,7 +173,7 @@ export interface CurrencyConversionEvidence {
 }
 
 export interface ShippingQuoteEvidence {
-  quote_type: "carrier_quote" | "marketplace_checkout" | "shipping_included" | "sandbox_fixture";
+  quote_type: "carrier_quote" | "marketplace_checkout" | "marketplace_estimate" | "shipping_included" | "sandbox_fixture";
   currency: string;
   total_amount: number;
   base_amount: number | null;
@@ -588,12 +591,14 @@ export interface Recommendation extends ProductEvidence {
   sales: number | null;
   attributes: Record<string, JsonValue>;
   note: string | null;
-  duty_tier: "免征" | "标准" | "高税";
+  duty_tier: "免征" | "标准" | "高税" | "待核";
   shipping_estimate: EstimateDisclosure;
   duty_estimate: EstimateDisclosure;
   tax_estimate: EstimateDisclosure;
   delivery_estimate: EstimateDisclosure;
   tax_breakdown: ImportTaxBreakdown | null;
+  cost_status?: CostStatus;
+  cost_evidence_gaps?: CostEvidenceGap[];
   reason: string;
   rank: number;
   constraint_evaluations: ConstraintEvaluation[];
@@ -619,12 +624,14 @@ export interface UnverifiedCandidate extends ProductEvidence {
   sales: number | null;
   attributes: Record<string, JsonValue>;
   note: string | null;
-  duty_tier: "免征" | "标准" | "高税";
+  duty_tier: "免征" | "标准" | "高税" | "待核";
   shipping_estimate: EstimateDisclosure;
   duty_estimate: EstimateDisclosure;
   tax_estimate: EstimateDisclosure;
   delivery_estimate: EstimateDisclosure;
   tax_breakdown: ImportTaxBreakdown | null;
+  cost_status?: CostStatus;
+  cost_evidence_gaps?: CostEvidenceGap[];
   reason: string;
   constraint_evaluations: ConstraintEvaluation[];
 }
@@ -646,12 +653,14 @@ export interface AlternativeCandidate extends ProductEvidence {
   sales: number | null;
   attributes: Record<string, JsonValue>;
   note: string | null;
-  duty_tier: "免征" | "标准" | "高税";
+  duty_tier: "免征" | "标准" | "高税" | "待核";
   shipping_estimate: EstimateDisclosure;
   duty_estimate: EstimateDisclosure;
   tax_estimate: EstimateDisclosure;
   delivery_estimate: EstimateDisclosure;
   tax_breakdown: ImportTaxBreakdown | null;
+  cost_status?: CostStatus;
+  cost_evidence_gaps?: CostEvidenceGap[];
   reason: string;
   identity_evidence: IdentityEvidence;
 }
@@ -690,7 +699,9 @@ export interface ComparisonItem extends ProductEvidence {
   duty_estimate?: EstimateDisclosure;
   tax_estimate?: EstimateDisclosure;
   delivery_estimate?: EstimateDisclosure;
-  tax_breakdown?: ImportTaxBreakdown | null;
+ tax_breakdown?: ImportTaxBreakdown | null;
+  cost_status?: CostStatus;
+  cost_evidence_gaps?: CostEvidenceGap[];
 }
 
 export interface GeneratedFile {
@@ -889,7 +900,11 @@ export interface ReadinessComponents {
   llm: ReadinessComponentStatus;
   marketplace_gateways: Record<string, ReadinessComponentStatus>;
   redis: ReadinessComponentStatus;
+  postgres: ReadinessComponentStatus;
   opensearch: ReadinessComponentStatus;
+  product_search: ReadinessComponentStatus;
+  embedding: ReadinessComponentStatus;
+  langfuse: ReadinessComponentStatus;
   faiss: ReadinessComponentStatus;
   query_tower: ReadinessComponentStatus;
   item_tower: ReadinessComponentStatus;
@@ -905,7 +920,7 @@ export interface ReadinessResponse {
   runtime_mode: "live" | "sandbox";
   agent_mode: "llm" | "rules" | "unavailable";
   requested_agent_mode: "auto" | "llm" | "rules";
-  preference_store: "memory" | "redis";
+  preference_store: "memory" | "redis" | "postgres";
   providers: Record<string, ProviderCapability>;
   capabilities: Record<string, boolean>;
   required_actions: string[];

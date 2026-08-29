@@ -21,6 +21,7 @@
       "confidence": {"type": "float"},
       "structured": {
         "type": "object",
+        "dynamic": true,
         "properties": {
           "components": {"type": "keyword"},
           "bestsellers": {"type": "object", "enabled": true},
@@ -31,10 +32,10 @@
       },
       "embedding": {
         "type": "knn_vector",
-        "dimension": 1024,
+        "dimension": 384,
         "method": {
           "name": "hnsw",
-          "space_type": "cosinesimil",
+          "space_type": "innerproduct",
           "engine": "faiss",
           "parameters": {
             "ef_construction": 128,

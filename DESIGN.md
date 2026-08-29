@@ -4,7 +4,7 @@
 
 Shopping Agent is a precise, calm, and transparent shopping research desk. It uses the density of an operations tool, the readable comparison rhythm of a commerce catalog, and a visible agent activity rail so users can understand how each recommendation was reached.
 
-The interface is light, compact, and content-led. Product photography and live task state provide the visual interest; decorative backgrounds, oversized headings, gradients, and marketing composition are intentionally absent.
+The interface uses a light research canvas framed by a dark task-navigation rail. It is compact and content-led: product photography and live task state provide the visual interest; decorative backgrounds, oversized headings, gradients, and marketing composition are intentionally absent.
 
 ## 2. Color palette and roles
 
@@ -23,6 +23,8 @@ The interface is light, compact, and content-led. Product photography and live t
 | `warning` | `oklch(0.72 0.13 80)` | Partial data and API fallback |
 | `info` | `oklch(0.59 0.13 245)` | Running agent stage and links |
 | `danger` | `oklch(0.56 0.19 25)` | Error and destructive action |
+| `nav-ink` | `oklch(0.94 0.012 165)` | Dark task rail text |
+| `nav-canvas` | `oklch(0.20 0.018 165)` | Dark task rail surface |
 
 Color follows a 60-30-10 visual-weight balance. Neutral surfaces carry the workspace, charcoal carries content, and coral is reserved for decisions and actions.
 
@@ -51,7 +53,7 @@ All numeric columns use tabular figures. Chinese content is tagged with `lang="z
 
 ## 5. Layout principles
 
-Spacing follows `4, 8, 12, 16, 24, 32px`. The desktop shell uses a `232px` session rail, a flexible workspace with a `680px` comfortable reading width, and a `320px` activity rail. Dividers establish ownership between panes; sections inside the workspace are unframed.
+Spacing follows `4, 8, 12, 16, 24, 32px`. The desktop shell uses a `240px` dark session rail, a flexible research workspace, and a `320px` activity rail. The new-task view uses a ruled research masthead and compact, image-led starter entries; dividers establish ownership between panes and sections inside the workspace remain unframed.
 
 The query composer remains attached to the bottom of the main workspace. Recommendations use a stable three-column grid where space permits, while comparison data uses aligned rows. The first viewport always shows the current query, agent status, and at least the leading recommendation area.
 

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import math
 import os
+import re
 from typing import Any, Literal
 
 import httpx
 
 from app.config import get_settings
 from app.provider_resilience import ProviderCircuitOpenError, get_provider_resilience
-from app.recall.category_norm import normalize_category
+from app.recall.category_norm import category_search_context, normalize_category
 from app.recall.category_reranker import HTTPTextReranker
 from app.recall.rag import extract_structured_card, summarize_card
 from app.recall.tower_query import encode_query
@@ -64,8 +66,8 @@ _LOCAL_INSIGHTS: dict[str, dict[str, Any]] = {
 COARSE_K = 30
 FINE_K_QUICK = 8
 FINE_K_DEEP = 15
-RERANK_BYPASS_TOP_SCORE = 0.92
 SEMANTIC_TOKENS = {"气质", "感觉", "风格", "感", "适合", "送", "氛围"}
+_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[一-鿿]")
 
 
 def should_disable_bm25(category: str) -> bool:
@@ -74,30 +76,102 @@ def should_disable_bm25(category: str) -> bool:
     return any(token in category for token in SEMANTIC_TOKENS)
 
 
+def _semantic_score(query_vector: list[float] | None, source: dict[str, Any]) -> float | None:
+    if not query_vector:
+        return None
+    raw = source.get("embedding")
+    if not isinstance(raw, list) or len(raw) != len(query_vector):
+        return None
+    try:
+        values = [float(value) for value in raw]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(value) for value in values):
+        return None
+    query_norm = math.sqrt(sum(value * value for value in query_vector))
+    value_norm = math.sqrt(sum(value * value for value in values))
+    if query_norm <= 0 or value_norm <= 0:
+        return None
+    cosine = sum(left * right for left, right in zip(query_vector, values)) / (
+        query_norm * value_norm
+    )
+    return max(0.0, min(1.0, (cosine + 1.0) / 2.0))
+
+
+def _lexical_score(category: str, source: dict[str, Any]) -> float:
+    query = category.casefold().strip()
+    if not query:
+        return 0.0
+    text = " ".join(str(source.get(key) or "") for key in ("category", "summary")).casefold()
+    if not text:
+        return 0.0
+    tokens = set(_TOKEN_PATTERN.findall(query))
+    overlap = (
+        len(tokens.intersection(_TOKEN_PATTERN.findall(text))) / len(tokens) if tokens else 0.0
+    )
+    exact = 1.0 if query in text else 0.0
+    return min(1.0, overlap * 0.65 + exact * 0.35)
+
+
+def _local_rerank_hits(
+    category: str, hits: list[dict[str, Any]], *, top_k: int, query_vector: list[float] | None
+) -> list[dict[str, Any]]:
+    """Rank CategoryCards with the shared embedding plus transparent lexical signals."""
+
+    scored: list[tuple[float, float, float, int, dict[str, Any]]] = []
+    for position, hit in enumerate(hits):
+        source = hit.get("_source")
+        source = source if isinstance(source, dict) else {}
+        semantic = _semantic_score(query_vector, source)
+        lexical = _lexical_score(category, source)
+        try:
+            confidence = max(0.0, min(1.0, float(source.get("confidence") or 0.0)))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        score = (
+            semantic * 0.70 + lexical * 0.25 + confidence * 0.05
+            if semantic is not None
+            else lexical * 0.75 + confidence * 0.25
+        )
+        try:
+            coarse_score = float(hit.get("_score") or 0.0)
+        except (TypeError, ValueError):
+            coarse_score = 0.0
+        scored.append((score, semantic or 0.0, coarse_score, -position, hit))
+    scored.sort(key=lambda item: item[:4], reverse=True)
+    return [item[-1] for item in scored[:top_k]]
+
+
 async def _rerank_hits(
-    category: str, hits: list[dict[str, Any]], *, top_k: int
+    category: str,
+    hits: list[dict[str, Any]],
+    *,
+    top_k: int,
+    query_vector: list[float] | None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Rerank only when coarse results need it and a real endpoint is configured."""
+    """Rerank coarse results with an optional provider or the shared local embedding ranker."""
 
     if not hits:
         return [], None
     if len(hits) <= top_k:
         return hits[:top_k], None
-    try:
-        top_score = float(hits[0].get("_score") or 0)
-    except (TypeError, ValueError):
-        top_score = 0.0
-    if top_score >= RERANK_BYPASS_TOP_SCORE:
-        return hits[:top_k], "rerank_bypassed_high_score"
-    if not os.getenv("RERANKER_ENDPOINT", "").strip():
-        return hits[:top_k], "rerank_not_configured"
-    summaries = [str((hit.get("_source") or {}).get("summary") or "") for hit in hits]
-    try:
-        scores = await HTTPTextReranker().score(category, summaries)
-    except Exception as exc:  # noqa: BLE001 - preserve coarse recall on optional failure
-        return hits[:top_k], f"reranker unavailable: {type(exc).__name__}"
-    ranked = [hit for _, hit in sorted(zip(scores, hits), key=lambda pair: pair[0], reverse=True)]
-    return ranked[:top_k], None
+    if os.getenv("RERANKER_ENDPOINT", "").strip():
+        summaries = [str((hit.get("_source") or {}).get("summary") or "") for hit in hits]
+        try:
+            scores = await HTTPTextReranker().score(category, summaries)
+        except Exception:  # noqa: BLE001 - local ranker remains a usable fallback
+            scores = None
+        if scores is not None:
+            ranked = [
+                hit for _, hit in sorted(zip(scores, hits), key=lambda pair: pair[0], reverse=True)
+            ]
+            return ranked[:top_k], None
+    return _local_rerank_hits(
+        category,
+        hits,
+        top_k=top_k,
+        query_vector=query_vector,
+    ), None
 
 
 def _default_insight(category: str) -> dict[str, Any]:
@@ -127,6 +201,7 @@ def curated_category_insight(
     fallback_reason: str | None = None,
     failure_reason: ProviderFailureReason | None = None,
 ) -> CategoryInsightOutput:
+    context = category_search_context(category)
     data = _LOCAL_INSIGHTS.get(category, _default_insight(category))
     evidence = [
         CategoryEvidence(
@@ -138,6 +213,10 @@ def curated_category_insight(
     ]
     return CategoryInsightOutput(
         category=category,
+        standard_category=context.standard_category,
+        query_expansions=list(context.query_expansions),
+        subtypes=list(context.subtypes),
+        category_ids=list(context.category_ids),
         components=data["components"],
         bestsellers=[Bestseller.model_validate(item) for item in data["bestsellers"]],
         attributes=[AttributeDist.model_validate(item) for item in data["attributes"]],
@@ -163,14 +242,17 @@ async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsight
     auth = None
     if os.getenv("OPENSEARCH_USERNAME"):
         auth = (os.environ["OPENSEARCH_USERNAME"], os.getenv("OPENSEARCH_PASSWORD", ""))
-    text_query = {"multi_match": {"query": category, "fields": ["category^2", "summary"]}}
+    context = category_search_context(category)
+    knowledge_query = " ".join(context.query_terms) or category
+    text_query = {"multi_match": {"query": knowledge_query, "fields": ["category^2", "summary"]}}
     semantic_unavailable = None
+    query_vector: list[float] | None = None
     try:
-        vector = await encode_query(category)
+        query_vector = await encode_query(knowledge_query)
         queries: list[dict[str, Any]] = []
         if not should_disable_bm25(category):
             queries.append(text_query)
-        queries.append({"knn": {"embedding": {"vector": vector, "k": COARSE_K}}})
+        queries.append({"knn": {"embedding": {"vector": query_vector, "k": COARSE_K}}})
         query: dict[str, Any] = {"hybrid": {"queries": queries}}
     except Exception as exc:  # noqa: BLE001 - semantic recall is an optional channel
         query = text_query
@@ -188,7 +270,12 @@ async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsight
         hits = response.json().get("hits", {}).get("hits", [])
     if not hits:
         raise LookupError(f"no category cards found for {category}")
-    hits, rerank_status = await _rerank_hits(category, hits, top_k=fine_k)
+    hits, rerank_status = await _rerank_hits(
+        category,
+        hits,
+        top_k=fine_k,
+        query_vector=query_vector,
+    )
     sources = [
         {
             **(hit.get("_source", {}) if isinstance(hit.get("_source"), dict) else {}),
@@ -201,6 +288,10 @@ async def _opensearch_insight_once(category: str, depth: str) -> CategoryInsight
     components, bestsellers, attributes, price_tiers, confidence = summarize_card(category, merged)
     return CategoryInsightOutput(
         category=category,
+        standard_category=context.standard_category,
+        query_expansions=list(context.query_expansions),
+        subtypes=list(context.subtypes),
+        category_ids=list(context.category_ids),
         components=components,
         bestsellers=bestsellers,
         attributes=attributes,

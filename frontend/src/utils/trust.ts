@@ -88,8 +88,14 @@ export function requiredActionLabel(action: string): string {
   if (action === "Use STORE_BACKEND=redis for persistent production preferences") {
     return "生产环境使用 STORE_BACKEND=redis 持久保存偏好";
   }
+  if (action === "Use STORE_BACKEND=redis or STORE_BACKEND=postgres for persistent production preferences") {
+    return "生产环境使用 Redis 或 PostgreSQL 持久保存偏好";
+  }
   if (action === "Redis preference backend unavailable; local evaluation is non-persistent") {
     return "Redis 偏好后端不可用；当前仅本地评估且不会持久保存";
+  }
+  if (action === "PostgreSQL preference backend unavailable; local evaluation is non-persistent") {
+    return "PostgreSQL 偏好后端不可用；当前仅本地评估且不会持久保存";
   }
   if (action.startsWith("Configure OPENSEARCH_URL")) {
     return "配置 OPENSEARCH_URL 以启用 OpenSearch 类目知识召回";
@@ -126,7 +132,7 @@ export function providerNameLabel(name: string): string {
 
 export function recallChannelLabel(channel: RecallChannelName | string): string {
   const labels: Record<string, string> = {
-    opensearch: "OpenSearch 类目知识",
+    opensearch: "OpenSearch 语义检索",
     query_tower: "Query tower",
     item_tower: "Item tower",
     faiss: "Faiss ANN",
@@ -148,6 +154,9 @@ export function recallFallbackReasonLabel(reason: string): string {
     optional_recall_unavailable: "部分增强召回服务未启用，已自动使用稳定的基础召回完成候选筛选。",
     partial_channel_failure: "部分增强召回服务暂不可用，已使用其余可用通道继续完成候选筛选。",
     faiss_empty_response: "向量召回暂未找到候选，已使用其他可用召回结果继续筛选。",
+    product_ann_unavailable: "OpenSearch 商品语义检索暂不可用，已保留可用候选继续完成筛选。",
+    product_ann_partial: "OpenSearch 商品语义检索只覆盖部分平台，已使用可用结果继续完成筛选。",
+    opensearch_category_fallback: "OpenSearch 商品语义检索可用，但类目知识使用了备用数据。",
   };
   if (reason in labels) return labels[reason];
   if (reason.startsWith("faiss_")) {
@@ -181,7 +190,11 @@ export function readinessComponentLabel(name: string): string {
   const labels: Record<string, string> = {
     llm: "LLM",
     redis: "Redis",
+    postgres: "PostgreSQL",
     opensearch: "OpenSearch",
+    product_search: "OpenSearch 商品搜索",
+    embedding: "商品语义向量",
+    langfuse: "Langfuse 链路追踪",
     faiss: "Faiss",
     query_tower: "Query tower",
     item_tower: "Item tower",

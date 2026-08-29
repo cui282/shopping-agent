@@ -2,12 +2,14 @@
 
 > 核对日期：2026-07-30。平台资格、配额和协议会变化，提交申请前应重新打开本文链接确认。本指南是工程接入建议，不构成法律意见。
 
-> 重要边界：Shopping Agent 的 live 数据来自外部合规数据提供商的采买、授权或许可 Feed。
-> 本项目不直接申请或调用 Amazon、eBay、AliExpress、Shopee 等平台的官方 API。环境变量中的
+> 重要边界：Shopping Agent 的默认 live 数据来自外部合规数据提供商的采买、授权或许可 Feed。
+> 默认通道不直接申请或调用 Amazon、eBay、AliExpress、Shopee 等平台的官方 API。环境变量中的
 > `*_DATA_CHANNEL_ENDPOINT`、`*_DATA_CHANNEL_CREDENTIAL` 和可选的 `*_DATA_PROVIDER` 是数据提供商为
 > 对应平台数据通道分配的 endpoint、接入凭证和标识。旧部署的 `*_API_ENDPOINT`、`*_API_KEY` 完整别名仍兼容，
 > 但同一平台不能跨两套变量各填一半，也不能同时配置两套不同值。
-> 下文的平台官方接口只作为数据提供商可能采用的上游实现参考，不是 Shopping Agent 的直接接入要求。
+> 下文的平台官方接口只作为数据提供商可能采用的上游实现参考。例外是显式启用
+> `PRODUCT_SEARCH_BACKEND=opensearch` 时，部署者可以为 eBay Browse 快照采集器配置自己的官方
+> eBay keyset；该采集器只写入受控的离线快照，不替代数据提供商通道，也不自动获得 Feed API 权限。
 
 ## 先确认数据来源
 
@@ -111,6 +113,18 @@ Sell Inventory API 用于卖家创建和管理自己的库存/刊登，不是全
 
 稳妥顺序是先用 Production keyset 实测 Browse API。若 scope 不可用、返回 `403`，或准备商业上线，则向 Developer Support 提交业务模型、国家、截图、数据流和 Sandbox 测试步骤，并明确询问跨平台排序与同屏展示方式，取得书面确认。即使 Browse 本身无需额外审批，联盟佣金、提高配额和数据 Feed 仍有各自申请流程。
 
+### Shopping Agent 的 eBay 离线快照路径
+
+仓库提供 `scripts/fetch_ebay_browse_snapshot.py` 作为没有 Feed API 权限时的有界采集器。它使用
+Application OAuth token，要求显式传入关键词和 marketplace，调用 `item_summary/search` 后保存
+`item_id/title/price/currency/image/link/category/snapshot_at/expires_at` 等字段。它不会在用户请求
+期间抓取，也不会把 access token 写入快照。快照随后由 `scripts/build_product_opensearch.py` 与 Amazon
+快照一起写入 OpenSearch 商品索引。
+
+该路径不是 eBay 全量商品镜像。要使用 Feed API 的全量/增量文件，必须先通过 eBay 的访问检查并取得
+对应市场和品类权限；生产 Buy API/Feed 还要遵守 EPN、API License Agreement、数据时效和展示规则。
+应用密钥只能放在后端或离线采集环境，不得进入前端、日志或 Git。
+
 ### 网关需要保存的凭证
 
 `Client ID`、`Client Secret`、目标 `Marketplace ID`，以及可选的 EPN `Campaign ID`。网关负责生成/缓存 Application token，把仓库的 `query` 映射为 eBay 的 `q`，并统一 `itemId/title/price/currency/image/itemWebUrl` 等字段。
@@ -201,6 +215,7 @@ React -> Shopping Agent FastAPI -> 数据提供商平台通道 -> 采买/授权�
 | --- | --- | --- |
 | Amazon | 上游授权凭证、站点参数和数据许可 | `AMAZON_DATA_PROVIDER`、`AMAZON_DATA_CHANNEL_ENDPOINT`、`AMAZON_DATA_CHANNEL_CREDENTIAL` |
 | eBay | 上游授权凭证、站点参数和数据许可 | `EBAY_DATA_PROVIDER`、`EBAY_DATA_CHANNEL_ENDPOINT`、`EBAY_DATA_CHANNEL_CREDENTIAL` |
+| eBay 离线 Browse 快照（显式 OpenSearch 商品路径） | eBay keyset、marketplace 和快照访问许可 | 后端环境中的 `EBAY_CLIENT_ID`、`EBAY_CLIENT_SECRET`、`EBAY_DEV_ID`、`EBAY_MARKETPLACE_ID` |
 | AliExpress | 上游授权凭证、区域参数和数据许可 | `ALIEXPRESS_DATA_PROVIDER`、`ALIEXPRESS_DATA_CHANNEL_ENDPOINT`、`ALIEXPRESS_DATA_CHANNEL_CREDENTIAL` |
 | Shopee | 上游授权凭证、站点参数和数据许可 | `SHOPEE_DATA_PROVIDER`、`SHOPEE_DATA_CHANNEL_ENDPOINT`、`SHOPEE_DATA_CHANNEL_CREDENTIAL` |
 | 第三方 | 供应商 token、套餐和数据许可版本 | 对应平台的 `*_DATA_PROVIDER`、`*_DATA_CHANNEL_ENDPOINT`、`*_DATA_CHANNEL_CREDENTIAL` |

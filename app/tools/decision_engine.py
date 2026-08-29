@@ -69,9 +69,10 @@ def _facts_for_constraint(
     offer: LandedCost, constraint: HardConstraint
 ) -> list[ConstraintEvidence]:
     if constraint.field == "budget_cny":
+        field_path = "price_cny" if offer.cost_status == "product_price_only" else "landed_cny"
         return [
             ConstraintEvidence(
-                field_path="landed_cny",
+                field_path=field_path,
                 value=offer.landed_cny,
                 source="computed",
             )
@@ -336,6 +337,7 @@ def _score_breakdown(
     remembered: RememberedPreference,
     intent: ShoppingPlan,
     eligible: list[LandedCost],
+    rerank_scores: Mapping[str, float] | None = None,
 ) -> RankingScoreBreakdown:
     landed_values = [item.landed_cny for item in eligible]
     eta_values = [float(item.eta_days) for item in eligible]
@@ -347,11 +349,26 @@ def _score_breakdown(
         evidence_quality_score=_evidence_quality_score(offer),
         delivery_time_days=offer.eta_days,
         delivery_time_score=_relative_lower_is_better(float(offer.eta_days), eta_values),
+        semantic_relevance_score=max(
+            0.0,
+            min(1.0, float((rerank_scores or {}).get(offer.item_id, 0.0))),
+        ),
     )
 
 
 def _recommendation_reason(offer: LandedCost, profile: RankingProfile) -> str:
     priorities = "、".join(_RANKING_LABELS[dimension] for dimension in profile.priority_order)
+    if offer.cost_status == "product_price_only":
+        gap_labels = {
+            "shipping_quote": "运费报价",
+            "customs_evidence": "税务证据",
+            "customs_valuation": "海关估值",
+        }
+        gaps = "、".join(gap_labels[gap] for gap in offer.cost_evidence_gaps)
+        return (
+            f"商品价和当前可验证条件已通过；因{gaps}待补充，暂按折合商品价 ¥{offer.price_cny:.2f}参考排序，"
+            "不能视为最终到手价。"
+        )
     import_tax = offer.import_tax_cny
     if import_tax is None:
         import_tax = offer.duty_cny or 0
@@ -399,6 +416,7 @@ def decision_engine(
     normalized_offers: Sequence[LandedCost],
     *,
     max_items: int = 3,
+    rerank_scores: Mapping[str, float] | None = None,
 ) -> ItemPickerOutput:
     """Deterministically classify normalized offers against the current task intent."""
 
@@ -457,7 +475,18 @@ def decision_engine(
     profile = intent.ranking_profile
     eligible_offers = [offer for offer, _ in recommendations]
     scored = [
-        (offer, evaluations, _score_breakdown(offer, profile, remembered, intent, eligible_offers))
+        (
+            offer,
+            evaluations,
+            _score_breakdown(
+                offer,
+                profile,
+                remembered,
+                intent,
+                eligible_offers,
+                rerank_scores,
+            ),
+        )
         for offer, evaluations in recommendations
     ]
 
@@ -466,6 +495,7 @@ def decision_engine(
     ) -> tuple[float | str, ...]:
         offer, _, breakdown = item
         primary: list[float] = []
+        primary.append(-breakdown.semantic_relevance_score)
         for dimension in profile.priority_order:
             if dimension == "landed_cost":
                 primary.append(offer.landed_cny)

@@ -4,12 +4,20 @@
   min-height: 0;
   flex-direction: column;
   color: var(--ink);
-  background: #f0f3f1;
+  --ink: oklch(0.94 0.012 165);
+  --ink-muted: oklch(0.70 0.018 165);
+  --line: oklch(0.31 0.018 165);
+  --line-strong: oklch(0.42 0.022 165);
+  --surface: oklch(0.25 0.018 165);
+  --surface-muted: oklch(0.28 0.018 165);
+  --surface-pressed: oklch(0.32 0.02 165);
+  background: oklch(0.20 0.018 165);
 }
 
 .header {
-  padding: 14px 12px 13px;
+  padding: 18px 14px 16px;
   border-bottom: 1px solid var(--line);
+  background: oklch(0.21 0.019 165);
 }
 
 .newButton {
@@ -19,12 +27,12 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin-top: 14px;
-  border: 1px solid var(--line-strong);
+  margin-top: 18px;
+  border: 1px solid var(--accent);
   border-radius: var(--r-md);
-  color: var(--ink);
-  background: var(--surface);
-  box-shadow: 0 1px 2px rgb(24 35 31 / 0.06);
+  color: #fff8f6;
+  background: var(--accent);
+  box-shadow: 0 4px 12px color-mix(in oklch, var(--accent) 20%, transparent);
   font-size: 12px;
   font-weight: 650;
   cursor: pointer;
@@ -35,7 +43,7 @@
 .history {
   min-height: 0;
   flex: 1;
-  padding: 14px 7px;
+  padding: 18px 8px;
   overflow-y: auto;
 }
 
@@ -43,7 +51,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 0 8px 8px;
+  padding: 0 9px 10px;
   color: var(--ink-muted);
 }
 
@@ -79,7 +87,7 @@
 
 .sessionRow[data-active="true"] {
   background: var(--surface);
-  box-shadow: inset 3px 0 0 var(--accent), 0 1px 2px rgb(20 28 26 / 0.06);
+  box-shadow: inset 3px 0 0 var(--accent), 0 2px 7px rgb(0 0 0 / 0.16);
 }
 
 .session {
@@ -215,8 +223,9 @@
 }
 
 .footer {
-  padding: 10px 12px calc(12px + env(safe-area-inset-bottom));
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line);
+  background: oklch(0.23 0.019 165);
 }
 
 .provider {

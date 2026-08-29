@@ -55,7 +55,8 @@ deployments.
     "websocket_events": true,
     "persistent_snapshots": true,
     "image_upload": true,
-    "image_analysis": false
+    "image_analysis": false,
+    "product_search": true
   },
   "recall": {
     "mode": "deterministic_fallback",
@@ -118,7 +119,10 @@ deployments.
 ```
 
 The additive `components` object is present on every readiness response. It is the observable
-configuration boundary for the self-hosted runtime and uses this shape:
+configuration boundary for the self-hosted runtime and uses this shape. `product_search` describes
+the OpenSearch product alias path, `embedding` describes the SentenceTransformer Query Tower, and
+`langfuse` describes the optional trace exporter; these are configuration observations until a task
+executes:
 
 ```json
 {
@@ -131,7 +135,11 @@ configuration boundary for the self-hosted runtime and uses this shape:
       "ebay": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."}
     },
     "redis": {"configured": false, "ready": false, "state": "disabled", "reason_code": "backend_disabled", "reason": "..."},
+    "postgres": {"configured": false, "ready": false, "state": "disabled", "reason_code": "backend_disabled", "reason": "..."},
     "opensearch": {"configured": false, "ready": false, "state": "unavailable", "reason_code": "not_configured", "reason": "..."},
+    "product_search": {"configured": true, "ready": false, "state": "configured", "reason_code": "configured_not_probed", "reason": "..."},
+    "embedding": {"configured": true, "ready": false, "state": "configured", "reason_code": "configured_not_probed", "reason": "..."},
+    "langfuse": {"configured": false, "ready": false, "state": "disabled", "reason_code": "not_configured", "reason": "..."},
     "faiss": {"configured": false, "ready": false, "state": "disabled", "reason_code": "backend_disabled", "reason": "..."},
     "query_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "ann_backend_disabled", "reason": "..."},
     "item_tower": {"configured": false, "ready": false, "state": "disabled", "reason_code": "ann_backend_disabled", "reason": "..."},
@@ -144,19 +152,23 @@ configuration boundary for the self-hosted runtime and uses this shape:
 
 Every component status has `configured`, `ready`, `state` (`ready`, `configured`, `degraded`,
 `unavailable`, or `disabled`), a stable `reason_code`, and a human-readable `reason`. Gateway,
-LLM, Redis, OpenSearch, and Query/Item tower configuration is intentionally not probed by readiness, so
+LLM, PostgreSQL, Redis, OpenSearch, and Query/Item tower configuration is intentionally not probed by readiness, so
 `state=configured` and `reason_code=configured_not_probed` are not network-health claims. The
 backend checks local storage writability. Actual provider and recall outcomes are reported by task
 events and terminal result provenance. A capability that is absent or disabled must never be
 represented as `ready`; clients should use `task_ready` to gate submission and `capabilities` to
 gate user-facing features.
 
-`status` is `ready`, `degraded`, or `not_ready`. Clients must use `task_ready`, not liveness or provider count, to enable task submission.
-The additive `recall` object reports configuration before a task runs. Its `configured` state is
-not a runtime health claim; terminal result provenance and `tool_end` carry the actual `ready`,
-`degraded`, or `unavailable` state for each channel. Missing optional recall configuration keeps
-the marketplace task runnable when the core runtime is ready, but readiness remains visibly
-degraded and lists the required action.
+`status` is `ready`, `degraded`, or `not_ready`. Missing optional Langfuse credentials and disabled
+legacy Faiss/Query/Item compatibility channels do not make the OpenSearch product ANN path
+unready. Clients must use `task_ready`, not liveness or provider count, to enable task submission.
+The additive `recall` object reports configuration before a task runs. In the OpenSearch product
+path, `opensearch` is the primary channel for both product ANN and category knowledge; the legacy
+Faiss/Query/Item channels are intentionally disabled compatibility channels and do not lower the
+readiness mode. Its `configured` state is not a runtime health claim; terminal result provenance
+and `tool_end` carry the actual `ready`, `degraded`, or `unavailable` state for each channel.
+When the OpenSearch product ANN request cannot use a query vector, the terminal result discloses
+the semantic fallback separately from the still-runnable task.
 
 The default `RECALL_ARCHITECTURE=dual` is an inference-only Query/Item architecture. Query and
 Item vectors are produced by externally hosted inference endpoints and are used only to select or
@@ -166,10 +178,68 @@ workflow. `TOWER_USER_ENDPOINT` is accepted only as a compatibility path for an 
 when `RECALL_ARCHITECTURE` is omitted; setting `RECALL_ARCHITECTURE=dual` always disables it and
 reports `dual_tower_architecture`.
 
-`RERANKER_ENDPOINT` is an optional inference-only adapter. It receives the query and typed
-candidates, and any timeout, invalid response, or provider failure fails open to the existing
-Query/Item or deterministic order. The reranker never creates Product Evidence or changes hard
-constraint, landed-cost, or final ranking decisions.
+`PRODUCT_CATALOG_BACKEND=faiss` is an explicit non-production Sandbox path for the ignored local
+historical catalog index under `PRODUCT_CATALOG_INDEX_DIR`. It returns `fixture` Product Evidence
+with a disclosed historical-catalog provider and does not make the public archive a live gateway.
+The current public catalog path uses Sandbox cost evidence because the archive has no current route,
+inventory, customs, or shipping quotes; production must keep this backend disabled.
+
+`PRODUCT_SEARCH_BACKEND=opensearch` enables the versioned OpenSearch product index referenced by
+`OPENSEARCH_PRODUCT_INDEX`. Amazon and eBay snapshot records are normalized into the same product
+document shape, while category knowledge remains in `OPENSEARCH_CATEGORY_INDEX`. When the query
+vector is available, product search sends one OpenSearch `hybrid` request with a BM25 `multi_match`
+branch and a Faiss HNSW `knn` branch. Platform, marketplace, price, category, condition, source, and
+active-state constraints are applied to both branches; the same clauses are nested inside the `knn`
+clause so OpenSearch 2.17 can apply efficient k-NN filtering during ANN traversal rather than
+post-filtering. `OPENSEARCH_PRODUCT_SEARCH_PIPELINE` normalizes and combines the two branch scores
+(the repository default weights BM25 at 0.35 and ANN at 0.65). The query vector is produced by the
+local or remote SentenceTransformer endpoint in `TOWER_QUERY_ENDPOINT`; product vectors and query
+vectors must use the same model, version, dimension, preprocessing, and normalization. When the
+endpoint is unavailable, the request degrades to a filtered BM25 clause and reports the semantic
+degradation.
+
+The repository's `scripts/fetch_ebay_browse_snapshot.py` is a bounded Browse API collector for
+deployments without Feed API access. It requires explicit keywords, writes a time-bounded runtime
+snapshot, and never creates an index during a customer request. `scripts/build_product_opensearch.py`
+bulk-indexes Amazon and eBay JSONL snapshots into a new concrete index and switches the read alias
+only after refresh succeeds. Snapshot provenance, `snapshot_at`, and `expires_at` remain part of
+the Product Evidence attributes; the current local policy assumes Amazon snapshot rows remain usable
+during research, so snapshot expiry is not a recall-time gate for product ANN retrieval. The
+collector sends `deliveryCountry:CN`, `deliveryPostalCode`, and `X-EBAY-C-ENDUSERCTX`; when the
+response includes `shippingOptions.shippingCost`, it preserves a `marketplace_estimate`
+`shipping_quote` and delivery window. `EBAY_SNAPSHOT_QUERY_FILE` plus `ebay-browse-catalog`
+refreshes a bounded multi-keyword catalog. If a query is outside the snapshot manifest, the eBay
+branch can call Browse live without mutating the index.
+
+`CUSTOMS_AUTO_LOOKUP=true` enables the optional official China Customs tariff baseline for a
+candidate only when `attributes.hs_code`, `attributes.country_of_origin`, and
+`CUSTOMS_IMPORT_REGIME=general_trade` are explicitly present. It queries the public tariff and
+VAT endpoints, checks an origin-country agreement rate when `CUSTOMS_RATE_TYPE=auto` or
+`agreement`, and obtains the separate PBOC monthly assessment rate for non-CNY goods. It never
+derives HS code or origin from a title, marketplace, or shipping country; missing classification
+or official rate evidence remains a structured landed-cost exclusion. `price_conversion` may use
+the ECB reference-rate adapter, but it is never reused as the customs valuation rate.
+
+Category knowledge applies a local deterministic ranker after OpenSearch coarse recall. It uses
+the shared SentenceTransformer query/card embeddings first, then category/summary lexical overlap
+and card confidence as bounded tie-break signals; it never changes Product Evidence or hard
+constraints. `RERANKER_ENDPOINT` remains an optional inference-only cross-encoder override. If it
+is absent or fails, the local ranker stays active rather than reporting `rerank_not_configured`.
+
+In the OpenSearch product path, category insight is resolved before marketplace search. The typed
+standard category, operator-owned query expansions, subtypes, and optional category IDs are added to
+the product-search text/filter plan; platform and budget constraints remain hard scalar filters.
+Legacy Faiss-compatible deployments retain their independent category/search scheduling because
+they do not consume these OpenSearch category hints.
+
+When `RERANKER_ENDPOINT` points to the repository's BGE service, category insight and the final
+`item_picker` use `BAAI/bge-reranker-v2-m3`. The first product-search stage remains the OpenSearch
+BM25 + ANN hybrid and does not call the cross-encoder. The service accepts `POST /score` with
+`query` and a bounded `candidates` list (candidate strings or product objects) and returns one
+sigmoid-normalized score per candidate. The cross-encoder does not need to share the ANN embedding
+space; it receives query/text pairs only. Model loading is inference-only and lazy, and failures
+fall back to the local category ranker or deterministic item-picker order without bypassing hard
+constraints.
 
 ## Task lifecycle
 
@@ -314,6 +384,17 @@ tasks.
 
 `tool_end.data.outcome` is `success`, `degraded`, or `failure`. A failed tool emits `tool_end`
 before the task-level `error`. `fork.data` has this shape:
+
+When `LANGFUSE_TRACING_ENABLED=true` and both Langfuse credentials are configured, the same
+workflow also emits a Langfuse agent trace. Its child observations cover the LLM advisory, each
+typed tool, parallel fork, report generation, and final snapshot persistence. Each observation is
+started before the operation and ended after it, with `duration_ms` and a status in metadata/output.
+The LLM observation is typed as `generation` and includes the configured model name plus
+`input_tokens`, `output_tokens`, `total_tokens`, and available cache-read token counts;
+the root trace also carries the cumulative request token budget and usage.
+the local `tool_start`/`tool_end` events remain the source of truth for the API client. Missing
+Langfuse credentials never block a task. Without them, remote export is disabled but local timing
+remains available; the condition is reported by `components.langfuse`.
 
 ```json
 {
@@ -637,12 +718,13 @@ Stable task error codes include `providers_unavailable`, `fx_rates_unavailable`,
 `unsupported_capability`, `task_timeout`, `task_failed`, and `task_interrupted`.
 `unsupported_capability` is emitted before marketplace search when the requested destination is
 not China mainland; China mainland is currently the only supported landed-cost destination.
-`fx_rates_unavailable` means no candidate can be normalized to CNY because every non-CNY offer is
-missing a valid, unexpired offer-level `price_conversion` quote. If at least one candidate can be
-converted, candidates with missing or invalid quote evidence are excluded and `calculation_notice`
-discloses that partial exclusion. The production calculation has no process-wide FX table or
-built-in live reference rate; quote provider, reference, observation time, expiry, rate type, and
-markup status remain attached to each offer.
+`fx_rates_unavailable` means no candidate can be normalized to CNY after the comparison path has
+tried the available offer-level quote and the current ECB reference-rate adapter. Before
+`price_compare`, the main workflow batches missing foreign currencies and attaches a current
+reference quote to snapshot offers, so a historical product price can still participate in a
+research comparison. If the reference provider is unavailable, candidates with missing or invalid
+quote evidence are excluded and `calculation_notice` discloses that partial exclusion. The
+comparison rate is not a payment guarantee or a China Customs assessment rate.
 
 `POST /api/task/{thread_id}/cancel` is idempotent for known terminal tasks and accepts both
 `running` and `awaiting_clarification` tasks. An awaiting task records `task_cancelled` without
@@ -912,9 +994,12 @@ is nullable and uses the stable provider failure codes above.
 }
 ```
 
-`mode` is `hybrid` only when all four configured channels participated successfully,
-`partial_hybrid` when at least one channel participated and another was degraded or unavailable,
-and `deterministic_fallback` when no optional channel could safely contribute. Each channel is
+In the legacy Faiss architecture, `mode` is `hybrid` only when all four configured channels
+participated successfully. In the OpenSearch product architecture, `mode=hybrid` means the
+configured OpenSearch product ANN and category channel participated successfully; the disabled
+legacy channels are not required. `partial_hybrid` means an active channel was only partially
+available, and `deterministic_fallback` means no active semantic channel could safely contribute.
+Each channel is
 reported independently with `configured`, `ready`, `degraded`, or `unavailable` state and a stable
 `reason_code`; `participated` means that channel affected the current candidate selection or
 ordering. The canonical channel order is OpenSearch, query tower, item tower, then Faiss.
@@ -931,9 +1016,14 @@ the raw embedding is never persisted. `no_saved_preference`, `not_configured`,
 `dimension_mismatch`, and `item_tower_unavailable` are disclosed reason-code examples. Any such
 degradation falls back to the existing recall path without changing Product Evidence.
 
-OpenSearch contributes category knowledge and semantic context only. Query and item embeddings
-and ANN scores can select or order candidates only from the marketplace `Product Evidence` already
-returned by the parallel gateway branches. The query/item cosine is a deterministic secondary
+OpenSearch contributes category knowledge and product ANN recall. The category and product indices
+use the same configured multilingual SentenceTransformer by default (384 dimensions), so the
+query vector is valid for both OpenSearch k-NN fields. The product search tool records whether
+that vector was actually used, and the main workflow passes this typed fact into recall provenance.
+OpenSearch ANN scores can select or order candidates only from the marketplace `Product Evidence`
+already returned by the parallel search branches. In the legacy architecture, query and item
+embeddings and ANN scores can select or order candidates only from that same Product Evidence; the
+query/item cosine is a deterministic secondary
 recall signal after the ANN score, including tie-breaking when ANN scores are equal. Recall never
 creates an offer, fills a missing product fact, or changes `Hard Constraint`, `Identity Evidence`,
 `Landed Cost`, or the final deterministic ranking boundary. The legacy user-tower signal, when
@@ -1079,14 +1169,13 @@ calculated price, shipping, import-tax, and ranking fields:
 ```
 
 `price` and `currency` are the original gateway or fixture amount and currency. `price_cny` is a
-separate calculated field. Every non-CNY live offer must carry `price_conversion`, a time-bound
-provider quote whose `source_currency` matches the offer, `target_currency=CNY`, and which records
-rate type, markup status, provider/reference, observation time, and expiry. CNY offers require no
-conversion object. Live quotes without a validity window, quotes expired at calculation time, and
-currency-mismatched quotes never participate in CNY comparison. `price_cny` is calculated with
-decimal `ROUND_HALF_UP` to CNY cents; the aggregate `exchange_rate` reports the providers and latest
-observation without erasing per-offer evidence. This comparison quote is not a payment guarantee
-or a China Customs assessment rate.
+separate calculated field. CNY offers require no conversion object. For a non-CNY offer, the main
+workflow first preserves a matching provider-supplied `price_conversion`; when it is absent or
+expired, it requests a current ECB reference quote for that currency and attaches the evidence to
+the comparison result. The quote records source currency, rate type, markup status, provider/reference,
+observation time, and expiry. `price_cny` is calculated with decimal `ROUND_HALF_UP` to CNY cents;
+the aggregate `exchange_rate` reports the providers and latest observation without erasing per-offer
+evidence. This comparison quote is not a payment guarantee or a China Customs assessment rate.
 
 `shipping_quote` is the data-channel's route- and service-specific carrier or marketplace quote to
 China mainland. It preserves original currency/total, optional base charge, surcharge and discount,
@@ -1094,6 +1183,14 @@ actual/dimensional/chargeable weights, package dimensions/divisor, service, ETA 
 provider/reference, observation time, and expiry. When itemized, `total_amount` must reconcile with
 `base_amount + surcharge_amount - discount_amount`; chargeable weight cannot be lower than a known
 actual or dimensional weight. Non-CNY shipping requires its own matching `currency_conversion`.
+
+When a product has a valid price and currency conversion but no usable China shipping quote or
+customs evidence, the main workflow keeps it as a `product_price_only` recommendation instead of
+returning zero recommendations. Its `landed_cny` equals the normalized product price only,
+`shipping_cny` is an internal zero placeholder, `eta_days` is not a delivery promise, and
+`cost_evidence_gaps` lists `shipping_quote`, `customs_evidence`, or `customs_valuation`. The UI and
+customer reports label this amount as a reference product price; it must never be presented as a
+final landed cost.
 Production does not infer weight or apply platform shipping brackets. Missing, malformed, or expired
 quotes are recorded in `shipping_exclusions` and do not enter landed-cost ranking. Ranking uses the
 conservative `eta_max_days` and decimal CNY-cent rounding.
@@ -1103,7 +1200,8 @@ compatibility; `offer_id` is the marketplace's actual offer identifier and remai
 gateway does not supply one. A generated `item_id` is never represented as offer Identity Evidence.
 `marketplace` is the normalized contract name for the existing `platform` field and must equal it.
 
-`customs` is nullable Product Evidence supplied by the data-provider channel; it is never inferred
+`customs` is nullable Product Evidence supplied by the data-provider channel or the explicit
+official customs enrichment path; it is never inferred
 from `platform`, title, price, or the LLM. A row may remain useful Product Evidence when `customs`
 is absent or invalid, but it cannot enter landed-cost calculation or ranking. The provider must
 classify the goods and preserve the applicable destination, HS/tariff code, country of origin,
@@ -1238,9 +1336,11 @@ Each Recommendation contains `constraint_evaluations`. Every evaluation has the 
 Only candidates whose evaluations are all `satisfied` can appear in `recommendations`; eligibility
 is evaluated before ranking. Each Recommendation also contains a machine-readable
 `score_breakdown` for the current `ranking_profile`, including landed-cost, preference-match,
-evidence-quality, and delivery-time scores. `reason` is deterministic and may explain only Product
-Evidence plus disclosed computed landed-cost and estimate fields; the LLM cannot create prices,
-rates, evidence, eligibility, or ranking outcomes.
+evidence-quality, delivery-time, and optional `semantic_relevance_score` values. The semantic score
+is produced by the inference-only BGE reranker during the final `item_picker` stage; it is never
+used to bypass hard constraints. `reason` is deterministic and may explain only Product Evidence
+plus disclosed computed landed-cost and estimate fields; the LLM cannot create prices, rates,
+evidence, eligibility, or ranking outcomes.
 
 `ranking_profile.priority_order` is the request's effective order across `landed_cost`,
 `preference_match`, `evidence_quality`, and `delivery_time`. When the request does not express a
@@ -1322,6 +1422,10 @@ this never starts shopping research.
 }
 ```
 
+`backend.requested_backend` and `backend.backend` are `memory`, `redis`, or `postgres`. The
+PostgreSQL option is selected with `STORE_BACKEND=postgres` and `STORE_POSTGRES_URL`; its JSONB
+record has the same typed preference fields as the Redis and memory implementations.
+
 `PUT /api/preferences/{user_id}` and `POST /api/preferences/{user_id}/commands` accept the same explicit
 `MemoryCommand` body:
 
@@ -1349,10 +1453,12 @@ non-mutating. It becomes durable only after the customer explicitly confirms it 
 the `MemoryCommand` above. The current task continues to use its immutable resolved intent.
 
 `DELETE /api/preferences/{user_id}` removes the whole record. `memory` storage is process-local and
-marked `local_evaluation`, never durable. `redis` is the durable backend and uses
-`PREFERENCE_TTL_SECONDS`. If Redis is unavailable outside production, the response and readiness
-contract report `backend=memory`, `durability=local_evaluation`, and `fallback_reason`; production
-fails closed instead of pretending the fallback is durable.
+marked `local_evaluation`, never durable. `redis` and `postgres` are durable backends and use
+`PREFERENCE_TTL_SECONDS`; PostgreSQL stores the structured record in a JSONB column and is the
+recommended authoritative store for long-term preferences. If a durable backend is unavailable
+outside production, the response and readiness contract report `backend=memory`,
+`durability=local_evaluation`, and `fallback_reason`; production fails closed instead of pretending
+the fallback is durable.
 
 The delete response is also explicit about the backend used:
 

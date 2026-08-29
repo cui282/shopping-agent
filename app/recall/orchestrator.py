@@ -107,11 +107,16 @@ def _configured_report(
 
 def _configured_channels(settings: Settings) -> dict[RecallChannelName, RecallChannelReport]:
     ann_enabled = settings.ann_backend == "faiss"
+    opensearch_reason = (
+        "OpenSearch product ANN and category knowledge are configured; runtime health is checked during research"
+        if settings.product_search_backend == "opensearch"
+        else "OpenSearch category knowledge is configured; runtime health is checked during research"
+    )
     return {
         "opensearch": _configured_report(
             "opensearch",
             bool(settings.opensearch_url),
-            reason="OpenSearch category knowledge is configured; runtime health is checked during research",
+            reason=opensearch_reason,
         ),
         "query_tower": _configured_report(
             "query_tower",
@@ -270,7 +275,22 @@ def _personalization_report(
 
 def _mode_for_channels(
     channels: dict[RecallChannelName, RecallChannelReport],
+    settings: Settings,
 ) -> str:
+    # OpenSearch owns the current product ANN path. The legacy Query/Item/Faiss
+    # channels are intentionally disabled in this mode and must not make a ready
+    # primary path appear degraded.
+    if settings.product_search_backend == "opensearch":
+        primary = channels["opensearch"]
+        if (
+            primary.configured
+            and settings.product_search_marketplaces
+            and settings.tower_query_endpoint
+        ):
+            return "hybrid"
+        if primary.configured:
+            return "partial_hybrid"
+        return "deterministic_fallback"
     if all(report.state == "configured" and report.configured for report in channels.values()):
         return "hybrid"
     if any(report.configured for report in channels.values()):
@@ -284,7 +304,7 @@ def recall_readiness(settings: Settings | None = None) -> RecallReadiness:
     effective = settings or get_settings()
     channels = _configured_channels(effective)
     return RecallReadiness(
-        mode=_mode_for_channels(channels),  # type: ignore[arg-type]
+        mode=_mode_for_channels(channels, effective),  # type: ignore[arg-type]
         channels=channels,
         required_actions=list(effective.recall_required_actions),
         personalization=_personalization_report(effective),
@@ -706,8 +726,15 @@ class RecallOrchestrator:
         category_insight: CategoryInsightOutput | None,
         top_k: int | None = None,
         user_input: UserTowerInput | None = None,
+        product_ann_used: bool = False,
+        product_ann_complete: bool | None = None,
+        product_ann_failure_reason: str | None = None,
     ) -> RecallResult:
-        """Select or order only candidates already supplied as Product Evidence."""
+        """Select or order Product Evidence without hiding the active ANN backend.
+
+        ``product_ann_complete`` is supplied by the OpenSearch product-search path.  ``None``
+        keeps the legacy Faiss adapter behavior used by older callers and focused tests.
+        """
 
         settings = get_settings()
         candidate_pool = list(candidates)
@@ -719,8 +746,58 @@ class RecallOrchestrator:
         personalization = _personalization_report(settings, user_input)
 
         opensearch = channels["opensearch"]
+        category_ok = (
+            category_insight is not None
+            and category_insight.provider.source == "live"
+            and category_insight.provider.status == "ok"
+        )
         if opensearch.configured:
-            if category_insight is not None and category_insight.provider.source == "live":
+            if product_ann_complete is not None:
+                if product_ann_used and product_ann_complete and category_ok:
+                    _set_channel(
+                        channels,
+                        "opensearch",
+                        state="ready",
+                        reason_code="ready",
+                        reason="OpenSearch product ANN and category knowledge participated",
+                        participated=True,
+                    )
+                elif product_ann_used and product_ann_complete:
+                    _set_channel(
+                        channels,
+                        "opensearch",
+                        state="degraded",
+                        reason_code="category_fallback",
+                        reason=(
+                            "OpenSearch product ANN participated, but category knowledge used a "
+                            "disclosed fallback"
+                        ),
+                        participated=True,
+                    )
+                elif product_ann_used:
+                    _set_channel(
+                        channels,
+                        "opensearch",
+                        state="degraded",
+                        reason_code="product_ann_partial",
+                        reason=(
+                            "OpenSearch product ANN returned only a partial platform result; "
+                            "the remaining candidates used another path"
+                        ),
+                        participated=True,
+                    )
+                else:
+                    _set_channel(
+                        channels,
+                        "opensearch",
+                        state="degraded",
+                        reason_code="product_ann_unavailable",
+                        reason=(
+                            "OpenSearch product ANN was not used; "
+                            f"{product_ann_failure_reason or 'a non-semantic product path was used'}"
+                        ),
+                    )
+            elif category_insight is not None and category_insight.provider.source == "live":
                 _set_channel(
                     channels,
                     "opensearch",
@@ -814,7 +891,9 @@ class RecallOrchestrator:
                     "reason": "ANN backend is disabled; existing deterministic recall path remains active",
                 }
             )
-        if settings.reranker_endpoint and not rerank_scores:
+        # OpenSearch hybrid already combines BM25 and ANN for the first-stage product
+        # recall. The BGE cross-encoder is reserved for category cards and item_picker.
+        if product_ann_complete is None and settings.reranker_endpoint and not rerank_scores:
             rerank_scores = await self._rerank_scores(query, candidate_pool, settings)
         selected, used_channels, selection_failure = self._select(
             candidate_pool,
@@ -840,24 +919,32 @@ class RecallOrchestrator:
             if report.state in {"ready", "degraded"}:
                 channels[name] = report.model_copy(update={"participated": True})
         participating = [name for name, report in channels.items() if report.participated]
+        effective_channels = (
+            {"opensearch": channels["opensearch"]} if product_ann_complete is not None else channels
+        )
         all_ready = all(
-            channels[name].state == "ready" and channels[name].participated for name in channels
+            report.state == "ready" and report.participated
+            for report in effective_channels.values()
         )
         if all_ready:
             mode = "hybrid"
-        elif participating:
+        elif any(report.participated for report in effective_channels.values()):
             mode = "partial_hybrid"
         else:
             mode = "deterministic_fallback"
         fallback_reason = None
         if mode == "deterministic_fallback":
             fallback_reason = (
-                f"faiss_{ann_failure}" if ann_failure else "optional_recall_unavailable"
+                "product_ann_unavailable"
+                if product_ann_complete is not None
+                else f"faiss_{ann_failure}"
+                if ann_failure
+                else "optional_recall_unavailable"
             )
         elif mode == "partial_hybrid":
             failures = [
                 f"{name}_{report.reason_code}"
-                for name, report in channels.items()
+                for name, report in effective_channels.items()
                 if report.state in {"degraded", "unavailable"}
             ]
             fallback_reason = failures[0] if failures else "partial_channel_failure"

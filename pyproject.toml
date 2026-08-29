@@ -4,11 +4,13 @@ version = "0.1.0"
 description = "Cross-platform conversational shopping agent"
 requires-python = ">=3.10"
 dependencies = [
+  "asyncpg>=0.29,<1",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
   "langchain>=0.3,<2",
   "langchain-openai>=0.3,<2",
   "langgraph>=0.2,<2",
+  "langfuse>=3.7,<4",
   "pydantic>=2.8,<3",
   "python-dotenv>=1,<2",
   "python-multipart>=0.0.9,<1",
@@ -22,6 +24,10 @@ production = [
   "faiss-cpu>=1.8,<2",
   "opensearch-py>=2.6,<4",
   "redis>=5,<7",
+]
+index = [
+  "faiss-cpu>=1.8,<2",
+  "sentence-transformers>=3,<4",
 ]
 test = [
   "httpx2>=2.7,<3",

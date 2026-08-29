@@ -10,6 +10,8 @@ AgentMode = Literal["auto", "llm", "rules"]
 RuntimeStatus = Literal["ready", "degraded", "not_ready"]
 AnnBackend = Literal["disabled", "faiss"]
 RecallArchitecture = Literal["dual", "legacy_three"]
+ProductCatalogBackend = Literal["disabled", "faiss"]
+ProductSearchBackend = Literal["disabled", "opensearch"]
 
 MARKETPLACES = ("amazon", "shopee", "aliexpress", "ebay")
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -18,6 +20,18 @@ _FALSE_VALUES = {"0", "false", "no", "off"}
 
 class ConfigurationError(RuntimeError):
     pass
+
+
+def _marketplace_names(raw: str) -> tuple[str, ...]:
+    values = tuple(
+        dict.fromkeys(value.strip().lower() for value in raw.split(",") if value.strip())
+    )
+    invalid = sorted(set(values) - set(MARKETPLACES))
+    if invalid:
+        raise ConfigurationError(
+            "PRODUCT_SEARCH_MARKETPLACES contains unsupported marketplaces: " + ", ".join(invalid)
+        )
+    return tuple(name for name in MARKETPLACES if name in values)
 
 
 def _boolean(name: str, default: bool) -> bool:
@@ -139,7 +153,16 @@ class Settings:
     allow_fixture_fallback: bool
     developer_diagnostic_mode: bool
     allow_rules_fallback: bool
-    store_backend: Literal["memory", "redis"]
+    store_backend: Literal["memory", "redis", "postgres"]
+    store_postgres_url: str
+    product_catalog_backend: ProductCatalogBackend
+    product_catalog_index_dir: str
+    product_search_backend: ProductSearchBackend
+    product_search_marketplaces: tuple[str, ...]
+    product_search_allow_historical: bool
+    opensearch_product_index: str
+    opensearch_product_search_pipeline: str
+    product_search_embedding_dimension: int
     provider_timeout_seconds: float
     task_timeout_seconds: float
     max_concurrent_tasks: int
@@ -221,7 +244,35 @@ class Settings:
             allow_fixture_fallback=_boolean("ALLOW_FIXTURE_FALLBACK", False),
             developer_diagnostic_mode=_boolean("DEVELOPER_DIAGNOSTIC_MODE", False),
             allow_rules_fallback=_boolean("ALLOW_RULES_FALLBACK", True),
-            store_backend=_choice("STORE_BACKEND", "memory", {"memory", "redis"}),  # type: ignore[arg-type]
+            store_backend=_choice("STORE_BACKEND", "memory", {"memory", "redis", "postgres"}),  # type: ignore[arg-type]
+            store_postgres_url=os.getenv(
+                "STORE_POSTGRES_URL",
+                "postgresql://shopping_agent:shopping_agent_dev@localhost:5432/shopping_agent",
+            ).strip(),
+            product_catalog_backend=_choice(
+                "PRODUCT_CATALOG_BACKEND", "disabled", {"disabled", "faiss"}
+            ),  # type: ignore[arg-type]
+            product_catalog_index_dir=os.getenv(
+                "PRODUCT_CATALOG_INDEX_DIR", "./data/product_index/electronics-hash"
+            ).strip(),
+            product_search_backend=_choice(
+                "PRODUCT_SEARCH_BACKEND", "disabled", {"disabled", "opensearch"}
+            ),  # type: ignore[arg-type]
+            product_search_marketplaces=_marketplace_names(
+                os.getenv("PRODUCT_SEARCH_MARKETPLACES", "amazon,ebay")
+            ),
+            product_search_allow_historical=_boolean(
+                "PRODUCT_SEARCH_ALLOW_HISTORICAL", app_env != "production"
+            ),
+            opensearch_product_index=os.getenv(
+                "OPENSEARCH_PRODUCT_INDEX", "shopping_agent_products"
+            ).strip(),
+            opensearch_product_search_pipeline=os.getenv(
+                "OPENSEARCH_PRODUCT_SEARCH_PIPELINE", "shopping-agent-product-hybrid-pipeline"
+            ).strip(),
+            product_search_embedding_dimension=_integer(
+                "PRODUCT_SEARCH_EMBEDDING_DIMENSION", 384, 1
+            ),
             provider_timeout_seconds=_number("PROVIDER_TIMEOUT_SECONDS", 15, 1),
             task_timeout_seconds=_number("TASK_TIMEOUT_SECONDS", 180, 10),
             max_concurrent_tasks=_integer("MAX_CONCURRENT_TASKS", 8, 1),
@@ -316,7 +367,10 @@ class Settings:
     def enabled_marketplaces(self) -> tuple[str, ...]:
         if self.sandbox_mode:
             return MARKETPLACES
-        return self.configured_marketplaces
+        enabled = set(self.configured_marketplaces)
+        if self.product_search_backend == "opensearch":
+            enabled.update(self.product_search_marketplaces)
+        return tuple(name for name in MARKETPLACES if name in enabled)
 
     @property
     def fixture_fallback_enabled(self) -> bool:
@@ -329,6 +383,15 @@ class Settings:
 
     @property
     def recall_configuration_complete(self) -> bool:
+        if self.product_search_backend == "opensearch":
+            # OpenSearch owns the current product ANN path. The legacy Faiss/Query/Item
+            # dual-tower services are optional compatibility channels in this mode.
+            return bool(
+                self.opensearch_url
+                and self.opensearch_product_index
+                and self.product_search_marketplaces
+                and self.tower_query_endpoint
+            )
         return bool(
             self.opensearch_url
             and self.ann_backend == "faiss"
@@ -340,6 +403,12 @@ class Settings:
     @property
     def recall_required_actions(self) -> tuple[str, ...]:
         actions: list[str] = []
+        if self.product_search_backend == "opensearch":
+            if not self.opensearch_url:
+                actions.append("Configure OPENSEARCH_URL for product and category recall")
+            if not self.tower_query_endpoint:
+                actions.append("Configure TOWER_QUERY_ENDPOINT for product ANN recall")
+            return tuple(actions)
         if not self.opensearch_url:
             actions.append("Configure OPENSEARCH_URL for category knowledge recall")
         if self.ann_backend == "disabled":
@@ -354,7 +423,12 @@ class Settings:
 
     @property
     def data_mode(self) -> Literal["live", "sandbox", "mixed"]:
-        if self.fixture_fallback_enabled:
+        if self.fixture_fallback_enabled or (
+            self.product_search_allow_historical
+            and self.product_search_backend == "opensearch"
+            and self.app_env != "production"
+            and not self.sandbox_mode
+        ):
             return "mixed"
         return "sandbox" if self.sandbox_mode else "live"
 
@@ -367,9 +441,13 @@ class Settings:
             or self.allow_fixture_fallback
             or self.developer_diagnostic_mode
             or self.store_backend == "memory"
+            or self.product_catalog_backend == "faiss"
+            or self.product_search_allow_historical
             or not self.auth_enabled
             or not self.rate_limit_enabled
         ):
+            return False
+        if self.product_search_backend == "opensearch" and not self.opensearch_url:
             return False
         return bool(self.enabled_marketplaces)
 
@@ -391,6 +469,8 @@ class Settings:
                 "Configure at least one data-provider marketplace channel endpoint/credential pair, "
                 "or explicitly enable SANDBOX_MODE for local testing"
             )
+        if self.product_search_backend == "opensearch" and not self.opensearch_url:
+            actions.append("Configure OPENSEARCH_URL for product search")
         for marketplace in self.marketplaces:
             if marketplace.state == "partial":
                 actions.append(
@@ -400,7 +480,13 @@ class Settings:
                     f"{marketplace.name.upper()}_API_KEY are supported)"
                 )
         if self.app_env == "production" and self.store_backend == "memory":
-            actions.append("Use STORE_BACKEND=redis for persistent production preferences")
+            actions.append(
+                "Use STORE_BACKEND=redis or STORE_BACKEND=postgres for persistent production preferences"
+            )
+        if self.app_env == "production" and self.product_catalog_backend == "faiss":
+            actions.append("Disable PRODUCT_CATALOG_BACKEND=faiss in production")
+        if self.app_env == "production" and self.product_search_allow_historical:
+            actions.append("Disable PRODUCT_SEARCH_ALLOW_HISTORICAL in production")
         if self.app_env == "production" and not self.auth_enabled:
             actions.append(
                 "Enable AUTH_ENABLED and configure a trusted identity gateway in production"
@@ -413,10 +499,15 @@ class Settings:
     def status(self) -> RuntimeStatus:
         if not self.task_ready:
             return "not_ready"
+        marketplaces_complete = (
+            bool(self.product_search_marketplaces)
+            if self.product_search_backend == "opensearch"
+            else len(self.configured_marketplaces) >= len(MARKETPLACES)
+        )
         if (
             self.sandbox_mode
             or self.fixture_fallback_enabled
-            or len(self.configured_marketplaces) < len(MARKETPLACES)
+            or not marketplaces_complete
             or (self.app_env == "production" and self.store_backend == "memory")
             or not self.recall_configuration_complete
         ):
