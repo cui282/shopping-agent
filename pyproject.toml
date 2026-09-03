@@ -27,7 +27,7 @@ production = [
 ]
 index = [
   "faiss-cpu>=1.8,<2",
-  "sentence-transformers>=3,<4",
+  "sentence-transformers>=3,<7",
 ]
 test = [
   "httpx2>=2.7,<3",
